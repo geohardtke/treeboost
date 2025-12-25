@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use treeboost::booster::{GBDTConfig, GBDTModel};
 use treeboost::dataset::DatasetLoader;
 use treeboost::serialize::{load_model, save_model};
+use treeboost::tree::MonotonicConstraint;
 use treeboost::Result;
 
 #[derive(Parser)]
@@ -117,6 +118,16 @@ enum Commands {
         /// Disable all performance optimizations
         #[arg(long)]
         no_optimizations: bool,
+
+        /// Monotonic constraints (comma-separated: +1=increasing, -1=decreasing, 0=none)
+        /// Example: "--monotonic +1,-1,0" for 3 features
+        #[arg(long)]
+        monotonic: Option<String>,
+
+        /// Feature interaction groups (semicolon-separated groups of comma-separated indices)
+        /// Example: "--interactions 0,1,2;3,4" means features 0-2 can interact, features 3-4 can interact
+        #[arg(long)]
+        interactions: Option<String>,
     },
 
     /// Make predictions using a trained model
@@ -187,6 +198,8 @@ fn main() -> Result<()> {
             no_reorder,
             no_pack,
             no_optimizations,
+            monotonic,
+            interactions,
         } => {
             println!("Loading data from {:?}...", data);
             let loader = DatasetLoader::new(num_bins);
@@ -237,6 +250,53 @@ fn main() -> Result<()> {
                 config = config.with_conformal(calib_ratio, conformal_quantile);
                 println!("Conformal prediction enabled: {:.1}% calibration, {:.1}% coverage",
                          calib_ratio * 100.0, conformal_quantile * 100.0);
+            }
+
+            // Parse and apply monotonic constraints
+            if let Some(ref mono_str) = monotonic {
+                let constraints: Vec<MonotonicConstraint> = mono_str
+                    .split(',')
+                    .map(|s| {
+                        let s = s.trim();
+                        match s {
+                            "+1" | "1" => MonotonicConstraint::Increasing,
+                            "-1" => MonotonicConstraint::Decreasing,
+                            "0" | "" => MonotonicConstraint::None,
+                            _ => {
+                                eprintln!("Warning: Unknown monotonic value '{}', using None", s);
+                                MonotonicConstraint::None
+                            }
+                        }
+                    })
+                    .collect();
+
+                let num_constrained = constraints.iter()
+                    .filter(|c| **c != MonotonicConstraint::None)
+                    .count();
+                if num_constrained > 0 {
+                    println!("Monotonic constraints: {} features constrained", num_constrained);
+                }
+                config = config.with_monotonic_constraints(constraints);
+            }
+
+            // Parse and apply interaction constraints
+            if let Some(ref interact_str) = interactions {
+                let groups: Vec<Vec<usize>> = interact_str
+                    .split(';')
+                    .filter(|g| !g.trim().is_empty())
+                    .map(|group| {
+                        group
+                            .split(',')
+                            .filter_map(|s| s.trim().parse::<usize>().ok())
+                            .collect()
+                    })
+                    .filter(|g: &Vec<usize>| !g.is_empty())
+                    .collect();
+
+                if !groups.is_empty() {
+                    println!("Interaction constraints: {} groups", groups.len());
+                    config = config.with_interaction_groups(groups);
+                }
             }
 
             // Apply optimization opt-outs

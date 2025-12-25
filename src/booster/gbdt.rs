@@ -2,7 +2,7 @@
 
 use crate::booster::GBDTConfig;
 use crate::dataset::{BinnedDataset, ColumnPermutation, FeatureInfo};
-use crate::tree::{Tree, TreeGrower};
+use crate::tree::{InteractionConstraints, Tree, TreeGrower};
 use crate::{Result, TreeBoostError};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -53,6 +53,16 @@ impl GBDTModel {
         let mut gradients = vec![0.0f32; dataset.num_rows()];
         let mut hessians = vec![0.0f32; dataset.num_rows()];
 
+        // Build interaction constraints from groups
+        let interaction_constraints = if config.interaction_groups.is_empty() {
+            InteractionConstraints::new()
+        } else {
+            InteractionConstraints::from_groups(
+                config.interaction_groups.clone(),
+                dataset.num_features(),
+            )
+        };
+
         // Create tree grower
         let tree_grower = TreeGrower::new()
             .with_max_depth(config.max_depth)
@@ -63,7 +73,9 @@ impl GBDTModel {
             .with_entropy_weight(config.entropy_weight)
             .with_min_gain(config.min_gain)
             .with_learning_rate(config.learning_rate)
-            .with_colsample(config.colsample);
+            .with_colsample(config.colsample)
+            .with_monotonic_constraints(config.monotonic_constraints.clone())
+            .with_interaction_constraints(interaction_constraints);
 
         let mut trees = Vec::with_capacity(config.num_rounds);
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
@@ -584,5 +596,51 @@ mod tests {
         // Importances should sum to ~1 (normalized)
         let total: f32 = importances.iter().sum();
         assert!((total - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_train_with_monotonic_constraints() {
+        use crate::tree::MonotonicConstraint;
+
+        let dataset = create_regression_dataset(500, 0.1);
+
+        // Set monotonic increasing constraint on feature 0
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(4)
+            .with_monotonic_constraints(vec![
+                MonotonicConstraint::Increasing,
+                MonotonicConstraint::None,
+                MonotonicConstraint::None,
+            ]);
+
+        let model = GBDTModel::train(&dataset, config).unwrap();
+
+        // Model should train successfully with constraints
+        assert!(model.num_trees() > 0);
+
+        // Predictions should still work
+        let predictions = model.predict(&dataset);
+        assert_eq!(predictions.len(), 500);
+    }
+
+    #[test]
+    fn test_train_with_interaction_constraints() {
+        let dataset = create_regression_dataset(500, 0.1);
+
+        // Features 0, 1 can interact; feature 2 is unconstrained
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(4)
+            .with_interaction_groups(vec![vec![0, 1]]);
+
+        let model = GBDTModel::train(&dataset, config).unwrap();
+
+        // Model should train successfully with constraints
+        assert!(model.num_trees() > 0);
+
+        // Predictions should still work
+        let predictions = model.predict(&dataset);
+        assert_eq!(predictions.len(), 500);
     }
 }

@@ -2,7 +2,7 @@
 
 use crate::dataset::BinnedDataset;
 use crate::histogram::{HistogramBuilder, NodeHistograms};
-use crate::tree::{Node, SplitFinder, SplitInfo, Tree};
+use crate::tree::{InteractionConstraints, MonotonicConstraint, Node, SplitFinder, SplitInfo, Tree};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use std::cmp::Ordering;
@@ -25,6 +25,8 @@ struct SplitCandidate {
     /// Hessian sum (for debugging)
     #[allow(dead_code)]
     sum_hessians: f32,
+    /// Features used in ancestors (for interaction constraints)
+    ancestor_features: Vec<usize>,
 }
 
 impl PartialEq for SplitCandidate {
@@ -82,6 +84,10 @@ pub struct TreeGrower {
     learning_rate: f32,
     /// Column subsampling ratio (0.0-1.0, 1.0 = use all features)
     colsample: f32,
+    /// Monotonic constraints per feature
+    monotonic_constraints: Vec<MonotonicConstraint>,
+    /// Feature interaction constraints
+    interaction_constraints: InteractionConstraints,
 }
 
 impl Default for TreeGrower {
@@ -96,6 +102,8 @@ impl Default for TreeGrower {
             min_gain: 0.0,
             learning_rate: 0.1,
             colsample: 1.0, // Use all features by default
+            monotonic_constraints: Vec::new(),
+            interaction_constraints: InteractionConstraints::new(),
         }
     }
 }
@@ -150,6 +158,24 @@ impl TreeGrower {
         self
     }
 
+    /// Set monotonic constraints for features
+    ///
+    /// The vector should have one entry per feature. Features beyond the
+    /// vector length are treated as unconstrained.
+    pub fn with_monotonic_constraints(mut self, constraints: Vec<MonotonicConstraint>) -> Self {
+        self.monotonic_constraints = constraints;
+        self
+    }
+
+    /// Set feature interaction constraints
+    ///
+    /// Features in the same group can interact (appear together in a tree path).
+    /// Features in different groups cannot be used together.
+    pub fn with_interaction_constraints(mut self, constraints: InteractionConstraints) -> Self {
+        self.interaction_constraints = constraints;
+        self
+    }
+
     /// Create a split finder with current configuration
     fn create_split_finder(&self) -> SplitFinder {
         SplitFinder::new()
@@ -158,6 +184,7 @@ impl TreeGrower {
             .with_min_hessian_leaf(self.min_hessian_leaf)
             .with_entropy_weight(self.entropy_weight)
             .with_min_gain(self.min_gain)
+            .with_monotonic_constraints(self.monotonic_constraints.clone())
     }
 
     /// Grow a tree using Best-First (Leaf-wise) strategy
@@ -231,13 +258,20 @@ impl TreeGrower {
         let all_rows: Vec<usize> = row_indices.to_vec();
         let root_histograms = histogram_builder.build(dataset, &all_rows, gradients, hessians);
 
-        // Find best split for root (with column subsampling if enabled)
+        // Compute effective feature mask for root (no ancestors)
+        let root_feature_mask = self.compute_effective_feature_mask(
+            &[],
+            feature_mask.as_deref(),
+            num_features,
+        );
+
+        // Find best split for root
         let root_split = split_finder.find_best_split_with_features(
             &root_histograms,
             total_gradient,
             total_hessian,
             row_indices.len() as u32,
-            feature_mask.as_deref(),
+            root_feature_mask.as_deref(),
         );
 
         candidates.push(SplitCandidate {
@@ -247,6 +281,7 @@ impl TreeGrower {
             split_info: root_split,
             sum_gradients: total_gradient,
             sum_hessians: total_hessian,
+            ancestor_features: Vec::new(),
         });
 
         let mut num_leaves = 1;
@@ -361,20 +396,31 @@ impl TreeGrower {
             let larger_histograms =
                 HistogramBuilder::build_sibling(&parent_histograms, &smaller_histograms);
 
-            // Find splits and add to queue (with column subsampling if enabled)
+            // Compute child ancestor features (parent's ancestors + current split feature)
+            let mut child_ancestors = candidate.ancestor_features.clone();
+            child_ancestors.push(split_info.feature_idx);
+
+            // Compute effective feature mask for children (interaction + column subsampling)
+            let child_feature_mask = self.compute_effective_feature_mask(
+                &child_ancestors,
+                feature_mask.as_deref(),
+                num_features,
+            );
+
+            // Find splits for children
             let smaller_split = split_finder.find_best_split_with_features(
                 &smaller_histograms,
                 smaller_g,
                 smaller_h,
                 smaller_rows.len() as u32,
-                feature_mask.as_deref(),
+                child_feature_mask.as_deref(),
             );
             let larger_split = split_finder.find_best_split_with_features(
                 &larger_histograms,
                 larger_g,
                 larger_h,
                 larger_rows.len() as u32,
-                feature_mask.as_deref(),
+                child_feature_mask.as_deref(),
             );
 
             candidates.push(SplitCandidate {
@@ -384,6 +430,7 @@ impl TreeGrower {
                 split_info: smaller_split,
                 sum_gradients: smaller_g,
                 sum_hessians: smaller_h,
+                ancestor_features: child_ancestors.clone(),
             });
 
             candidates.push(SplitCandidate {
@@ -393,10 +440,51 @@ impl TreeGrower {
                 split_info: larger_split,
                 sum_gradients: larger_g,
                 sum_hessians: larger_h,
+                ancestor_features: child_ancestors,
             });
         }
 
         tree
+    }
+
+    /// Compute effective feature mask combining interaction constraints and column subsampling
+    ///
+    /// Returns None if all features are allowed, Some(mask) otherwise
+    fn compute_effective_feature_mask(
+        &self,
+        ancestor_features: &[usize],
+        colsample_mask: Option<&[usize]>,
+        num_features: usize,
+    ) -> Option<Vec<usize>> {
+        // Get interaction-allowed features
+        let interaction_allowed = if self.interaction_constraints.is_empty() {
+            None
+        } else {
+            Some(self.interaction_constraints.allowed_features(ancestor_features, num_features))
+        };
+
+        // Combine with column subsampling mask
+        match (interaction_allowed, colsample_mask) {
+            (None, None) => None, // No constraints
+            (Some(allowed), None) => Some(allowed),
+            (None, Some(mask)) => Some(mask.to_vec()),
+            (Some(allowed), Some(mask)) => {
+                // Intersection of both constraints
+                let allowed_set: std::collections::HashSet<_> = allowed.into_iter().collect();
+                let combined: Vec<usize> = mask
+                    .iter()
+                    .copied()
+                    .filter(|f| allowed_set.contains(f))
+                    .collect();
+                if combined.is_empty() {
+                    // Edge case: no features allowed - return the interaction allowed set
+                    // to let the algorithm gracefully stop
+                    Some(self.interaction_constraints.allowed_features(ancestor_features, num_features))
+                } else {
+                    Some(combined)
+                }
+            }
+        }
     }
 
     /// Partition rows by split

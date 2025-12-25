@@ -12,5 +12,5 @@ mod tree;
 
 pub use grow::TreeGrower;
 pub use node::{Node, NodeType};
-pub use split::{SplitFinder, SplitInfo};
+pub use split::{InteractionConstraints, MonotonicConstraint, SplitFinder, SplitInfo};
 pub use tree::Tree;

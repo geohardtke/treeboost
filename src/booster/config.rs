@@ -2,6 +2,7 @@
 
 use crate::dataset::OrderingStrategy;
 use crate::loss::{LossFunction, MseLoss, PseudoHuberLoss};
+use crate::tree::MonotonicConstraint;
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// Loss function type for serialization
@@ -91,6 +92,15 @@ pub struct GBDTConfig {
     pub reordering_strategy: OrderingStrategy,
     /// Use 4-bit packing for low-cardinality features (default: true)
     pub packed_dataset: bool,
+
+    // Monotonic constraints
+    /// Monotonic constraints per feature (empty = no constraints)
+    pub monotonic_constraints: Vec<MonotonicConstraint>,
+
+    // Interaction constraints (groups of features that can interact)
+    /// Feature interaction groups: each inner Vec is a group of features that can interact
+    /// Features not in any group can interact with all features
+    pub interaction_groups: Vec<Vec<usize>>,
 }
 
 impl Default for GBDTConfig {
@@ -134,6 +144,12 @@ impl Default for GBDTConfig {
             column_reordering: true,
             reordering_strategy: OrderingStrategy::ByImportance,
             packed_dataset: true,
+
+            // Monotonic constraints
+            monotonic_constraints: Vec::new(),
+
+            // Interaction constraints
+            interaction_groups: Vec::new(),
         }
     }
 }
@@ -275,6 +291,48 @@ impl GBDTConfig {
         self.parallel_prediction = false;
         self.column_reordering = false;
         self.packed_dataset = false;
+        self
+    }
+
+    /// Set monotonic constraints for features
+    ///
+    /// The vector should have one entry per feature. Features beyond the
+    /// vector length are treated as unconstrained.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use treeboost::{GBDTConfig, MonotonicConstraint};
+    ///
+    /// // Feature 0: increasing, Feature 1: decreasing, Feature 2: none
+    /// let config = GBDTConfig::new()
+    ///     .with_monotonic_constraints(vec![
+    ///         MonotonicConstraint::Increasing,
+    ///         MonotonicConstraint::Decreasing,
+    ///         MonotonicConstraint::None,
+    ///     ]);
+    /// ```
+    pub fn with_monotonic_constraints(mut self, constraints: Vec<MonotonicConstraint>) -> Self {
+        self.monotonic_constraints = constraints;
+        self
+    }
+
+    /// Set feature interaction constraints
+    ///
+    /// Features in the same group can interact (appear together in a tree path).
+    /// Features in different groups cannot be used together.
+    /// Features not in any group can interact with all features.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use treeboost::GBDTConfig;
+    ///
+    /// // Features 0,1,2 can interact; features 3,4 can interact
+    /// // Feature 5 is unconstrained (can interact with any)
+    /// let config = GBDTConfig::new()
+    ///     .with_interaction_groups(vec![vec![0, 1, 2], vec![3, 4]]);
+    /// ```
+    pub fn with_interaction_groups(mut self, groups: Vec<Vec<usize>>) -> Self {
+        self.interaction_groups = groups;
         self
     }
 

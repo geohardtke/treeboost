@@ -1,6 +1,124 @@
 //! Split finding with Shannon Entropy regularization
 
 use crate::histogram::{Histogram, NodeHistograms};
+use rkyv::{Archive, Deserialize, Serialize};
+
+/// Monotonic constraint for a feature
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub enum MonotonicConstraint {
+    /// No constraint
+    None,
+    /// Prediction must increase as feature value increases
+    Increasing,
+    /// Prediction must decrease as feature value increases
+    Decreasing,
+}
+
+/// Feature interaction constraints
+///
+/// Defines which features can interact (appear together in the same tree path).
+/// Features in the same group can interact; features in different groups cannot.
+/// Features not in any group can interact with all features.
+#[derive(Debug, Clone, Default)]
+pub struct InteractionConstraints {
+    /// Groups of feature indices that can interact
+    /// Each inner Vec is a group of features that can appear together
+    groups: Vec<Vec<usize>>,
+    /// Lookup: feature_idx -> group_idx (None if unconstrained)
+    feature_to_group: Vec<Option<usize>>,
+}
+
+impl InteractionConstraints {
+    /// Create empty constraints (all features can interact)
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create constraints from groups of feature indices
+    ///
+    /// # Arguments
+    /// * `groups` - Each group is a list of feature indices that can interact
+    /// * `num_features` - Total number of features in the dataset
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Features 0,1,2 can interact; features 3,4 can interact; 5 is unconstrained
+    /// let constraints = InteractionConstraints::from_groups(
+    ///     vec![vec![0, 1, 2], vec![3, 4]],
+    ///     6
+    /// );
+    /// ```
+    pub fn from_groups(groups: Vec<Vec<usize>>, num_features: usize) -> Self {
+        let mut feature_to_group = vec![None; num_features];
+
+        for (group_idx, group) in groups.iter().enumerate() {
+            for &feature_idx in group {
+                if feature_idx < num_features {
+                    feature_to_group[feature_idx] = Some(group_idx);
+                }
+            }
+        }
+
+        Self {
+            groups,
+            feature_to_group,
+        }
+    }
+
+    /// Check if constraints are empty (all features can interact)
+    pub fn is_empty(&self) -> bool {
+        self.groups.is_empty()
+    }
+
+    /// Get allowed features given the ancestor path
+    ///
+    /// # Arguments
+    /// * `ancestor_features` - Features used in ancestors of current node
+    /// * `num_features` - Total number of features
+    ///
+    /// # Returns
+    /// List of feature indices that can be used for splitting
+    pub fn allowed_features(&self, ancestor_features: &[usize], num_features: usize) -> Vec<usize> {
+        if self.groups.is_empty() {
+            // No constraints: all features allowed
+            return (0..num_features).collect();
+        }
+
+        // Find which groups have been used by ancestors
+        let mut used_groups: Vec<bool> = vec![false; self.groups.len()];
+        for &feat in ancestor_features {
+            if let Some(group_idx) = self.feature_to_group.get(feat).copied().flatten() {
+                used_groups[group_idx] = true;
+            }
+        }
+
+        // A feature is allowed if:
+        // 1. It's unconstrained (not in any group), OR
+        // 2. It belongs to a group that was already used by ancestors, OR
+        // 3. No group has been used yet
+        let any_group_used = used_groups.iter().any(|&u| u);
+
+        (0..num_features)
+            .filter(|&feat| {
+                match self.feature_to_group.get(feat).copied().flatten() {
+                    None => true, // Unconstrained feature
+                    Some(group_idx) => {
+                        if !any_group_used {
+                            true // No group used yet, any feature allowed
+                        } else {
+                            used_groups[group_idx] // Only if this group was used
+                        }
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Get the groups
+    pub fn groups(&self) -> &[Vec<usize>] {
+        &self.groups
+    }
+}
 
 /// Information about a potential split
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +181,8 @@ pub struct SplitFinder {
     entropy_weight: f32,
     /// Minimum gain to make a split
     min_gain: f32,
+    /// Monotonic constraints per feature (empty = no constraints)
+    monotonic_constraints: Vec<MonotonicConstraint>,
 }
 
 impl Default for SplitFinder {
@@ -73,6 +193,7 @@ impl Default for SplitFinder {
             min_hessian_leaf: 1.0,
             entropy_weight: 0.0, // No entropy regularization by default
             min_gain: 0.0,
+            monotonic_constraints: Vec::new(),
         }
     }
 }
@@ -114,6 +235,54 @@ impl SplitFinder {
     pub fn with_min_gain(mut self, min_gain: f32) -> Self {
         self.min_gain = min_gain;
         self
+    }
+
+    /// Set monotonic constraints for features
+    ///
+    /// The vector should have one entry per feature. Features beyond the
+    /// vector length are treated as unconstrained.
+    pub fn with_monotonic_constraints(mut self, constraints: Vec<MonotonicConstraint>) -> Self {
+        self.monotonic_constraints = constraints;
+        self
+    }
+
+    /// Get the monotonic constraint for a feature
+    fn get_constraint(&self, feature_idx: usize) -> MonotonicConstraint {
+        self.monotonic_constraints
+            .get(feature_idx)
+            .copied()
+            .unwrap_or(MonotonicConstraint::None)
+    }
+
+    /// Check if a split satisfies monotonic constraints
+    ///
+    /// For a valid monotonic split:
+    /// - Increasing: left_weight <= right_weight
+    /// - Decreasing: left_weight >= right_weight
+    fn satisfies_monotonic_constraint(
+        &self,
+        feature_idx: usize,
+        left_gradient: f32,
+        left_hessian: f32,
+        right_gradient: f32,
+        right_hessian: f32,
+    ) -> bool {
+        let constraint = self.get_constraint(feature_idx);
+
+        match constraint {
+            MonotonicConstraint::None => true,
+            MonotonicConstraint::Increasing | MonotonicConstraint::Decreasing => {
+                // Compute leaf weights: weight = -gradient / (hessian + lambda)
+                let left_weight = -left_gradient / (left_hessian + self.lambda);
+                let right_weight = -right_gradient / (right_hessian + self.lambda);
+
+                match constraint {
+                    MonotonicConstraint::Increasing => left_weight <= right_weight,
+                    MonotonicConstraint::Decreasing => left_weight >= right_weight,
+                    MonotonicConstraint::None => unreachable!(),
+                }
+            }
+        }
     }
 
     /// Find the best split across all features
@@ -229,6 +398,17 @@ impl SplitFinder {
                 continue;
             }
             if left_hessian < self.min_hessian_leaf || right_hessian < self.min_hessian_leaf {
+                continue;
+            }
+
+            // Check monotonic constraint
+            if !self.satisfies_monotonic_constraint(
+                feature_idx,
+                left_gradient,
+                left_hessian,
+                right_gradient,
+                right_hessian,
+            ) {
                 continue;
             }
 
@@ -425,5 +605,152 @@ mod tests {
 
         // Should not find split because left would only have 1 sample
         assert!(split.is_none());
+    }
+
+    #[test]
+    fn test_monotonic_increasing_constraint() {
+        let mut histogram = Histogram::new();
+
+        // Setup: bins 0-127 have negative gradient (positive weight),
+        // bins 128-255 have positive gradient (negative weight)
+        // weight = -gradient / hessian, so:
+        // left: weight = -(-128) / 128 = +1.0
+        // right: weight = -(+128) / 128 = -1.0
+        // left_weight > right_weight => VIOLATES Increasing constraint
+        for bin in 0..128 {
+            histogram.accumulate(bin, -1.0, 1.0); // negative gradient = positive weight
+        }
+        for bin in 128..=255 {
+            histogram.accumulate(bin, 1.0, 1.0); // positive gradient = negative weight
+        }
+
+        let mut histograms = crate::histogram::NodeHistograms::new(1);
+        *histograms.get_mut(0) = histogram.clone();
+
+        // Without constraint: should find split
+        let finder_no_constraint = SplitFinder::new().with_lambda(0.0);
+        let split = finder_no_constraint.find_best_split(&histograms, 0.0, 256.0, 256);
+        assert!(split.is_some());
+
+        // With increasing constraint: should NOT find split
+        // left_weight=+1.0 > right_weight=-1.0 => violates Increasing requirement
+        let finder_increasing = SplitFinder::new()
+            .with_lambda(0.0)
+            .with_monotonic_constraints(vec![MonotonicConstraint::Increasing]);
+        let split = finder_increasing.find_best_split(&histograms, 0.0, 256.0, 256);
+        // The split violates monotonicity, should be rejected
+        assert!(split.is_none());
+    }
+
+    #[test]
+    fn test_monotonic_decreasing_constraint() {
+        let mut histogram = Histogram::new();
+
+        // Setup for decreasing: left should have higher weight than right
+        // negative gradient = positive weight, positive gradient = negative weight
+        for bin in 0..128 {
+            histogram.accumulate(bin, -1.0, 1.0); // negative gradient = positive weight
+        }
+        for bin in 128..=255 {
+            histogram.accumulate(bin, 1.0, 1.0); // positive gradient = negative weight
+        }
+
+        let mut histograms = crate::histogram::NodeHistograms::new(1);
+        *histograms.get_mut(0) = histogram;
+
+        // With decreasing constraint: should find split
+        // left has positive weight, right has negative weight => left >= right (satisfied)
+        let finder_decreasing = SplitFinder::new()
+            .with_lambda(0.0)
+            .with_monotonic_constraints(vec![MonotonicConstraint::Decreasing]);
+        let split = finder_decreasing.find_best_split(&histograms, 0.0, 256.0, 256);
+        assert!(split.is_some());
+
+        // With increasing constraint: should NOT find split
+        let finder_increasing = SplitFinder::new()
+            .with_lambda(0.0)
+            .with_monotonic_constraints(vec![MonotonicConstraint::Increasing]);
+        let split = finder_increasing.find_best_split(&histograms, 0.0, 256.0, 256);
+        assert!(split.is_none());
+    }
+
+    #[test]
+    fn test_monotonic_constraint_allows_valid_split() {
+        let mut histogram = Histogram::new();
+
+        // Setup for valid increasing: left has lower weight than right
+        for bin in 0..128 {
+            histogram.accumulate(bin, -1.0, 1.0); // negative gradient = positive weight
+        }
+        for bin in 128..=255 {
+            histogram.accumulate(bin, -2.0, 1.0); // more negative gradient = more positive weight
+        }
+
+        let mut histograms = crate::histogram::NodeHistograms::new(1);
+        *histograms.get_mut(0) = histogram;
+
+        // left_weight = -(-128) / 128 = 1.0
+        // right_weight = -(-256) / 128 = 2.0
+        // left_weight < right_weight => increasing is satisfied
+        let finder = SplitFinder::new()
+            .with_lambda(0.0)
+            .with_monotonic_constraints(vec![MonotonicConstraint::Increasing]);
+        let split = finder.find_best_split(&histograms, -384.0, 256.0, 256);
+        assert!(split.is_some());
+    }
+
+    #[test]
+    fn test_interaction_constraints_empty() {
+        let constraints = InteractionConstraints::new();
+        assert!(constraints.is_empty());
+
+        // All features should be allowed
+        let allowed = constraints.allowed_features(&[], 5);
+        assert_eq!(allowed, vec![0, 1, 2, 3, 4]);
+
+        // Even with ancestors, all features allowed
+        let allowed = constraints.allowed_features(&[0, 2], 5);
+        assert_eq!(allowed, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_interaction_constraints_basic() {
+        // Group 0: features 0, 1
+        // Group 1: features 2, 3
+        // Feature 4: unconstrained
+        let constraints = InteractionConstraints::from_groups(
+            vec![vec![0, 1], vec![2, 3]],
+            5,
+        );
+
+        // No ancestors: all features allowed
+        let allowed = constraints.allowed_features(&[], 5);
+        assert_eq!(allowed, vec![0, 1, 2, 3, 4]);
+
+        // After using feature 0 (group 0): only group 0 and unconstrained allowed
+        let allowed = constraints.allowed_features(&[0], 5);
+        assert_eq!(allowed, vec![0, 1, 4]); // 0, 1 (group 0) and 4 (unconstrained)
+
+        // After using feature 2 (group 1): only group 1 and unconstrained allowed
+        let allowed = constraints.allowed_features(&[2], 5);
+        assert_eq!(allowed, vec![2, 3, 4]); // 2, 3 (group 1) and 4 (unconstrained)
+    }
+
+    #[test]
+    fn test_interaction_constraints_unconstrained_always_allowed() {
+        // Only constrain some features
+        let constraints = InteractionConstraints::from_groups(
+            vec![vec![0, 1]],
+            5, // Features 2, 3, 4 are unconstrained
+        );
+
+        // After using constrained feature, unconstrained still allowed
+        let allowed = constraints.allowed_features(&[0], 5);
+        assert!(allowed.contains(&2)); // unconstrained
+        assert!(allowed.contains(&3)); // unconstrained
+        assert!(allowed.contains(&4)); // unconstrained
+        assert!(allowed.contains(&0)); // same group
+        assert!(allowed.contains(&1)); // same group
+        assert_eq!(allowed.len(), 5); // All allowed since 2,3,4 are unconstrained
     }
 }

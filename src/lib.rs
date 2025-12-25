@@ -49,6 +49,7 @@ pub use booster::{GBDTConfig, GBDTModel};
 pub use dataset::{BinnedDataset, QuantileBinner};
 pub use inference::Prediction;
 pub use loss::{LossFunction, MseLoss, PseudoHuberLoss};
+pub use tree::{InteractionConstraints, MonotonicConstraint};
 
 /// Library error type
 #[derive(Debug, thiserror::Error)]
