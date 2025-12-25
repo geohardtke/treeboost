@@ -94,9 +94,22 @@ impl GBDTModel {
                 hessians[idx] = h;
             }
 
-            // Subsample rows if configured (Stochastic Gradient Boosting)
-            let sample_indices: Vec<usize> = if config.subsample < 1.0 {
-                let n_samples = ((train_indices.len() as f32) * config.subsample).ceil() as usize;
+            // GOSS or random subsampling
+            let sample_indices: Vec<usize> = if config.goss_enabled {
+                // GOSS: Gradient-based One-Side Sampling
+                // Returns sampled indices and applies weight correction in-place
+                Self::goss_sample(
+                    &train_indices,
+                    &mut gradients,
+                    &mut hessians,
+                    config.goss_top_rate,
+                    config.goss_other_rate,
+                    &mut rng,
+                )
+            } else if config.subsample < 1.0 {
+                // Random subsampling (Stochastic Gradient Boosting)
+                let n_samples =
+                    ((train_indices.len() as f32) * config.subsample).ceil() as usize;
                 let mut indices = train_indices.clone();
                 indices.shuffle(&mut rng);
                 indices.truncate(n_samples);
@@ -236,6 +249,70 @@ impl GBDTModel {
 
         // Remaining is training set
         (indices, validation, calibration)
+    }
+
+    /// GOSS (Gradient-based One-Side Sampling)
+    ///
+    /// Selects samples based on gradient magnitude:
+    /// 1. Keep all top `top_rate` samples with largest |gradient|
+    /// 2. Randomly sample `other_rate` from the remaining samples
+    /// 3. Apply weight correction (1 - top_rate) / other_rate to sampled small-gradient samples
+    ///
+    /// Weight correction is applied in-place to gradients and hessians.
+    /// Uses partial sorting (select_nth_unstable) for O(n) instead of O(n log n).
+    fn goss_sample(
+        train_indices: &[usize],
+        gradients: &mut [f32],
+        hessians: &mut [f32],
+        top_rate: f32,
+        other_rate: f32,
+        rng: &mut rand::rngs::StdRng,
+    ) -> Vec<usize> {
+        let n = train_indices.len();
+        if n == 0 {
+            return Vec::new();
+        }
+
+        // Number of top-gradient samples to keep
+        let n_top = ((n as f32) * top_rate).ceil() as usize;
+        let n_top = n_top.min(n);
+        // Number of other samples to randomly select
+        let n_other = ((n as f32) * other_rate).ceil() as usize;
+
+        // Use partial sort to find the n_top largest gradients in O(n) time
+        let mut indexed: Vec<(usize, f32)> = train_indices
+            .iter()
+            .map(|&idx| (idx, gradients[idx].abs()))
+            .collect();
+
+        // Partition around the n_top-th largest element (descending order)
+        if n_top < n {
+            indexed.select_nth_unstable_by(n_top, |a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+
+        // Top n_top samples (large gradients) - no weight modification needed
+        let top_indices: Vec<usize> = indexed[..n_top].iter().map(|(idx, _)| *idx).collect();
+
+        // Randomly sample n_other from the rest (small gradients)
+        let mut rest: Vec<usize> = indexed[n_top..].iter().map(|(idx, _)| *idx).collect();
+        rest.shuffle(rng);
+        rest.truncate(n_other);
+
+        // Weight correction factor for small-gradient samples
+        let weight = (1.0 - top_rate) / other_rate;
+
+        // Apply weight correction to the sampled small-gradient samples
+        for &idx in &rest {
+            gradients[idx] *= weight;
+            hessians[idx] *= weight;
+        }
+
+        // Combine top samples (weight = 1.0) and weighted small samples
+        let mut result = top_indices;
+        result.extend(rest);
+        result
     }
 
     /// Compute quantile of a sorted slice
@@ -549,6 +626,43 @@ mod tests {
         assert_eq!(model.num_trees(), 10);
 
         // Predictions should still be reasonable
+        let predictions = model.predict(&dataset);
+        assert_eq!(predictions.len(), 1000);
+    }
+
+    #[test]
+    fn test_train_with_goss() {
+        let dataset = create_regression_dataset(1000, 0.1);
+
+        // GOSS enabled with default rates (top 20%, sample 10% of rest)
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(4)
+            .with_goss(true);
+
+        let model = GBDTModel::train(&dataset, config).unwrap();
+
+        assert_eq!(model.num_trees(), 10);
+
+        // Predictions should still be reasonable
+        let predictions = model.predict(&dataset);
+        assert_eq!(predictions.len(), 1000);
+    }
+
+    #[test]
+    fn test_train_with_goss_custom_rates() {
+        let dataset = create_regression_dataset(1000, 0.1);
+
+        // Custom GOSS rates
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(4)
+            .with_goss_rates(0.3, 0.15); // top 30%, sample 15% of rest
+
+        let model = GBDTModel::train(&dataset, config).unwrap();
+
+        assert_eq!(model.num_trees(), 10);
+
         let predictions = model.predict(&dataset);
         assert_eq!(predictions.len(), 1000);
     }

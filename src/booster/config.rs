@@ -62,10 +62,18 @@ pub struct GBDTConfig {
     pub loss_type: LossType,
 
     // Subsampling
-    /// Row subsampling ratio (0.0-1.0)
+    /// Row subsampling ratio (0.0-1.0) for random subsampling
     pub subsample: f32,
     /// Column subsampling ratio (0.0-1.0)
     pub colsample: f32,
+
+    // GOSS (Gradient-based One-Side Sampling)
+    /// Enable GOSS sampling (overrides random subsample when enabled)
+    pub goss_enabled: bool,
+    /// Ratio of large-gradient samples to keep (default: 0.2 = top 20%)
+    pub goss_top_rate: f32,
+    /// Ratio of small-gradient samples to randomly sample (default: 0.1 = 10%)
+    pub goss_other_rate: f32,
 
     // Binning
     /// Number of histogram bins
@@ -127,6 +135,11 @@ impl Default for GBDTConfig {
             // Subsampling
             subsample: 1.0,
             colsample: 1.0,
+
+            // GOSS (disabled by default, most effective on large datasets)
+            goss_enabled: false,
+            goss_top_rate: 0.2,
+            goss_other_rate: 0.1,
 
             // Binning
             num_bins: 255,
@@ -294,6 +307,24 @@ impl GBDTConfig {
         self
     }
 
+    /// Enable/disable GOSS (Gradient-based One-Side Sampling)
+    pub fn with_goss(mut self, enabled: bool) -> Self {
+        self.goss_enabled = enabled;
+        self
+    }
+
+    /// Configure GOSS sampling rates
+    ///
+    /// # Arguments
+    /// * `top_rate` - Ratio of large-gradient samples to keep (default: 0.2)
+    /// * `other_rate` - Ratio of small-gradient samples to randomly sample (default: 0.1)
+    pub fn with_goss_rates(mut self, top_rate: f32, other_rate: f32) -> Self {
+        self.goss_enabled = true;
+        self.goss_top_rate = top_rate;
+        self.goss_other_rate = other_rate;
+        self
+    }
+
     /// Set monotonic constraints for features
     ///
     /// The vector should have one entry per feature. Features beyond the
@@ -358,6 +389,17 @@ impl GBDTConfig {
         }
         if self.colsample <= 0.0 || self.colsample > 1.0 {
             return Err("colsample must be in (0, 1]".to_string());
+        }
+        if self.goss_enabled {
+            if self.goss_top_rate <= 0.0 || self.goss_top_rate >= 1.0 {
+                return Err("goss_top_rate must be in (0, 1)".to_string());
+            }
+            if self.goss_other_rate <= 0.0 || self.goss_other_rate >= 1.0 {
+                return Err("goss_other_rate must be in (0, 1)".to_string());
+            }
+            if self.goss_top_rate + self.goss_other_rate >= 1.0 {
+                return Err("goss_top_rate + goss_other_rate must be < 1.0".to_string());
+            }
         }
         if self.validation_ratio < 0.0 || self.validation_ratio >= 1.0 {
             return Err("validation_ratio must be in [0, 1)".to_string());

@@ -494,6 +494,19 @@ fn benchmark_training_components(c: &mut Criterion) {
         b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
     });
 
+    // Large dataset with GOSS
+    group.bench_function("train_100k_rows_10_rounds_goss", |b| {
+        let (features, targets) = generate_data(100_000, num_features, 42);
+        let dataset = to_treeboost_dataset(&features, &targets, 100_000, num_features);
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(6)
+            .with_learning_rate(0.1)
+            .with_goss(true);
+
+        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+    });
+
     group.finish();
 }
 
