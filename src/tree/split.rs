@@ -124,18 +124,61 @@ impl SplitFinder {
         total_hessian: f32,
         total_count: u32,
     ) -> Option<SplitInfo> {
+        self.find_best_split_with_features(histograms, total_gradient, total_hessian, total_count, None)
+    }
+
+    /// Find the best split across a subset of features (for column subsampling)
+    ///
+    /// # Arguments
+    /// * `histograms` - Node histograms for all features
+    /// * `total_gradient` - Sum of gradients in the node
+    /// * `total_hessian` - Sum of hessians in the node
+    /// * `total_count` - Number of samples in the node
+    /// * `feature_mask` - Optional mask of feature indices to consider (None = all features)
+    pub fn find_best_split_with_features(
+        &self,
+        histograms: &NodeHistograms,
+        total_gradient: f32,
+        total_hessian: f32,
+        total_count: u32,
+        feature_mask: Option<&[usize]>,
+    ) -> Option<SplitInfo> {
         let mut best_split = SplitInfo::default();
 
-        for (feature_idx, histogram) in histograms.iter() {
-            if let Some(split) = self.find_best_split_for_feature(
-                histogram,
-                feature_idx,
-                total_gradient,
-                total_hessian,
-                total_count,
-            ) {
-                if split.gain > best_split.gain {
-                    best_split = split;
+        match feature_mask {
+            Some(features) => {
+                // Only consider specified features
+                for &feature_idx in features {
+                    if feature_idx >= histograms.num_features() {
+                        continue;
+                    }
+                    if let Some(split) = self.find_best_split_for_feature(
+                        histograms.get(feature_idx),
+                        feature_idx,
+                        total_gradient,
+                        total_hessian,
+                        total_count,
+                    ) {
+                        if split.gain > best_split.gain {
+                            best_split = split;
+                        }
+                    }
+                }
+            }
+            None => {
+                // Consider all features
+                for (feature_idx, histogram) in histograms.iter() {
+                    if let Some(split) = self.find_best_split_for_feature(
+                        histogram,
+                        feature_idx,
+                        total_gradient,
+                        total_hessian,
+                        total_count,
+                    ) {
+                        if split.gain > best_split.gain {
+                            best_split = split;
+                        }
+                    }
                 }
             }
         }

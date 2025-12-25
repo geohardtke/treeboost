@@ -76,6 +76,12 @@ pub struct GBDTConfig {
     /// Conformal prediction quantile (e.g., 0.9 for 90% coverage)
     pub conformal_quantile: f32,
 
+    // Early stopping
+    /// Number of rounds with no improvement before stopping (0 to disable)
+    pub early_stopping_rounds: usize,
+    /// Ratio of data to use for validation (0.0 to disable early stopping)
+    pub validation_ratio: f32,
+
     // Performance optimizations (all ON by default)
     /// Use parallel prediction via Rayon (default: true)
     pub parallel_prediction: bool,
@@ -118,6 +124,10 @@ impl Default for GBDTConfig {
             // Conformal
             calibration_ratio: 0.0,
             conformal_quantile: 0.9,
+
+            // Early stopping (disabled by default)
+            early_stopping_rounds: 0,
+            validation_ratio: 0.0,
 
             // Performance optimizations (all ON by default)
             parallel_prediction: true,
@@ -205,6 +215,19 @@ impl GBDTConfig {
         self
     }
 
+    /// Enable early stopping
+    ///
+    /// # Arguments
+    /// * `rounds` - Number of consecutive rounds without improvement before stopping
+    /// * `validation_ratio` - Fraction of data to use for validation (e.g., 0.1 for 10%)
+    pub fn with_early_stopping(mut self, rounds: usize, validation_ratio: f32) -> Self {
+        assert!(rounds > 0, "early_stopping_rounds must be > 0");
+        assert!(validation_ratio > 0.0 && validation_ratio < 1.0);
+        self.early_stopping_rounds = rounds;
+        self.validation_ratio = validation_ratio;
+        self
+    }
+
     /// Set minimum samples per leaf
     pub fn with_min_samples_leaf(mut self, min_samples: usize) -> Self {
         self.min_samples_leaf = min_samples;
@@ -277,6 +300,16 @@ impl GBDTConfig {
         }
         if self.colsample <= 0.0 || self.colsample > 1.0 {
             return Err("colsample must be in (0, 1]".to_string());
+        }
+        if self.validation_ratio < 0.0 || self.validation_ratio >= 1.0 {
+            return Err("validation_ratio must be in [0, 1)".to_string());
+        }
+        // Can't use both conformal calibration and early stopping validation from same data
+        if self.calibration_ratio > 0.0 && self.validation_ratio > 0.0 {
+            let total_holdout = self.calibration_ratio + self.validation_ratio;
+            if total_holdout >= 1.0 {
+                return Err("calibration_ratio + validation_ratio must be < 1.0".to_string());
+            }
         }
         Ok(())
     }

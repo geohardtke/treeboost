@@ -3,6 +3,8 @@
 use crate::dataset::BinnedDataset;
 use crate::histogram::{HistogramBuilder, NodeHistograms};
 use crate::tree::{Node, SplitFinder, SplitInfo, Tree};
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -78,6 +80,8 @@ pub struct TreeGrower {
     min_gain: f32,
     /// Learning rate (shrinkage)
     learning_rate: f32,
+    /// Column subsampling ratio (0.0-1.0, 1.0 = use all features)
+    colsample: f32,
 }
 
 impl Default for TreeGrower {
@@ -91,6 +95,7 @@ impl Default for TreeGrower {
             entropy_weight: 0.0,
             min_gain: 0.0,
             learning_rate: 0.1,
+            colsample: 1.0, // Use all features by default
         }
     }
 }
@@ -140,6 +145,11 @@ impl TreeGrower {
         self
     }
 
+    pub fn with_colsample(mut self, colsample: f32) -> Self {
+        self.colsample = colsample;
+        self
+    }
+
     /// Create a split finder with current configuration
     fn create_split_finder(&self) -> SplitFinder {
         SplitFinder::new()
@@ -162,19 +172,54 @@ impl TreeGrower {
         gradients: &[f32],
         hessians: &[f32],
     ) -> Tree {
-        let num_rows = dataset.num_rows();
+        // Use all rows
+        let all_rows: Vec<usize> = (0..dataset.num_rows()).collect();
+        self.grow_with_indices(dataset, gradients, hessians, &all_rows)
+    }
+
+    /// Grow a tree using only the specified row indices (for row subsampling)
+    ///
+    /// # Arguments
+    /// * `dataset` - Binned training data
+    /// * `gradients` - Gradient for each sample
+    /// * `hessians` - Hessian for each sample
+    /// * `row_indices` - Subset of row indices to use for training this tree
+    pub fn grow_with_indices(
+        &self,
+        dataset: &BinnedDataset,
+        gradients: &[f32],
+        hessians: &[f32],
+        row_indices: &[usize],
+    ) -> Tree {
+        let num_features = dataset.num_features();
         let histogram_builder = HistogramBuilder::new();
         let split_finder = self.create_split_finder();
 
-        // Compute initial sums
-        let total_gradient: f32 = gradients.iter().sum();
-        let total_hessian: f32 = hessians.iter().sum();
+        // Generate column subsample mask (per tree)
+        let feature_mask: Option<Vec<usize>> = if self.colsample < 1.0 {
+            let n_features = ((num_features as f32) * self.colsample).ceil() as usize;
+            let n_features = n_features.max(1); // At least one feature
+            let mut rng = rand::rngs::StdRng::seed_from_u64(
+                // Use row count as seed variation per tree
+                (row_indices.len() as u64).wrapping_mul(31337)
+            );
+            let mut all_features: Vec<usize> = (0..num_features).collect();
+            all_features.shuffle(&mut rng);
+            all_features.truncate(n_features);
+            Some(all_features)
+        } else {
+            None
+        };
+
+        // Compute initial sums for the subsampled rows only
+        let total_gradient: f32 = row_indices.iter().map(|&i| gradients[i]).sum();
+        let total_hessian: f32 = row_indices.iter().map(|&i| hessians[i]).sum();
         let initial_weight = Node::compute_leaf_weight(total_gradient, total_hessian, self.lambda);
 
         // Initialize tree with root leaf
         let mut tree = Tree::new(
             initial_weight * self.learning_rate,
-            num_rows,
+            row_indices.len(),
             total_gradient,
             total_hessian,
         );
@@ -182,16 +227,17 @@ impl TreeGrower {
         // Initialize priority queue with root candidate
         let mut candidates: BinaryHeap<SplitCandidate> = BinaryHeap::new();
 
-        // Build root histograms
-        let all_rows: Vec<usize> = (0..num_rows).collect();
+        // Build root histograms from subsampled rows
+        let all_rows: Vec<usize> = row_indices.to_vec();
         let root_histograms = histogram_builder.build(dataset, &all_rows, gradients, hessians);
 
-        // Find best split for root
-        let root_split = split_finder.find_best_split(
+        // Find best split for root (with column subsampling if enabled)
+        let root_split = split_finder.find_best_split_with_features(
             &root_histograms,
             total_gradient,
             total_hessian,
-            num_rows as u32,
+            row_indices.len() as u32,
+            feature_mask.as_deref(),
         );
 
         candidates.push(SplitCandidate {
@@ -315,18 +361,20 @@ impl TreeGrower {
             let larger_histograms =
                 HistogramBuilder::build_sibling(&parent_histograms, &smaller_histograms);
 
-            // Find splits and add to queue
-            let smaller_split = split_finder.find_best_split(
+            // Find splits and add to queue (with column subsampling if enabled)
+            let smaller_split = split_finder.find_best_split_with_features(
                 &smaller_histograms,
                 smaller_g,
                 smaller_h,
                 smaller_rows.len() as u32,
+                feature_mask.as_deref(),
             );
-            let larger_split = split_finder.find_best_split(
+            let larger_split = split_finder.find_best_split_with_features(
                 &larger_histograms,
                 larger_g,
                 larger_h,
                 larger_rows.len() as u32,
+                feature_mask.as_deref(),
             );
 
             candidates.push(SplitCandidate {

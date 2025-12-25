@@ -34,18 +34,19 @@ impl GBDTModel {
         let loss_fn = config.loss_type.create();
         let targets = dataset.targets();
 
-        // Split data for conformal prediction if enabled
-        let (train_indices, calibration_indices) = if config.calibration_ratio > 0.0 {
-            Self::split_for_calibration(dataset.num_rows(), config.calibration_ratio)
-        } else {
-            ((0..dataset.num_rows()).collect(), Vec::new())
-        };
+        // Split data for validation (early stopping) and conformal calibration
+        let (train_indices, validation_indices, calibration_indices) =
+            Self::split_for_training(
+                dataset.num_rows(),
+                config.validation_ratio,
+                config.calibration_ratio,
+            );
 
-        // Compute base prediction
+        // Compute base prediction from training data only
         let train_targets: Vec<f32> = train_indices.iter().map(|&i| targets[i]).collect();
         let base_prediction = loss_fn.initial_prediction(&train_targets);
 
-        // Initialize predictions
+        // Initialize predictions for all rows
         let mut predictions = vec![base_prediction; dataset.num_rows()];
 
         // Gradient and hessian buffers
@@ -61,20 +62,27 @@ impl GBDTModel {
             .with_min_hessian_leaf(config.min_hessian_leaf)
             .with_entropy_weight(config.entropy_weight)
             .with_min_gain(config.min_gain)
-            .with_learning_rate(config.learning_rate);
+            .with_learning_rate(config.learning_rate)
+            .with_colsample(config.colsample);
 
         let mut trees = Vec::with_capacity(config.num_rounds);
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
+        // Early stopping state
+        let early_stopping_enabled = config.early_stopping_rounds > 0 && !validation_indices.is_empty();
+        let mut best_val_loss = f32::MAX;
+        let mut rounds_without_improvement = 0;
+        let mut best_num_trees = 0;
+
         for _round in 0..config.num_rounds {
-            // Compute gradients and hessians for training data
+            // Compute gradients and hessians for training data only
             for &idx in &train_indices {
                 let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
                 gradients[idx] = g;
                 hessians[idx] = h;
             }
 
-            // Subsample rows if configured
+            // Subsample rows if configured (Stochastic Gradient Boosting)
             let sample_indices: Vec<usize> = if config.subsample < 1.0 {
                 let n_samples = ((train_indices.len() as f32) * config.subsample).ceil() as usize;
                 let mut indices = train_indices.clone();
@@ -85,20 +93,55 @@ impl GBDTModel {
                 train_indices.clone()
             };
 
-            // Grow tree using all indices (subsampling prepared but not currently used)
-            // Note: sample_indices are prepared via config.subsample but tree_grower.grow()
-            // currently processes all rows. Full row subsampling would require changes to
-            // TreeGrower to accept and filter index lists during histogram construction.
-            let _ = &sample_indices;
-            let tree = tree_grower.grow(dataset, &gradients, &hessians);
+            // Grow tree using subsampled training indices
+            let tree = tree_grower.grow_with_indices(dataset, &gradients, &hessians, &sample_indices);
 
-            // Update predictions for all rows
+            // Update predictions for all rows (including validation for loss computation)
             for row_idx in 0..dataset.num_rows() {
                 predictions[row_idx] += tree.predict_row(dataset, row_idx);
             }
 
             trees.push(tree);
+
+            // Check for early stopping on validation set
+            if early_stopping_enabled {
+                // Compute validation loss (MSE for simplicity, works with any loss)
+                let val_loss: f32 = validation_indices
+                    .iter()
+                    .map(|&idx| {
+                        let residual = targets[idx] - predictions[idx];
+                        residual * residual
+                    })
+                    .sum::<f32>()
+                    / validation_indices.len() as f32;
+
+                if val_loss < best_val_loss {
+                    best_val_loss = val_loss;
+                    best_num_trees = trees.len();
+                    rounds_without_improvement = 0;
+                } else {
+                    rounds_without_improvement += 1;
+                    if rounds_without_improvement >= config.early_stopping_rounds {
+                        // Truncate to best number of trees
+                        trees.truncate(best_num_trees);
+                        break;
+                    }
+                }
+            }
         }
+
+        // If early stopping was used but we finished all rounds, still check if we should truncate
+        if early_stopping_enabled && best_num_trees > 0 && best_num_trees < trees.len() {
+            trees.truncate(best_num_trees);
+        }
+
+        // Auto-apply column reordering by feature importance if enabled
+        let column_permutation = if config.column_reordering && !trees.is_empty() {
+            let importances = Self::compute_importances_from_trees(&trees, dataset.num_features());
+            Some(ColumnPermutation::from_importances(&importances))
+        } else {
+            None
+        };
 
         // Compute conformal quantile if calibration set exists
         let conformal_q = if !calibration_indices.is_empty() {
@@ -118,20 +161,63 @@ impl GBDTModel {
             trees,
             conformal_q,
             feature_info: dataset.all_feature_info().to_vec(),
-            column_permutation: None,
+            column_permutation,
         })
     }
 
-    /// Split data indices for conformal calibration
-    fn split_for_calibration(num_rows: usize, ratio: f32) -> (Vec<usize>, Vec<usize>) {
+    /// Compute feature importances from a collection of trees (internal helper)
+    fn compute_importances_from_trees(trees: &[Tree], num_features: usize) -> Vec<f32> {
+        let mut importances = vec![0.0f32; num_features];
+
+        for tree in trees {
+            for (_, node) in tree.internal_nodes() {
+                if let Some((feature_idx, _, _, _)) = node.split_info() {
+                    importances[feature_idx] += node.sum_hessians;
+                }
+            }
+        }
+
+        // Normalize
+        let total: f32 = importances.iter().sum();
+        if total > 0.0 {
+            for imp in &mut importances {
+                *imp /= total;
+            }
+        }
+
+        importances
+    }
+
+    /// Split data indices for training, validation, and calibration
+    ///
+    /// Returns (train_indices, validation_indices, calibration_indices)
+    fn split_for_training(
+        num_rows: usize,
+        validation_ratio: f32,
+        calibration_ratio: f32,
+    ) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
         let mut rng = rand::rngs::StdRng::seed_from_u64(123);
         let mut indices: Vec<usize> = (0..num_rows).collect();
         indices.shuffle(&mut rng);
 
-        let n_calibration = ((num_rows as f32) * ratio).ceil() as usize;
+        // First split off calibration set
+        let n_calibration = if calibration_ratio > 0.0 {
+            ((num_rows as f32) * calibration_ratio).ceil() as usize
+        } else {
+            0
+        };
         let calibration: Vec<usize> = indices.drain(..n_calibration).collect();
 
-        (indices, calibration)
+        // Then split off validation set from remaining
+        let n_validation = if validation_ratio > 0.0 {
+            ((indices.len() as f32) * validation_ratio / (1.0 - calibration_ratio)).ceil() as usize
+        } else {
+            0
+        };
+        let validation: Vec<usize> = indices.drain(..n_validation).collect();
+
+        // Remaining is training set
+        (indices, validation, calibration)
     }
 
     /// Compute quantile of a sorted slice
@@ -411,6 +497,75 @@ mod tests {
         for i in 0..preds.len() {
             assert!((preds[i] - lower[i] - (upper[i] - preds[i])).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn test_train_with_early_stopping() {
+        let dataset = create_regression_dataset(1000, 0.1);
+
+        let config = GBDTConfig::new()
+            .with_num_rounds(100) // Max rounds
+            .with_max_depth(4)
+            .with_early_stopping(5, 0.2); // Stop after 5 rounds without improvement, 20% validation
+
+        let model = GBDTModel::train(&dataset, config).unwrap();
+
+        // Should have stopped early (fewer than 100 trees)
+        // With deterministic data, early stopping should trigger
+        assert!(model.num_trees() < 100);
+        assert!(model.num_trees() > 0);
+    }
+
+    #[test]
+    fn test_train_with_subsampling() {
+        let dataset = create_regression_dataset(1000, 0.1);
+
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(4)
+            .with_subsample(0.8)  // 80% row subsampling
+            .with_colsample(0.8); // 80% column subsampling
+
+        let model = GBDTModel::train(&dataset, config).unwrap();
+
+        assert_eq!(model.num_trees(), 10);
+
+        // Predictions should still be reasonable
+        let predictions = model.predict(&dataset);
+        assert_eq!(predictions.len(), 1000);
+    }
+
+    #[test]
+    fn test_auto_column_reordering() {
+        let dataset = create_regression_dataset(500, 0.1);
+
+        // With column reordering enabled (default)
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(4);
+
+        let model = GBDTModel::train(&dataset, config).unwrap();
+
+        // Should have computed column permutation
+        assert!(model.column_permutation().is_some());
+        let permutation = model.column_permutation().unwrap();
+        assert_eq!(permutation.new_to_original().len(), 3); // 3 features
+    }
+
+    #[test]
+    fn test_column_reordering_disabled() {
+        let dataset = create_regression_dataset(500, 0.1);
+
+        // With column reordering disabled
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(4)
+            .with_column_reordering(false);
+
+        let model = GBDTModel::train(&dataset, config).unwrap();
+
+        // Should not have computed column permutation
+        assert!(model.column_permutation().is_none());
     }
 
     #[test]

@@ -66,6 +66,18 @@ enum Commands {
         #[arg(long, default_value_t = 1.0)]
         subsample: f32,
 
+        /// Column subsampling ratio (0.0 to 1.0)
+        #[arg(long, default_value_t = 1.0)]
+        colsample: f32,
+
+        /// Early stopping rounds (0 to disable)
+        #[arg(long, default_value_t = 0)]
+        early_stopping: usize,
+
+        /// Validation ratio for early stopping (e.g., 0.1 for 10%)
+        #[arg(long, default_value_t = 0.1)]
+        validation_ratio: f32,
+
         /// Loss function: mse or huber
         #[arg(long, default_value = "mse")]
         loss: String,
@@ -162,6 +174,9 @@ fn main() -> Result<()> {
             lambda,
             entropy_weight,
             subsample,
+            colsample,
+            early_stopping,
+            validation_ratio,
             loss,
             huber_delta,
             conformal,
@@ -197,7 +212,15 @@ fn main() -> Result<()> {
                 .with_min_samples_leaf(min_samples_leaf)
                 .with_lambda(lambda)
                 .with_entropy_weight(entropy_weight)
-                .with_subsample(subsample);
+                .with_subsample(subsample)
+                .with_colsample(colsample);
+
+            // Enable early stopping if requested
+            if early_stopping > 0 {
+                config = config.with_early_stopping(early_stopping, validation_ratio);
+                println!("Early stopping enabled: {} rounds, {:.1}% validation",
+                         early_stopping, validation_ratio * 100.0);
+            }
 
             // Set loss function
             config = match loss.as_str() {
@@ -239,6 +262,15 @@ fn main() -> Result<()> {
             println!("  Loss: {}", loss);
             if entropy_weight > 0.0 {
                 println!("  Entropy weight: {}", entropy_weight);
+            }
+            if subsample < 1.0 {
+                println!("  Row subsampling: {:.0}%", subsample * 100.0);
+            }
+            if colsample < 1.0 {
+                println!("  Column subsampling: {:.0}%", colsample * 100.0);
+            }
+            if early_stopping > 0 {
+                println!("  Early stopping: {} rounds, {:.0}% validation", early_stopping, validation_ratio * 100.0);
             }
             println!("  Optimizations:");
             println!("    Parallel prediction: {}", config.parallel_prediction);
