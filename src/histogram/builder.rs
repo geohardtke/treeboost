@@ -1,7 +1,25 @@
 //! Parallel histogram construction
+//!
+//! # Performance Notes
+//!
+//! Histogram accumulation is inherently difficult to vectorize because:
+//! 1. The scatter operation (accumulating into bins) has potential conflicts
+//! 2. AVX2 gather has high latency for random access patterns
+//! 3. True SIMD scatter requires AVX-512 conflict detection
+//!
+//! Our approach:
+//! - **Contiguous rows** (e.g., root node): Use AVX2 `loadu_ps` for fast SIMD loads
+//! - **Indexed rows** (e.g., child nodes): Use 8x unrolled scalar for ILP
+//!
+//! The scatter (accumulation) is always scalar due to bin conflicts.
+//!
+//! XGBoost/LightGBM use different strategies:
+//! - XGBoost: Local buffers with prefetching
+//! - LightGBM: Pre-reorders data for sequential access
 
 use crate::dataset::BinnedDataset;
 use crate::histogram::{Histogram, NodeHistograms};
+use crate::kernel;
 use rayon::prelude::*;
 
 /// Histogram builder with feature-parallel construction
@@ -46,36 +64,50 @@ impl HistogramBuilder {
     ) -> NodeHistograms {
         let num_features = dataset.num_features();
 
+        // Check if rows are contiguous (0..n) - enables SIMD load optimization
+        let is_contiguous = Self::is_contiguous(row_indices);
+
         // Build histograms in parallel across features
         let histograms: Vec<Histogram> = (0..num_features)
             .into_par_iter()
             .map(|feature_idx| {
-                self.build_single_feature_indexed(
-                    dataset,
-                    feature_idx,
-                    row_indices,
-                    gradients,
-                    hessians,
-                )
+                if is_contiguous {
+                    self.build_single_feature_contiguous(
+                        dataset,
+                        feature_idx,
+                        row_indices.len(),
+                        gradients,
+                        hessians,
+                    )
+                } else {
+                    self.build_single_feature_indexed(
+                        dataset,
+                        feature_idx,
+                        row_indices,
+                        gradients,
+                        hessians,
+                    )
+                }
             })
             .collect();
 
         NodeHistograms::from_vec(histograms)
     }
 
-    /// Check if row_indices is contiguous starting from 0
+    /// Check if row_indices represents contiguous range 0..n
     #[inline]
     fn is_contiguous(row_indices: &[usize]) -> bool {
         if row_indices.is_empty() {
             return true;
         }
-        // Check first and last - if they match expected values, it's contiguous
-        row_indices[0] == 0 && row_indices[row_indices.len() - 1] == row_indices.len() - 1
+        // Check first element and length - if first is 0 and indices are sequential
+        row_indices[0] == 0 && row_indices.last() == Some(&(row_indices.len() - 1))
     }
 
-    /// Build histogram for a single feature using contiguous access (optimized path)
+    /// Build histogram for contiguous rows using SIMD-optimized loads
     ///
-    /// When rows are 0..n, we can iterate directly without indirection
+    /// Uses AVX2 `loadu_ps` to load 8 gradients/hessians at once (sequential access).
+    /// The scatter is still scalar due to bin conflicts.
     #[inline]
     fn build_single_feature_contiguous(
         &self,
@@ -85,20 +117,33 @@ impl HistogramBuilder {
         gradients: &[f32],
         hessians: &[f32],
     ) -> Histogram {
-        let mut histogram = Histogram::new();
-        let feature_column = &dataset.feature_column(feature_idx)[..num_rows];
-        let gradients = &gradients[..num_rows];
-        let hessians = &hessians[..num_rows];
+        let feature_column = dataset.feature_column(feature_idx);
 
-        // Use batch accumulation for better cache behavior
-        histogram.accumulate_batch(feature_column, gradients, hessians);
+        let mut hist_grads = [0.0f32; 256];
+        let mut hist_hess = [0.0f32; 256];
+        let mut hist_counts = [0u32; 256];
 
-        histogram
+        unsafe {
+            kernel::histogram_accumulate_contiguous(
+                feature_column.as_ptr(),
+                num_rows,
+                gradients.as_ptr(),
+                hessians.as_ptr(),
+                hist_grads.as_mut_ptr(),
+                hist_hess.as_mut_ptr(),
+                hist_counts.as_mut_ptr(),
+            );
+        }
+
+        // Convert raw arrays to Histogram
+        Histogram::from_raw_arrays(&hist_grads, &hist_hess, &hist_counts)
     }
 
-    /// Build histogram for a single feature using indexed access (general path)
+    /// Build histogram for a single feature using indexed access
     ///
-    /// Uses 8x loop unrolling for better instruction-level parallelism.
+    /// Uses 8x unrolled scalar loop for best performance.
+    /// Note: AVX2 gather was tested but is slower due to gather latency overhead
+    /// and the fundamental scatter bottleneck in histogram accumulation.
     #[inline]
     fn build_single_feature_indexed(
         &self,
@@ -108,8 +153,25 @@ impl HistogramBuilder {
         gradients: &[f32],
         hessians: &[f32],
     ) -> Histogram {
-        let mut histogram = Histogram::new();
         let feature_column = dataset.feature_column(feature_idx);
+        self.build_single_feature_scalar(feature_column, row_indices, gradients, hessians)
+    }
+
+    /// Build histogram using scalar 8x unrolled loop
+    ///
+    /// This is the fastest path for histogram accumulation because:
+    /// 1. 8x unrolling provides good ILP
+    /// 2. AVX2 gather has high latency for scattered indices
+    /// 3. The scatter operation cannot be vectorized due to bin conflicts
+    #[inline]
+    fn build_single_feature_scalar(
+        &self,
+        feature_column: &[u8],
+        row_indices: &[usize],
+        gradients: &[f32],
+        hessians: &[f32],
+    ) -> Histogram {
+        let mut histogram = Histogram::new();
 
         let len = row_indices.len();
         let chunks = len / 8;

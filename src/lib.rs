@@ -40,6 +40,7 @@ pub mod dataset;
 pub mod encoding;
 pub mod histogram;
 pub mod inference;
+pub mod kernel;
 pub mod loss;
 pub mod serialize;
 pub mod tree;

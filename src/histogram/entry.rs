@@ -8,10 +8,6 @@ use rkyv::{Archive, Deserialize, Serialize};
 /// Number of bins per histogram (u8 range)
 pub const NUM_BINS: usize = 256;
 
-/// SIMD lane width for f32 operations (AVX2 = 8, SSE = 4)
-#[cfg(target_arch = "x86_64")]
-const SIMD_WIDTH: usize = 8;
-
 /// Histogram for a single feature
 ///
 /// Fixed-size array of 256 bin entries for gradient/hessian accumulation.
@@ -33,6 +29,24 @@ impl Histogram {
         Self {
             bins: [BinEntry::default(); NUM_BINS],
         }
+    }
+
+    /// Create histogram from raw arrays (used by SIMD kernels)
+    ///
+    /// # Arguments
+    /// * `grads` - Sum of gradients per bin [256]
+    /// * `hess` - Sum of hessians per bin [256]
+    /// * `counts` - Count per bin [256]
+    pub fn from_raw_arrays(grads: &[f32; 256], hess: &[f32; 256], counts: &[u32; 256]) -> Self {
+        let mut bins = [BinEntry::default(); NUM_BINS];
+        for i in 0..NUM_BINS {
+            bins[i] = BinEntry {
+                sum_gradients: grads[i],
+                sum_hessians: hess[i],
+                count: counts[i],
+            };
+        }
+        Self { bins }
     }
 
     /// Clear all bins
