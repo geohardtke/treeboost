@@ -6,10 +6,12 @@
 //! - `DataPipeline`: Full dirty data pipeline (CMS filter → Target Encode → Bin)
 //! - `PackedColumn`: 4-bit packed storage for memory efficiency
 //! - `ColumnPermutation`: Cache-aware column reordering
+//! - `FeatureBundler`: Exclusive Feature Bundling (EFB) for mutually exclusive features
 //! - Data loading utilities for Polars DataFrames
 
 mod binned;
 mod binner;
+mod bundler;
 mod loader;
 mod packed;
 mod pipeline;
@@ -17,6 +19,7 @@ mod reorder;
 
 pub use binned::{BinEntry, BinnedDataset, FeatureInfo, FeatureType, SparseColumn, DEFAULT_BIN, SPARSITY_THRESHOLD};
 pub use binner::{DatasetBinner, QuantileBinner, DEFAULT_NUM_BINS, MAX_BINS};
+pub use bundler::{BundledDataset, BundlerConfig, BundlingResult, FeatureBundle, FeatureBundler};
 pub use loader::DatasetLoader;
 pub use packed::{
     can_pack, optimal_storage, FeatureStorage, PackedColumn, PackedDataset, StorageMode,

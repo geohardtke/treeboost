@@ -5,7 +5,7 @@ use rand::prelude::*;
 use std::time::Duration;
 
 use treeboost::booster::{GBDTConfig, GBDTModel};
-use treeboost::dataset::{BinnedDataset, FeatureInfo, FeatureType};
+use treeboost::dataset::{BinnedDataset, BundledDataset, FeatureBundler, FeatureInfo, FeatureType};
 
 /// Generate synthetic regression dataset
 fn generate_data(num_rows: usize, num_features: usize, seed: u64) -> (Vec<f64>, Vec<f64>) {
@@ -52,6 +52,51 @@ fn generate_sparse_data(
         targets.push(row_sum + rng.gen_range(-1.0..1.0));
     }
     (features, targets)
+}
+
+/// Generate dataset with one-hot encoded categorical features
+/// Each "category" has `bins_per_category` one-hot features that are mutually exclusive
+/// num_categories: number of categorical variables to encode
+/// bins_per_category: number of bins per category (one-hot columns)
+fn generate_onehot_data(
+    num_rows: usize,
+    num_categories: usize,
+    bins_per_category: usize,
+    seed: u64,
+) -> (Vec<u8>, Vec<f32>, Vec<FeatureInfo>) {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let total_features = num_categories * bins_per_category;
+
+    // Column-major format: features[feature_idx * num_rows + row_idx]
+    let mut features = vec![0u8; num_rows * total_features];
+    let mut targets = Vec::with_capacity(num_rows);
+
+    for row in 0..num_rows {
+        let mut target = 0.0f32;
+        for cat in 0..num_categories {
+            // Pick one random bin for this category
+            let active_bin = rng.gen_range(0..bins_per_category);
+            let feature_idx = cat * bins_per_category + active_bin;
+            features[feature_idx * num_rows + row] = 1;
+            target += (cat as f32 + 1.0) * (active_bin as f32 + 1.0) * 0.1;
+        }
+        targets.push(target + rng.gen_range(-0.5..0.5));
+    }
+
+    let feature_info: Vec<FeatureInfo> = (0..total_features)
+        .map(|f| {
+            let cat = f / bins_per_category;
+            let bin = f % bins_per_category;
+            FeatureInfo {
+                name: format!("cat{}_bin{}", cat, bin),
+                feature_type: FeatureType::Categorical,
+                num_bins: 2, // 0 or 1
+                bin_boundaries: vec![],
+            }
+        })
+        .collect();
+
+    (features, targets, feature_info)
 }
 
 /// Convert to TreeBoost format
@@ -597,5 +642,115 @@ fn benchmark_training_components(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, benchmark_prediction_components, benchmark_histogram_building, benchmark_training_components);
+fn benchmark_efb(c: &mut Criterion) {
+    use treeboost::histogram::HistogramBuilder;
+
+    let mut group = c.benchmark_group("EFBProfile");
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+
+    // Test case: 10 categories with 10 one-hot bins each = 100 features → should bundle to 10
+    let num_rows = 100_000;
+    let num_categories = 10;
+    let bins_per_category = 10;
+
+    let (features, targets, feature_info) = generate_onehot_data(num_rows, num_categories, bins_per_category, 42);
+    let total_features = num_categories * bins_per_category;
+
+    let dataset = BinnedDataset::new(num_rows, features, targets, feature_info);
+
+    // Benchmark bundling analysis
+    group.bench_function("bundling_analysis_100_features", |b| {
+        b.iter(|| {
+            let bundler = FeatureBundler::new();
+            black_box(bundler.find_bundles(&dataset))
+        });
+    });
+
+    // Create bundled dataset
+    let bundler = FeatureBundler::new();
+    let bundling = bundler.find_bundles(&dataset);
+    eprintln!(
+        "EFB: {} features → {} bundles (compression: {:.1}x)",
+        bundling.num_original_features,
+        bundling.num_bundles,
+        bundling.compression_ratio()
+    );
+
+    group.bench_function("bundled_dataset_creation", |b| {
+        b.iter(|| {
+            black_box(BundledDataset::from_dataset(&dataset, &bundling))
+        });
+    });
+
+    let bundled = BundledDataset::from_dataset(&dataset, &bundling);
+    eprintln!(
+        "Memory savings: {} bytes ({:.1}% of original)",
+        bundled.memory_savings(),
+        100.0 - (bundled.num_bundles() as f64 / total_features as f64) * 100.0
+    );
+
+    // Benchmark histogram building on original vs bundled
+    let gradients: Vec<f32> = (0..num_rows).map(|i| (i as f32) * 0.001).collect();
+    let hessians: Vec<f32> = vec![1.0; num_rows];
+    let row_indices: Vec<usize> = (0..num_rows).collect();
+
+    let builder = HistogramBuilder::new();
+
+    group.bench_function("histogram_original_100_features", |b| {
+        b.iter(|| {
+            black_box(builder.build(&dataset, &row_indices, &gradients, &hessians))
+        });
+    });
+
+    // For bundled histogram, we build on each bundle column
+    // This simulates what training would do with bundled data
+    group.bench_function("histogram_bundled_columns", |b| {
+        b.iter(|| {
+            let mut total_sum = 0.0f32;
+            for bundle_idx in 0..bundled.num_bundles() {
+                let col = bundled.bundle_column(bundle_idx);
+                let bundle = bundled.bundle(bundle_idx);
+                // Accumulate to a single histogram for the bundle
+                let mut sum_grads = 0.0f32;
+                for (i, &bin) in col.iter().enumerate() {
+                    if bin != 0 {
+                        sum_grads += gradients[i];
+                    }
+                }
+                total_sum += sum_grads * bundle.total_bins as f32;
+            }
+            black_box(total_sum)
+        });
+    });
+
+    // Medium test: 50 categories with 10 bins = 500 features → ~50 bundles
+    let (features_medium, targets_medium, info_medium) = generate_onehot_data(num_rows, 50, 10, 42);
+    let dataset_medium = BinnedDataset::new(num_rows, features_medium, targets_medium, info_medium);
+
+    group.bench_function("bundling_analysis_500_features", |b| {
+        b.iter(|| {
+            let bundler = FeatureBundler::new();
+            black_box(bundler.find_bundles(&dataset_medium))
+        });
+    });
+
+    let bundling_medium = bundler.find_bundles(&dataset_medium);
+    eprintln!(
+        "EFB (500 features): {} → {} bundles (compression: {:.1}x)",
+        bundling_medium.num_original_features,
+        bundling_medium.num_bundles,
+        bundling_medium.compression_ratio()
+    );
+
+    group.bench_function("histogram_original_500_features", |b| {
+        b.iter(|| {
+            black_box(builder.build(&dataset_medium, &row_indices, &gradients, &hessians))
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, benchmark_prediction_components, benchmark_histogram_building, benchmark_training_components, benchmark_efb);
 criterion_main!(benches);
