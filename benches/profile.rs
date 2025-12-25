@@ -156,12 +156,244 @@ fn benchmark_prediction_components(c: &mut Criterion) {
     group.finish();
 }
 
+fn benchmark_histogram_building(c: &mut Criterion) {
+    use treeboost::histogram::{Histogram, HistogramBuilder};
+
+    let mut group = c.benchmark_group("HistogramProfile");
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+
+    let num_rows = 100_000;
+    let num_features = 10;
+
+    let (features, targets) = generate_data(num_rows, num_features, 42);
+    let dataset = to_treeboost_dataset(&features, &targets, num_rows, num_features);
+
+    // Create gradients/hessians
+    let gradients: Vec<f32> = (0..num_rows).map(|i| (i as f32) * 0.001).collect();
+    let hessians: Vec<f32> = vec![1.0; num_rows];
+
+    // Contiguous row indices (root node case)
+    let contiguous_rows: Vec<usize> = (0..num_rows).collect();
+
+    // Sparse row indices (child node case - every other row)
+    let sparse_rows: Vec<usize> = (0..num_rows).step_by(2).collect();
+
+    let builder = HistogramBuilder::new();
+
+    group.bench_function("histogram_contiguous_100k", |b| {
+        b.iter(|| {
+            black_box(builder.build(&dataset, &contiguous_rows, &gradients, &hessians))
+        });
+    });
+
+    group.bench_function("histogram_sparse_50k", |b| {
+        b.iter(|| {
+            black_box(builder.build(&dataset, &sparse_rows, &gradients, &hessians))
+        });
+    });
+
+    // Single feature histogram - the innermost hot loop
+    let feature_col = dataset.feature_column(0);
+    group.bench_function("single_feature_accumulate_100k", |b| {
+        b.iter(|| {
+            let mut hist = Histogram::new();
+            for i in 0..num_rows {
+                let bin = feature_col[i];
+                hist.accumulate(bin, gradients[i], hessians[i]);
+            }
+            black_box(hist)
+        });
+    });
+
+    // Zip-based single feature (what contiguous path uses)
+    group.bench_function("single_feature_zip_100k", |b| {
+        b.iter(|| {
+            let mut hist = Histogram::new();
+            for ((&bin, &grad), &hess) in feature_col.iter().zip(&gradients).zip(&hessians) {
+                hist.accumulate(bin, grad, hess);
+            }
+            black_box(hist)
+        });
+    });
+
+    // Batch accumulate (new optimized path)
+    group.bench_function("single_feature_batch_100k", |b| {
+        b.iter(|| {
+            let mut hist = Histogram::new();
+            hist.accumulate_batch(feature_col, &gradients, &hessians);
+            black_box(hist)
+        });
+    });
+
+    // Indexed access (what child nodes use) - simulates sparse row_indices
+    group.bench_function("single_feature_indexed_100k", |b| {
+        b.iter(|| {
+            let mut hist = Histogram::new();
+            let bins = hist.bins_mut();
+            let len = contiguous_rows.len();
+            let chunks = len / 8;
+            let remainder = len % 8;
+
+            unsafe {
+                for i in 0..chunks {
+                    let base = i * 8;
+                    let idx0 = *contiguous_rows.get_unchecked(base);
+                    let idx1 = *contiguous_rows.get_unchecked(base + 1);
+                    let idx2 = *contiguous_rows.get_unchecked(base + 2);
+                    let idx3 = *contiguous_rows.get_unchecked(base + 3);
+                    let idx4 = *contiguous_rows.get_unchecked(base + 4);
+                    let idx5 = *contiguous_rows.get_unchecked(base + 5);
+                    let idx6 = *contiguous_rows.get_unchecked(base + 6);
+                    let idx7 = *contiguous_rows.get_unchecked(base + 7);
+
+                    let bin0 = *feature_col.get_unchecked(idx0) as usize;
+                    let bin1 = *feature_col.get_unchecked(idx1) as usize;
+                    let bin2 = *feature_col.get_unchecked(idx2) as usize;
+                    let bin3 = *feature_col.get_unchecked(idx3) as usize;
+                    let bin4 = *feature_col.get_unchecked(idx4) as usize;
+                    let bin5 = *feature_col.get_unchecked(idx5) as usize;
+                    let bin6 = *feature_col.get_unchecked(idx6) as usize;
+                    let bin7 = *feature_col.get_unchecked(idx7) as usize;
+
+                    let grad0 = *gradients.get_unchecked(idx0);
+                    let grad1 = *gradients.get_unchecked(idx1);
+                    let grad2 = *gradients.get_unchecked(idx2);
+                    let grad3 = *gradients.get_unchecked(idx3);
+                    let grad4 = *gradients.get_unchecked(idx4);
+                    let grad5 = *gradients.get_unchecked(idx5);
+                    let grad6 = *gradients.get_unchecked(idx6);
+                    let grad7 = *gradients.get_unchecked(idx7);
+
+                    let hess0 = *hessians.get_unchecked(idx0);
+                    let hess1 = *hessians.get_unchecked(idx1);
+                    let hess2 = *hessians.get_unchecked(idx2);
+                    let hess3 = *hessians.get_unchecked(idx3);
+                    let hess4 = *hessians.get_unchecked(idx4);
+                    let hess5 = *hessians.get_unchecked(idx5);
+                    let hess6 = *hessians.get_unchecked(idx6);
+                    let hess7 = *hessians.get_unchecked(idx7);
+
+                    bins.get_unchecked_mut(bin0).accumulate(grad0, hess0);
+                    bins.get_unchecked_mut(bin1).accumulate(grad1, hess1);
+                    bins.get_unchecked_mut(bin2).accumulate(grad2, hess2);
+                    bins.get_unchecked_mut(bin3).accumulate(grad3, hess3);
+                    bins.get_unchecked_mut(bin4).accumulate(grad4, hess4);
+                    bins.get_unchecked_mut(bin5).accumulate(grad5, hess5);
+                    bins.get_unchecked_mut(bin6).accumulate(grad6, hess6);
+                    bins.get_unchecked_mut(bin7).accumulate(grad7, hess7);
+                }
+                let base = chunks * 8;
+                for i in 0..remainder {
+                    let idx = *contiguous_rows.get_unchecked(base + i);
+                    let bin = *feature_col.get_unchecked(idx) as usize;
+                    bins.get_unchecked_mut(bin).accumulate(
+                        *gradients.get_unchecked(idx),
+                        *hessians.get_unchecked(idx),
+                    );
+                }
+            }
+            black_box(hist)
+        });
+    });
+
+    // Benchmark a single tree grow (the main per-round cost)
+    group.bench_function("single_tree_grow_100k", |b| {
+        use treeboost::tree::TreeGrower;
+        use treeboost::loss::{LossFunction, MseLoss};
+
+        let loss = MseLoss::new();
+        let predictions = vec![0.0f32; num_rows];
+        let targets_f32: Vec<f32> = targets.iter().map(|&t| t as f32).collect();
+
+        // Pre-compute gradients/hessians
+        let (grads, hess): (Vec<f32>, Vec<f32>) = targets_f32.iter()
+            .zip(&predictions)
+            .map(|(&t, &p)| loss.gradient_hessian(t, p))
+            .unzip();
+
+        let grower = TreeGrower::new()
+            .with_max_depth(6)
+            .with_max_leaves(31)
+            .with_learning_rate(0.1)
+            .with_lambda(1.0);
+
+        let row_indices: Vec<usize> = (0..num_rows).collect();
+
+        b.iter(|| {
+            black_box(grower.grow_with_indices(&dataset, &grads, &hess, &row_indices))
+        });
+    });
+
+    group.finish();
+}
+
 fn benchmark_training_components(c: &mut Criterion) {
+    use treeboost::dataset::QuantileBinner;
+
     let mut group = c.benchmark_group("TrainingProfile");
     group.measurement_time(Duration::from_secs(10));
     group.sample_size(20);
 
     let num_features = 10;
+
+    // Benchmark binning separately (to match Python benchmark behavior)
+    group.bench_function("binning_8k_20features", |b| {
+        let num_rows = 8000;
+        let num_features = 20;
+        let (features, _targets) = generate_data(num_rows, num_features, 42);
+        let binner = QuantileBinner::new(255);
+
+        b.iter(|| {
+            let mut binned_data = Vec::with_capacity(num_rows * num_features);
+            for f in 0..num_features {
+                let col: Vec<f64> = (0..num_rows)
+                    .map(|r| features[r * num_features + f])
+                    .collect();
+                let boundaries = binner.compute_boundaries(&col);
+                let binned = binner.bin_column(&col, &boundaries);
+                binned_data.extend(binned);
+            }
+            black_box(binned_data)
+        });
+    });
+
+    // Training with pre-binned data (matches Python: binning done once before training loop)
+    group.bench_function("train_8k_20features_100rounds_prebinned", |b| {
+        let num_rows = 8000;
+        let num_features = 20;
+        let (features, targets) = generate_data(num_rows, num_features, 42);
+        let dataset = to_treeboost_dataset(&features, &targets, num_rows, num_features);
+        let config = GBDTConfig::new()
+            .with_num_rounds(100)
+            .with_max_depth(6)
+            .with_max_leaves(31)
+            .with_learning_rate(0.1);
+
+        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+    });
+
+    // Training with random noise targets (matches Python test_timing.py exactly)
+    group.bench_function("train_8k_20features_100rounds_random", |b| {
+        let num_rows = 8000;
+        let num_features = 20;
+        // Use pure random targets like Python benchmark
+        let mut rng = StdRng::seed_from_u64(42);
+        let features: Vec<f64> = (0..num_rows * num_features)
+            .map(|_| rng.gen::<f64>() * 2.0 - 1.0) // Standard normal-ish
+            .collect();
+        let targets: Vec<f64> = (0..num_rows)
+            .map(|_| rng.gen::<f64>() * 2.0 - 1.0) // Random targets
+            .collect();
+        let dataset = to_treeboost_dataset(&features, &targets, num_rows, num_features);
+        let config = GBDTConfig::new()
+            .with_num_rounds(100)
+            .with_max_depth(6)
+            .with_max_leaves(31)
+            .with_learning_rate(0.1);
+
+        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+    });
 
     // Small dataset training
     group.bench_function("train_1k_rows_10_rounds", |b| {
@@ -265,5 +497,5 @@ fn benchmark_training_components(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, benchmark_prediction_components, benchmark_training_components);
+criterion_group!(benches, benchmark_prediction_components, benchmark_histogram_building, benchmark_training_components);
 criterion_main!(benches);

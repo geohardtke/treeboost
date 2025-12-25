@@ -87,7 +87,7 @@ impl GBDTModel {
         let mut best_num_trees = 0;
 
         for _round in 0..config.num_rounds {
-            // Compute gradients and hessians for training data only
+            // Compute gradients and hessians (sequential - too fine-grained to parallelize)
             for &idx in &train_indices {
                 let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
                 gradients[idx] = g;
@@ -108,9 +108,15 @@ impl GBDTModel {
             // Grow tree using subsampled training indices
             let tree = tree_grower.grow_with_indices(dataset, &gradients, &hessians, &sample_indices);
 
-            // Update predictions for all rows (including validation for loss computation)
-            for row_idx in 0..dataset.num_rows() {
-                predictions[row_idx] += tree.predict_row(dataset, row_idx);
+            // Batch predict all rows and update predictions in parallel
+            let tree_predictions: Vec<f32> = (0..dataset.num_rows())
+                .into_par_iter()
+                .map(|row_idx| tree.predict_row(dataset, row_idx))
+                .collect();
+
+            // Update predictions
+            for (pred, tree_pred) in predictions.iter_mut().zip(tree_predictions.iter()) {
+                *pred += tree_pred;
             }
 
             trees.push(tree);

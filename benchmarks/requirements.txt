@@ -1,0 +1,14 @@
+# TreeBoost Benchmark Requirements
+# Install with: pip install -r benchmarks/requirements.txt
+
+# Core dependencies
+numpy>=1.20
+matplotlib>=3.5
+
+# GBDT libraries for comparison
+xgboost>=2.0
+lightgbm>=4.0
+catboost>=1.2
+
+# Optional: for more detailed system info
+psutil>=5.9

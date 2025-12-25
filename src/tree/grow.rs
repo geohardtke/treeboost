@@ -254,7 +254,7 @@ impl TreeGrower {
         // Initialize priority queue with root candidate
         let mut candidates: BinaryHeap<SplitCandidate> = BinaryHeap::new();
 
-        // Build root histograms from subsampled rows
+        // Build root histograms from subsampled rows (feature-parallel via Rayon)
         let all_rows: Vec<usize> = row_indices.to_vec();
         let root_histograms = histogram_builder.build(dataset, &all_rows, gradients, hessians);
 
@@ -388,7 +388,7 @@ impl TreeGrower {
                     )
                 };
 
-            // Build histogram for smaller child directly
+            // Build histogram for smaller child directly (feature-parallel via Rayon)
             let smaller_histograms =
                 histogram_builder.build(dataset, &smaller_rows, gradients, hessians);
 

@@ -50,15 +50,57 @@ impl HistogramBuilder {
         let histograms: Vec<Histogram> = (0..num_features)
             .into_par_iter()
             .map(|feature_idx| {
-                self.build_single_feature(dataset, feature_idx, row_indices, gradients, hessians)
+                self.build_single_feature_indexed(
+                    dataset,
+                    feature_idx,
+                    row_indices,
+                    gradients,
+                    hessians,
+                )
             })
             .collect();
 
         NodeHistograms::from_vec(histograms)
     }
 
-    /// Build histogram for a single feature
-    fn build_single_feature(
+    /// Check if row_indices is contiguous starting from 0
+    #[inline]
+    fn is_contiguous(row_indices: &[usize]) -> bool {
+        if row_indices.is_empty() {
+            return true;
+        }
+        // Check first and last - if they match expected values, it's contiguous
+        row_indices[0] == 0 && row_indices[row_indices.len() - 1] == row_indices.len() - 1
+    }
+
+    /// Build histogram for a single feature using contiguous access (optimized path)
+    ///
+    /// When rows are 0..n, we can iterate directly without indirection
+    #[inline]
+    fn build_single_feature_contiguous(
+        &self,
+        dataset: &BinnedDataset,
+        feature_idx: usize,
+        num_rows: usize,
+        gradients: &[f32],
+        hessians: &[f32],
+    ) -> Histogram {
+        let mut histogram = Histogram::new();
+        let feature_column = &dataset.feature_column(feature_idx)[..num_rows];
+        let gradients = &gradients[..num_rows];
+        let hessians = &hessians[..num_rows];
+
+        // Use batch accumulation for better cache behavior
+        histogram.accumulate_batch(feature_column, gradients, hessians);
+
+        histogram
+    }
+
+    /// Build histogram for a single feature using indexed access (general path)
+    ///
+    /// Uses 8x loop unrolling for better instruction-level parallelism.
+    #[inline]
+    fn build_single_feature_indexed(
         &self,
         dataset: &BinnedDataset,
         feature_idx: usize,
@@ -69,11 +111,70 @@ impl HistogramBuilder {
         let mut histogram = Histogram::new();
         let feature_column = dataset.feature_column(feature_idx);
 
-        for &row_idx in row_indices {
-            let bin = feature_column[row_idx];
-            let grad = gradients[row_idx];
-            let hess = hessians[row_idx];
-            histogram.accumulate(bin, grad, hess);
+        let len = row_indices.len();
+        let chunks = len / 8;
+        let remainder = len % 8;
+
+        unsafe {
+            // Process 8 samples at a time
+            for i in 0..chunks {
+                let base = i * 8;
+
+                let idx0 = *row_indices.get_unchecked(base);
+                let idx1 = *row_indices.get_unchecked(base + 1);
+                let idx2 = *row_indices.get_unchecked(base + 2);
+                let idx3 = *row_indices.get_unchecked(base + 3);
+                let idx4 = *row_indices.get_unchecked(base + 4);
+                let idx5 = *row_indices.get_unchecked(base + 5);
+                let idx6 = *row_indices.get_unchecked(base + 6);
+                let idx7 = *row_indices.get_unchecked(base + 7);
+
+                let bin0 = *feature_column.get_unchecked(idx0) as usize;
+                let bin1 = *feature_column.get_unchecked(idx1) as usize;
+                let bin2 = *feature_column.get_unchecked(idx2) as usize;
+                let bin3 = *feature_column.get_unchecked(idx3) as usize;
+                let bin4 = *feature_column.get_unchecked(idx4) as usize;
+                let bin5 = *feature_column.get_unchecked(idx5) as usize;
+                let bin6 = *feature_column.get_unchecked(idx6) as usize;
+                let bin7 = *feature_column.get_unchecked(idx7) as usize;
+
+                let grad0 = *gradients.get_unchecked(idx0);
+                let grad1 = *gradients.get_unchecked(idx1);
+                let grad2 = *gradients.get_unchecked(idx2);
+                let grad3 = *gradients.get_unchecked(idx3);
+                let grad4 = *gradients.get_unchecked(idx4);
+                let grad5 = *gradients.get_unchecked(idx5);
+                let grad6 = *gradients.get_unchecked(idx6);
+                let grad7 = *gradients.get_unchecked(idx7);
+
+                let hess0 = *hessians.get_unchecked(idx0);
+                let hess1 = *hessians.get_unchecked(idx1);
+                let hess2 = *hessians.get_unchecked(idx2);
+                let hess3 = *hessians.get_unchecked(idx3);
+                let hess4 = *hessians.get_unchecked(idx4);
+                let hess5 = *hessians.get_unchecked(idx5);
+                let hess6 = *hessians.get_unchecked(idx6);
+                let hess7 = *hessians.get_unchecked(idx7);
+
+                histogram.bins_mut().get_unchecked_mut(bin0).accumulate(grad0, hess0);
+                histogram.bins_mut().get_unchecked_mut(bin1).accumulate(grad1, hess1);
+                histogram.bins_mut().get_unchecked_mut(bin2).accumulate(grad2, hess2);
+                histogram.bins_mut().get_unchecked_mut(bin3).accumulate(grad3, hess3);
+                histogram.bins_mut().get_unchecked_mut(bin4).accumulate(grad4, hess4);
+                histogram.bins_mut().get_unchecked_mut(bin5).accumulate(grad5, hess5);
+                histogram.bins_mut().get_unchecked_mut(bin6).accumulate(grad6, hess6);
+                histogram.bins_mut().get_unchecked_mut(bin7).accumulate(grad7, hess7);
+            }
+
+            // Handle remainder
+            let base = chunks * 8;
+            for i in 0..remainder {
+                let idx = *row_indices.get_unchecked(base + i);
+                let bin = *feature_column.get_unchecked(idx) as usize;
+                let grad = *gradients.get_unchecked(idx);
+                let hess = *hessians.get_unchecked(idx);
+                histogram.bins_mut().get_unchecked_mut(bin).accumulate(grad, hess);
+            }
         }
 
         histogram
