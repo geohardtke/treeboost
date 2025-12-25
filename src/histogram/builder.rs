@@ -1,4 +1,14 @@
-//! Parallel histogram construction
+//! Parallel histogram construction with cache-blocking optimization
+//!
+//! # Cache-Blocked Architecture
+//!
+//! The key optimization is **cache blocking** (tiling):
+//! - Process rows in blocks of 2048 (16KB of gradients+hessians fits in L1)
+//! - For each block, update ALL feature histograms while gradients are hot in cache
+//! - Parallelize over row blocks, then reduce partial histograms
+//!
+//! This reduces memory bandwidth by factor of `num_features` compared to
+//! feature-parallel approach (which reads entire gradient array per feature).
 //!
 //! # Performance Notes
 //!
@@ -8,19 +18,19 @@
 //! 3. True SIMD scatter requires AVX-512 conflict detection
 //!
 //! Our approach:
+//! - **Cache blocking**: Load 2048 rows of gradients into L1, update all features
 //! - **Contiguous rows** (e.g., root node): Use AVX2 `loadu_ps` for fast SIMD loads
 //! - **Indexed rows** (e.g., child nodes): Use 8x unrolled scalar for ILP
 //!
 //! The scatter (accumulation) is always scalar due to bin conflicts.
-//!
-//! XGBoost/LightGBM use different strategies:
-//! - XGBoost: Local buffers with prefetching
-//! - LightGBM: Pre-reorders data for sequential access
 
 use crate::dataset::BinnedDataset;
 use crate::histogram::{Histogram, NodeHistograms};
-use crate::kernel;
 use rayon::prelude::*;
+
+/// Block size for cache-blocked histogram building
+/// 2048 rows * 8 bytes (gradient + hessian) = 16KB, fits in L1 cache
+const BLOCK_SIZE: usize = 2048;
 
 /// Histogram builder with feature-parallel construction
 pub struct HistogramBuilder {
@@ -48,7 +58,18 @@ impl HistogramBuilder {
         self
     }
 
-    /// Build histograms for all features at a node
+    /// Build histograms for all features at a node using cache-blocked approach
+    ///
+    /// # Cache-Blocking Strategy
+    ///
+    /// Instead of feature-parallel (which reads gradients N times for N features),
+    /// we use row-block-parallel:
+    /// 1. Divide rows into blocks of 2048 (fits in L1 cache)
+    /// 2. For each block, load gradients/hessians once
+    /// 3. Update ALL feature histograms while data is hot in cache
+    /// 4. Merge partial histograms from all blocks
+    ///
+    /// This reduces memory bandwidth by factor of `num_features`.
     ///
     /// # Arguments
     /// * `dataset` - The binned dataset
@@ -62,36 +83,305 @@ impl HistogramBuilder {
         gradients: &[f32],
         hessians: &[f32],
     ) -> NodeHistograms {
-        let num_features = dataset.num_features();
+        let num_rows = row_indices.len();
 
-        // Check if rows are contiguous (0..n) - enables SIMD load optimization
+        // For small datasets, use simple single-threaded approach
+        if num_rows < BLOCK_SIZE {
+            return self.build_single_block(dataset, row_indices, gradients, hessians);
+        }
+
+        // Check if rows are contiguous (0..n) - enables optimized path
         let is_contiguous = Self::is_contiguous(row_indices);
 
-        // Build histograms in parallel across features
-        let histograms: Vec<Histogram> = (0..num_features)
+        if is_contiguous {
+            // Contiguous case: parallelize over row blocks
+            self.build_blocked_contiguous(dataset, num_rows, gradients, hessians)
+        } else {
+            // Indexed case: parallelize over row blocks with indirection
+            self.build_blocked_indexed(dataset, row_indices, gradients, hessians)
+        }
+    }
+
+    /// Build histograms using cache-blocked approach for contiguous rows
+    fn build_blocked_contiguous(
+        &self,
+        dataset: &BinnedDataset,
+        num_rows: usize,
+        gradients: &[f32],
+        hessians: &[f32],
+    ) -> NodeHistograms {
+        let num_features = dataset.num_features();
+
+        // Process row blocks in parallel
+        let partial_histograms: Vec<NodeHistograms> = (0..num_rows)
             .into_par_iter()
-            .map(|feature_idx| {
-                if is_contiguous {
-                    self.build_single_feature_contiguous(
-                        dataset,
-                        feature_idx,
-                        row_indices.len(),
-                        gradients,
-                        hessians,
-                    )
-                } else {
-                    self.build_single_feature_indexed(
-                        dataset,
-                        feature_idx,
-                        row_indices,
-                        gradients,
-                        hessians,
-                    )
+            .step_by(BLOCK_SIZE)
+            .map(|block_start| {
+                let block_end = (block_start + BLOCK_SIZE).min(num_rows);
+                let block_len = block_end - block_start;
+
+                // Create local histograms for this block
+                let mut local_hists = NodeHistograms::new(num_features);
+
+                // Pre-load gradients/hessians for this block into stack arrays
+                // This ensures they stay hot in L1 cache
+                let mut grad_cache = [0.0f32; BLOCK_SIZE];
+                let mut hess_cache = [0.0f32; BLOCK_SIZE];
+
+                // Copy block data to cache (sequential read from main memory)
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        gradients.as_ptr().add(block_start),
+                        grad_cache.as_mut_ptr(),
+                        block_len,
+                    );
+                    std::ptr::copy_nonoverlapping(
+                        hessians.as_ptr().add(block_start),
+                        hess_cache.as_mut_ptr(),
+                        block_len,
+                    );
                 }
+
+                // Now iterate ALL features while gradients are hot in L1
+                for feature_idx in 0..num_features {
+                    let feature_column = dataset.feature_column(feature_idx);
+                    let hist = local_hists.get_mut(feature_idx);
+                    let bins = hist.bins_mut();
+
+                    // 8x unrolled accumulation with cached gradients
+                    let chunks = block_len / 8;
+                    let remainder = block_len % 8;
+
+                    unsafe {
+                        for i in 0..chunks {
+                            let base = i * 8;
+                            let row_base = block_start + base;
+
+                            // Load bins (sequential read from feature column)
+                            let bin0 = *feature_column.get_unchecked(row_base) as usize;
+                            let bin1 = *feature_column.get_unchecked(row_base + 1) as usize;
+                            let bin2 = *feature_column.get_unchecked(row_base + 2) as usize;
+                            let bin3 = *feature_column.get_unchecked(row_base + 3) as usize;
+                            let bin4 = *feature_column.get_unchecked(row_base + 4) as usize;
+                            let bin5 = *feature_column.get_unchecked(row_base + 5) as usize;
+                            let bin6 = *feature_column.get_unchecked(row_base + 6) as usize;
+                            let bin7 = *feature_column.get_unchecked(row_base + 7) as usize;
+
+                            // Load from L1 cache (fast!)
+                            let grad0 = *grad_cache.get_unchecked(base);
+                            let grad1 = *grad_cache.get_unchecked(base + 1);
+                            let grad2 = *grad_cache.get_unchecked(base + 2);
+                            let grad3 = *grad_cache.get_unchecked(base + 3);
+                            let grad4 = *grad_cache.get_unchecked(base + 4);
+                            let grad5 = *grad_cache.get_unchecked(base + 5);
+                            let grad6 = *grad_cache.get_unchecked(base + 6);
+                            let grad7 = *grad_cache.get_unchecked(base + 7);
+
+                            let hess0 = *hess_cache.get_unchecked(base);
+                            let hess1 = *hess_cache.get_unchecked(base + 1);
+                            let hess2 = *hess_cache.get_unchecked(base + 2);
+                            let hess3 = *hess_cache.get_unchecked(base + 3);
+                            let hess4 = *hess_cache.get_unchecked(base + 4);
+                            let hess5 = *hess_cache.get_unchecked(base + 5);
+                            let hess6 = *hess_cache.get_unchecked(base + 6);
+                            let hess7 = *hess_cache.get_unchecked(base + 7);
+
+                            // Scatter to histogram bins
+                            bins.get_unchecked_mut(bin0).accumulate(grad0, hess0);
+                            bins.get_unchecked_mut(bin1).accumulate(grad1, hess1);
+                            bins.get_unchecked_mut(bin2).accumulate(grad2, hess2);
+                            bins.get_unchecked_mut(bin3).accumulate(grad3, hess3);
+                            bins.get_unchecked_mut(bin4).accumulate(grad4, hess4);
+                            bins.get_unchecked_mut(bin5).accumulate(grad5, hess5);
+                            bins.get_unchecked_mut(bin6).accumulate(grad6, hess6);
+                            bins.get_unchecked_mut(bin7).accumulate(grad7, hess7);
+                        }
+
+                        // Handle remainder
+                        let rem_base = chunks * 8;
+                        for i in 0..remainder {
+                            let bin = *feature_column.get_unchecked(block_start + rem_base + i) as usize;
+                            let grad = *grad_cache.get_unchecked(rem_base + i);
+                            let hess = *hess_cache.get_unchecked(rem_base + i);
+                            bins.get_unchecked_mut(bin).accumulate(grad, hess);
+                        }
+                    }
+                }
+
+                local_hists
             })
             .collect();
 
-        NodeHistograms::from_vec(histograms)
+        // Reduce partial histograms
+        Self::reduce_histograms(partial_histograms, num_features)
+    }
+
+    /// Build histograms using cache-blocked approach for indexed (non-contiguous) rows
+    fn build_blocked_indexed(
+        &self,
+        dataset: &BinnedDataset,
+        row_indices: &[usize],
+        gradients: &[f32],
+        hessians: &[f32],
+    ) -> NodeHistograms {
+        let num_features = dataset.num_features();
+
+        // Process row blocks in parallel
+        let partial_histograms: Vec<NodeHistograms> = row_indices
+            .par_chunks(BLOCK_SIZE)
+            .map(|chunk| {
+                let block_len = chunk.len();
+
+                // Create local histograms for this block
+                let mut local_hists = NodeHistograms::new(num_features);
+
+                // Pre-load gradients/hessians for this block into stack arrays
+                // Gather from scattered indices into contiguous cache
+                let mut grad_cache = [0.0f32; BLOCK_SIZE];
+                let mut hess_cache = [0.0f32; BLOCK_SIZE];
+
+                unsafe {
+                    for (i, &row_idx) in chunk.iter().enumerate() {
+                        *grad_cache.get_unchecked_mut(i) = *gradients.get_unchecked(row_idx);
+                        *hess_cache.get_unchecked_mut(i) = *hessians.get_unchecked(row_idx);
+                    }
+                }
+
+                // Now iterate ALL features while gradients are hot in L1
+                for feature_idx in 0..num_features {
+                    let feature_column = dataset.feature_column(feature_idx);
+                    let hist = local_hists.get_mut(feature_idx);
+                    let bins = hist.bins_mut();
+
+                    // 8x unrolled accumulation with cached gradients
+                    let chunks_count = block_len / 8;
+                    let remainder = block_len % 8;
+
+                    unsafe {
+                        for i in 0..chunks_count {
+                            let base = i * 8;
+
+                            // Load row indices
+                            let idx0 = *chunk.get_unchecked(base);
+                            let idx1 = *chunk.get_unchecked(base + 1);
+                            let idx2 = *chunk.get_unchecked(base + 2);
+                            let idx3 = *chunk.get_unchecked(base + 3);
+                            let idx4 = *chunk.get_unchecked(base + 4);
+                            let idx5 = *chunk.get_unchecked(base + 5);
+                            let idx6 = *chunk.get_unchecked(base + 6);
+                            let idx7 = *chunk.get_unchecked(base + 7);
+
+                            // Load bins (scattered read from feature column)
+                            let bin0 = *feature_column.get_unchecked(idx0) as usize;
+                            let bin1 = *feature_column.get_unchecked(idx1) as usize;
+                            let bin2 = *feature_column.get_unchecked(idx2) as usize;
+                            let bin3 = *feature_column.get_unchecked(idx3) as usize;
+                            let bin4 = *feature_column.get_unchecked(idx4) as usize;
+                            let bin5 = *feature_column.get_unchecked(idx5) as usize;
+                            let bin6 = *feature_column.get_unchecked(idx6) as usize;
+                            let bin7 = *feature_column.get_unchecked(idx7) as usize;
+
+                            // Load from L1 cache (fast!)
+                            let grad0 = *grad_cache.get_unchecked(base);
+                            let grad1 = *grad_cache.get_unchecked(base + 1);
+                            let grad2 = *grad_cache.get_unchecked(base + 2);
+                            let grad3 = *grad_cache.get_unchecked(base + 3);
+                            let grad4 = *grad_cache.get_unchecked(base + 4);
+                            let grad5 = *grad_cache.get_unchecked(base + 5);
+                            let grad6 = *grad_cache.get_unchecked(base + 6);
+                            let grad7 = *grad_cache.get_unchecked(base + 7);
+
+                            let hess0 = *hess_cache.get_unchecked(base);
+                            let hess1 = *hess_cache.get_unchecked(base + 1);
+                            let hess2 = *hess_cache.get_unchecked(base + 2);
+                            let hess3 = *hess_cache.get_unchecked(base + 3);
+                            let hess4 = *hess_cache.get_unchecked(base + 4);
+                            let hess5 = *hess_cache.get_unchecked(base + 5);
+                            let hess6 = *hess_cache.get_unchecked(base + 6);
+                            let hess7 = *hess_cache.get_unchecked(base + 7);
+
+                            // Scatter to histogram bins
+                            bins.get_unchecked_mut(bin0).accumulate(grad0, hess0);
+                            bins.get_unchecked_mut(bin1).accumulate(grad1, hess1);
+                            bins.get_unchecked_mut(bin2).accumulate(grad2, hess2);
+                            bins.get_unchecked_mut(bin3).accumulate(grad3, hess3);
+                            bins.get_unchecked_mut(bin4).accumulate(grad4, hess4);
+                            bins.get_unchecked_mut(bin5).accumulate(grad5, hess5);
+                            bins.get_unchecked_mut(bin6).accumulate(grad6, hess6);
+                            bins.get_unchecked_mut(bin7).accumulate(grad7, hess7);
+                        }
+
+                        // Handle remainder
+                        let rem_base = chunks_count * 8;
+                        for i in 0..remainder {
+                            let idx = *chunk.get_unchecked(rem_base + i);
+                            let bin = *feature_column.get_unchecked(idx) as usize;
+                            let grad = *grad_cache.get_unchecked(rem_base + i);
+                            let hess = *hess_cache.get_unchecked(rem_base + i);
+                            bins.get_unchecked_mut(bin).accumulate(grad, hess);
+                        }
+                    }
+                }
+
+                local_hists
+            })
+            .collect();
+
+        // Reduce partial histograms
+        Self::reduce_histograms(partial_histograms, num_features)
+    }
+
+    /// Build histograms for a single small block (no parallelism needed)
+    fn build_single_block(
+        &self,
+        dataset: &BinnedDataset,
+        row_indices: &[usize],
+        gradients: &[f32],
+        hessians: &[f32],
+    ) -> NodeHistograms {
+        let num_features = dataset.num_features();
+        let mut node_hists = NodeHistograms::new(num_features);
+
+        // Pre-cache gradients/hessians
+        let block_len = row_indices.len();
+        let mut grad_cache = vec![0.0f32; block_len];
+        let mut hess_cache = vec![0.0f32; block_len];
+
+        for (i, &row_idx) in row_indices.iter().enumerate() {
+            grad_cache[i] = gradients[row_idx];
+            hess_cache[i] = hessians[row_idx];
+        }
+
+        // Process all features with cached gradients
+        for feature_idx in 0..num_features {
+            let feature_column = dataset.feature_column(feature_idx);
+            let hist = node_hists.get_mut(feature_idx);
+
+            for (i, &row_idx) in row_indices.iter().enumerate() {
+                let bin = feature_column[row_idx];
+                hist.accumulate(bin, grad_cache[i], hess_cache[i]);
+            }
+        }
+
+        node_hists
+    }
+
+    /// Reduce multiple partial histograms into one
+    fn reduce_histograms(partials: Vec<NodeHistograms>, num_features: usize) -> NodeHistograms {
+        if partials.is_empty() {
+            return NodeHistograms::new(num_features);
+        }
+
+        if partials.len() == 1 {
+            return partials.into_iter().next().unwrap();
+        }
+
+        // Parallel reduction
+        let mut result = NodeHistograms::new(num_features);
+        for partial in partials {
+            result.merge(&partial);
+        }
+        result
     }
 
     /// Check if row_indices represents contiguous range 0..n
@@ -102,192 +392,6 @@ impl HistogramBuilder {
         }
         // Check first element and length - if first is 0 and indices are sequential
         row_indices[0] == 0 && row_indices.last() == Some(&(row_indices.len() - 1))
-    }
-
-    /// Build histogram for contiguous rows using SIMD-optimized loads
-    ///
-    /// Uses AVX2 `loadu_ps` to load 8 gradients/hessians at once (sequential access).
-    /// The scatter is still scalar due to bin conflicts.
-    #[inline]
-    fn build_single_feature_contiguous(
-        &self,
-        dataset: &BinnedDataset,
-        feature_idx: usize,
-        num_rows: usize,
-        gradients: &[f32],
-        hessians: &[f32],
-    ) -> Histogram {
-        let feature_column = dataset.feature_column(feature_idx);
-
-        let mut hist_grads = [0.0f32; 256];
-        let mut hist_hess = [0.0f32; 256];
-        let mut hist_counts = [0u32; 256];
-
-        unsafe {
-            kernel::histogram_accumulate_contiguous(
-                feature_column.as_ptr(),
-                num_rows,
-                gradients.as_ptr(),
-                hessians.as_ptr(),
-                hist_grads.as_mut_ptr(),
-                hist_hess.as_mut_ptr(),
-                hist_counts.as_mut_ptr(),
-            );
-        }
-
-        // Convert raw arrays to Histogram
-        Histogram::from_raw_arrays(&hist_grads, &hist_hess, &hist_counts)
-    }
-
-    /// Build histogram for a single feature using indexed access
-    ///
-    /// Uses 8x unrolled scalar loop for best performance.
-    /// Note: AVX2 gather was tested but is slower due to gather latency overhead
-    /// and the fundamental scatter bottleneck in histogram accumulation.
-    #[inline]
-    fn build_single_feature_indexed(
-        &self,
-        dataset: &BinnedDataset,
-        feature_idx: usize,
-        row_indices: &[usize],
-        gradients: &[f32],
-        hessians: &[f32],
-    ) -> Histogram {
-        let feature_column = dataset.feature_column(feature_idx);
-        self.build_single_feature_scalar(feature_column, row_indices, gradients, hessians)
-    }
-
-    /// Build histogram using scalar 8x unrolled loop
-    ///
-    /// This is the fastest path for histogram accumulation because:
-    /// 1. 8x unrolling provides good ILP
-    /// 2. AVX2 gather has high latency for scattered indices
-    /// 3. The scatter operation cannot be vectorized due to bin conflicts
-    #[inline]
-    fn build_single_feature_scalar(
-        &self,
-        feature_column: &[u8],
-        row_indices: &[usize],
-        gradients: &[f32],
-        hessians: &[f32],
-    ) -> Histogram {
-        let mut histogram = Histogram::new();
-
-        let len = row_indices.len();
-        let chunks = len / 8;
-        let remainder = len % 8;
-
-        unsafe {
-            // Process 8 samples at a time
-            for i in 0..chunks {
-                let base = i * 8;
-
-                let idx0 = *row_indices.get_unchecked(base);
-                let idx1 = *row_indices.get_unchecked(base + 1);
-                let idx2 = *row_indices.get_unchecked(base + 2);
-                let idx3 = *row_indices.get_unchecked(base + 3);
-                let idx4 = *row_indices.get_unchecked(base + 4);
-                let idx5 = *row_indices.get_unchecked(base + 5);
-                let idx6 = *row_indices.get_unchecked(base + 6);
-                let idx7 = *row_indices.get_unchecked(base + 7);
-
-                let bin0 = *feature_column.get_unchecked(idx0) as usize;
-                let bin1 = *feature_column.get_unchecked(idx1) as usize;
-                let bin2 = *feature_column.get_unchecked(idx2) as usize;
-                let bin3 = *feature_column.get_unchecked(idx3) as usize;
-                let bin4 = *feature_column.get_unchecked(idx4) as usize;
-                let bin5 = *feature_column.get_unchecked(idx5) as usize;
-                let bin6 = *feature_column.get_unchecked(idx6) as usize;
-                let bin7 = *feature_column.get_unchecked(idx7) as usize;
-
-                let grad0 = *gradients.get_unchecked(idx0);
-                let grad1 = *gradients.get_unchecked(idx1);
-                let grad2 = *gradients.get_unchecked(idx2);
-                let grad3 = *gradients.get_unchecked(idx3);
-                let grad4 = *gradients.get_unchecked(idx4);
-                let grad5 = *gradients.get_unchecked(idx5);
-                let grad6 = *gradients.get_unchecked(idx6);
-                let grad7 = *gradients.get_unchecked(idx7);
-
-                let hess0 = *hessians.get_unchecked(idx0);
-                let hess1 = *hessians.get_unchecked(idx1);
-                let hess2 = *hessians.get_unchecked(idx2);
-                let hess3 = *hessians.get_unchecked(idx3);
-                let hess4 = *hessians.get_unchecked(idx4);
-                let hess5 = *hessians.get_unchecked(idx5);
-                let hess6 = *hessians.get_unchecked(idx6);
-                let hess7 = *hessians.get_unchecked(idx7);
-
-                histogram.bins_mut().get_unchecked_mut(bin0).accumulate(grad0, hess0);
-                histogram.bins_mut().get_unchecked_mut(bin1).accumulate(grad1, hess1);
-                histogram.bins_mut().get_unchecked_mut(bin2).accumulate(grad2, hess2);
-                histogram.bins_mut().get_unchecked_mut(bin3).accumulate(grad3, hess3);
-                histogram.bins_mut().get_unchecked_mut(bin4).accumulate(grad4, hess4);
-                histogram.bins_mut().get_unchecked_mut(bin5).accumulate(grad5, hess5);
-                histogram.bins_mut().get_unchecked_mut(bin6).accumulate(grad6, hess6);
-                histogram.bins_mut().get_unchecked_mut(bin7).accumulate(grad7, hess7);
-            }
-
-            // Handle remainder
-            let base = chunks * 8;
-            for i in 0..remainder {
-                let idx = *row_indices.get_unchecked(base + i);
-                let bin = *feature_column.get_unchecked(idx) as usize;
-                let grad = *gradients.get_unchecked(idx);
-                let hess = *hessians.get_unchecked(idx);
-                histogram.bins_mut().get_unchecked_mut(bin).accumulate(grad, hess);
-            }
-        }
-
-        histogram
-    }
-
-    /// Build histograms using data parallelism (for large nodes)
-    ///
-    /// Chunks the rows across threads, builds partial histograms, then reduces.
-    pub fn build_data_parallel(
-        &self,
-        dataset: &BinnedDataset,
-        row_indices: &[usize],
-        gradients: &[f32],
-        hessians: &[f32],
-    ) -> NodeHistograms {
-        let num_features = dataset.num_features();
-
-        // If small enough, use simple feature-parallel
-        if row_indices.len() < 10000 {
-            return self.build(dataset, row_indices, gradients, hessians);
-        }
-
-        // Chunk rows and build partial histograms
-        let chunk_size = (row_indices.len() / self.num_threads).max(1000);
-
-        let partial_histograms: Vec<NodeHistograms> = row_indices
-            .par_chunks(chunk_size)
-            .map(|chunk| {
-                let mut node_hists = NodeHistograms::new(num_features);
-
-                for feature_idx in 0..num_features {
-                    let feature_column = dataset.feature_column(feature_idx);
-                    let hist = node_hists.get_mut(feature_idx);
-
-                    for &row_idx in chunk {
-                        let bin = feature_column[row_idx];
-                        hist.accumulate(bin, gradients[row_idx], hessians[row_idx]);
-                    }
-                }
-
-                node_hists
-            })
-            .collect();
-
-        // Reduce partial histograms
-        let mut result = NodeHistograms::new(num_features);
-        for partial in partial_histograms {
-            result.merge(&partial);
-        }
-
-        result
     }
 
     /// Build sibling histogram using Histogram Subtraction Trick
