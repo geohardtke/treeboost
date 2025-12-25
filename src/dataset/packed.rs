@@ -8,6 +8,7 @@
 //! - Features with limited precision needs
 //! - Memory-constrained environments
 
+use rayon::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// Storage mode for binned features
@@ -411,10 +412,46 @@ impl PackedDataset {
     }
 
     /// Convert back to BinnedDataset (unpacks all features)
+    ///
+    /// Uses SIMD-accelerated unpacking for packed features.
+    /// For datasets with many features, uses parallel unpacking.
     pub fn to_binned(&self) -> BinnedDataset {
-        let mut features = Vec::with_capacity(self.num_rows * self.num_features());
-        for storage in &self.feature_data {
-            features.extend(storage.to_u8());
+        let num_features = self.num_features();
+        let total_size = self.num_rows * num_features;
+        let mut features = vec![0u8; total_size];
+
+        // Use parallel unpacking for datasets with many features
+        if num_features >= 8 {
+            // Split into feature-sized chunks and unpack in parallel
+            let chunk_size = self.num_rows;
+            features
+                .par_chunks_mut(chunk_size)
+                .zip(self.feature_data.par_iter())
+                .for_each(|(dest, storage)| {
+                    match storage {
+                        FeatureStorage::U8(data) => {
+                            dest.copy_from_slice(data);
+                        }
+                        FeatureStorage::Packed(packed) => {
+                            packed.unpack_to_buffer(dest);
+                        }
+                    }
+                });
+        } else {
+            // Sequential for small feature counts
+            for (f, storage) in self.feature_data.iter().enumerate() {
+                let start = f * self.num_rows;
+                let dest = &mut features[start..start + self.num_rows];
+
+                match storage {
+                    FeatureStorage::U8(data) => {
+                        dest.copy_from_slice(data);
+                    }
+                    FeatureStorage::Packed(packed) => {
+                        packed.unpack_to_buffer(dest);
+                    }
+                }
+            }
         }
 
         BinnedDataset::new(

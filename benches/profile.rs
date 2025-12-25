@@ -148,7 +148,7 @@ fn to_treeboost_dataset(
 fn benchmark_prediction_components(c: &mut Criterion) {
     let mut group = c.benchmark_group("PredictionProfile");
     group.measurement_time(Duration::from_secs(5));
-    group.sample_size(100);
+    group.sample_size(20);
 
     let num_features = 10;
     let num_rounds = 50;
@@ -157,7 +157,8 @@ fn benchmark_prediction_components(c: &mut Criterion) {
 
     // Train model
     let (train_features, train_targets) = generate_data(train_rows, num_features, 42);
-    let train_data = to_treeboost_dataset(&train_features, &train_targets, train_rows, num_features);
+    let train_data =
+        to_treeboost_dataset(&train_features, &train_targets, train_rows, num_features);
     let config = GBDTConfig::new()
         .with_num_rounds(num_rounds)
         .with_max_depth(6)
@@ -235,7 +236,7 @@ fn benchmark_histogram_building(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("HistogramProfile");
     group.measurement_time(Duration::from_secs(5));
-    group.sample_size(50);
+    group.sample_size(20);
 
     let num_rows = 100_000;
     let num_features = 10;
@@ -256,15 +257,11 @@ fn benchmark_histogram_building(c: &mut Criterion) {
     let builder = HistogramBuilder::new();
 
     group.bench_function("histogram_contiguous_100k", |b| {
-        b.iter(|| {
-            black_box(builder.build(&dataset, &contiguous_rows, &gradients, &hessians))
-        });
+        b.iter(|| black_box(builder.build(&dataset, &contiguous_rows, &gradients, &hessians)));
     });
 
     group.bench_function("histogram_sparse_50k", |b| {
-        b.iter(|| {
-            black_box(builder.build(&dataset, &sparse_rows, &gradients, &hessians))
-        });
+        b.iter(|| black_box(builder.build(&dataset, &sparse_rows, &gradients, &hessians)));
     });
 
     // Single feature histogram - the innermost hot loop
@@ -361,10 +358,8 @@ fn benchmark_histogram_building(c: &mut Criterion) {
                 for i in 0..remainder {
                     let idx = *contiguous_rows.get_unchecked(base + i);
                     let bin = *feature_col.get_unchecked(idx) as usize;
-                    bins.get_unchecked_mut(bin).accumulate(
-                        *gradients.get_unchecked(idx),
-                        *hessians.get_unchecked(idx),
-                    );
+                    bins.get_unchecked_mut(bin)
+                        .accumulate(*gradients.get_unchecked(idx), *hessians.get_unchecked(idx));
                 }
             }
             black_box(hist)
@@ -373,49 +368,78 @@ fn benchmark_histogram_building(c: &mut Criterion) {
 
     // Sparse data benchmarks (90% zeros - common in text/recommender systems)
     let (sparse_features, sparse_targets) = generate_sparse_data(num_rows, num_features, 0.9, 42);
-    let sparse_dataset = to_treeboost_dataset(&sparse_features, &sparse_targets, num_rows, num_features);
+    let sparse_dataset =
+        to_treeboost_dataset(&sparse_features, &sparse_targets, num_rows, num_features);
     let sparse_gradients: Vec<f32> = (0..num_rows).map(|i| (i as f32) * 0.001).collect();
     let sparse_hessians: Vec<f32> = vec![1.0; num_rows];
 
     // Report sparsity detected
     let num_sparse = sparse_dataset.num_sparse_features();
-    eprintln!("Sparse dataset: {}/{} features detected as sparse", num_sparse, num_features);
+    eprintln!(
+        "Sparse dataset: {}/{} features detected as sparse",
+        num_sparse, num_features
+    );
 
     group.bench_function("histogram_sparse_data_contiguous_100k", |b| {
         b.iter(|| {
-            black_box(builder.build(&sparse_dataset, &contiguous_rows, &sparse_gradients, &sparse_hessians))
+            black_box(builder.build(
+                &sparse_dataset,
+                &contiguous_rows,
+                &sparse_gradients,
+                &sparse_hessians,
+            ))
         });
     });
 
     group.bench_function("histogram_sparse_data_indexed_50k", |b| {
         b.iter(|| {
-            black_box(builder.build(&sparse_dataset, &sparse_rows, &sparse_gradients, &sparse_hessians))
+            black_box(builder.build(
+                &sparse_dataset,
+                &sparse_rows,
+                &sparse_gradients,
+                &sparse_hessians,
+            ))
         });
     });
 
     // 95% sparse (even more extreme - text data)
-    let (very_sparse_features, very_sparse_targets) = generate_sparse_data(num_rows, num_features, 0.95, 42);
-    let very_sparse_dataset = to_treeboost_dataset(&very_sparse_features, &very_sparse_targets, num_rows, num_features);
+    let (very_sparse_features, very_sparse_targets) =
+        generate_sparse_data(num_rows, num_features, 0.95, 42);
+    let very_sparse_dataset = to_treeboost_dataset(
+        &very_sparse_features,
+        &very_sparse_targets,
+        num_rows,
+        num_features,
+    );
     let num_very_sparse = very_sparse_dataset.num_sparse_features();
-    eprintln!("Very sparse dataset: {}/{} features detected as sparse", num_very_sparse, num_features);
+    eprintln!(
+        "Very sparse dataset: {}/{} features detected as sparse",
+        num_very_sparse, num_features
+    );
 
     group.bench_function("histogram_very_sparse_contiguous_100k", |b| {
         b.iter(|| {
-            black_box(builder.build(&very_sparse_dataset, &contiguous_rows, &sparse_gradients, &sparse_hessians))
+            black_box(builder.build(
+                &very_sparse_dataset,
+                &contiguous_rows,
+                &sparse_gradients,
+                &sparse_hessians,
+            ))
         });
     });
 
     // Benchmark a single tree grow (the main per-round cost)
     group.bench_function("single_tree_grow_100k", |b| {
-        use treeboost::tree::TreeGrower;
         use treeboost::loss::{LossFunction, MseLoss};
+        use treeboost::tree::TreeGrower;
 
         let loss = MseLoss::new();
         let predictions = vec![0.0f32; num_rows];
         let targets_f32: Vec<f32> = targets.iter().map(|&t| t as f32).collect();
 
         // Pre-compute gradients/hessians
-        let (grads, hess): (Vec<f32>, Vec<f32>) = targets_f32.iter()
+        let (grads, hess): (Vec<f32>, Vec<f32>) = targets_f32
+            .iter()
             .zip(&predictions)
             .map(|(&t, &p)| loss.gradient_hessian(t, p))
             .unzip();
@@ -428,9 +452,7 @@ fn benchmark_histogram_building(c: &mut Criterion) {
 
         let row_indices: Vec<usize> = (0..num_rows).collect();
 
-        b.iter(|| {
-            black_box(grower.grow_with_indices(&dataset, &grads, &hess, &row_indices))
-        });
+        b.iter(|| black_box(grower.grow_with_indices(&dataset, &grads, &hess, &row_indices)));
     });
 
     group.finish();
@@ -647,14 +669,15 @@ fn benchmark_efb(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("EFBProfile");
     group.measurement_time(Duration::from_secs(5));
-    group.sample_size(50);
+    group.sample_size(20);
 
     // Test case: 10 categories with 10 one-hot bins each = 100 features → should bundle to 10
     let num_rows = 100_000;
     let num_categories = 10;
     let bins_per_category = 10;
 
-    let (features, targets, feature_info) = generate_onehot_data(num_rows, num_categories, bins_per_category, 42);
+    let (features, targets, feature_info) =
+        generate_onehot_data(num_rows, num_categories, bins_per_category, 42);
     let total_features = num_categories * bins_per_category;
 
     let dataset = BinnedDataset::new(num_rows, features, targets, feature_info);
@@ -678,9 +701,7 @@ fn benchmark_efb(c: &mut Criterion) {
     );
 
     group.bench_function("bundled_dataset_creation", |b| {
-        b.iter(|| {
-            black_box(BundledDataset::from_dataset(&dataset, &bundling))
-        });
+        b.iter(|| black_box(BundledDataset::from_dataset(&dataset, &bundling)));
     });
 
     let bundled = BundledDataset::from_dataset(&dataset, &bundling);
@@ -698,9 +719,7 @@ fn benchmark_efb(c: &mut Criterion) {
     let builder = HistogramBuilder::new();
 
     group.bench_function("histogram_original_100_features", |b| {
-        b.iter(|| {
-            black_box(builder.build(&dataset, &row_indices, &gradients, &hessians))
-        });
+        b.iter(|| black_box(builder.build(&dataset, &row_indices, &gradients, &hessians)));
     });
 
     // For bundled histogram, we build on each bundle column
@@ -744,9 +763,7 @@ fn benchmark_efb(c: &mut Criterion) {
     );
 
     group.bench_function("histogram_original_500_features", |b| {
-        b.iter(|| {
-            black_box(builder.build(&dataset_medium, &row_indices, &gradients, &hessians))
-        });
+        b.iter(|| black_box(builder.build(&dataset_medium, &row_indices, &gradients, &hessians)));
     });
 
     group.finish();
@@ -754,12 +771,14 @@ fn benchmark_efb(c: &mut Criterion) {
 
 fn benchmark_split_finding(c: &mut Criterion) {
     use treeboost::histogram::{Histogram, NodeHistograms};
+    use treeboost::kernel::{
+        find_best_split, find_best_split_scalar, find_best_split_simd, has_avx2,
+    };
     use treeboost::tree::SplitFinder;
-    use treeboost::kernel::{find_best_split_scalar, find_best_split_simd, find_best_split, has_avx2};
 
     let mut group = c.benchmark_group("SplitFindingProfile");
     group.measurement_time(Duration::from_secs(5));
-    group.sample_size(100);
+    group.sample_size(20);
 
     // Report SIMD availability
     eprintln!("AVX2 available: {}", has_avx2());
@@ -809,9 +828,7 @@ fn benchmark_split_finding(c: &mut Criterion) {
     group.bench_function("kernel_scalar_single_feature", |b| {
         b.iter(|| {
             black_box(find_best_split_scalar(
-                &grads, &hess, &counts,
-                total_g, total_h, total_n,
-                1.0, 1, 1.0,
+                &grads, &hess, &counts, total_g, total_h, total_n, 1.0, 1, 1.0,
             ))
         });
     });
@@ -823,9 +840,7 @@ fn benchmark_split_finding(c: &mut Criterion) {
             b.iter(|| {
                 black_box(unsafe {
                     find_best_split_simd(
-                        &grads, &hess, &counts,
-                        total_g, total_h, total_n,
-                        1.0, 1, 1.0,
+                        &grads, &hess, &counts, total_g, total_h, total_n, 1.0, 1, 1.0,
                     )
                 })
             });
@@ -836,9 +851,7 @@ fn benchmark_split_finding(c: &mut Criterion) {
     group.bench_function("kernel_dispatched_single_feature", |b| {
         b.iter(|| {
             black_box(find_best_split(
-                &grads, &hess, &counts,
-                total_g, total_h, total_n,
-                1.0, 1, 1.0,
+                &grads, &hess, &counts, total_g, total_h, total_n, 1.0, 1, 1.0,
             ))
         });
     });
@@ -880,13 +893,23 @@ fn benchmark_split_finding(c: &mut Criterion) {
 
     group.bench_function("splitfinder_20_features_no_entropy", |b| {
         b.iter(|| {
-            black_box(finder_no_entropy.find_best_split(&multi_histograms, total_g, total_h, total_n))
+            black_box(finder_no_entropy.find_best_split(
+                &multi_histograms,
+                total_g,
+                total_h,
+                total_n,
+            ))
         });
     });
 
     group.bench_function("splitfinder_20_features_with_entropy", |b| {
         b.iter(|| {
-            black_box(finder_with_entropy.find_best_split(&multi_histograms, total_g, total_h, total_n))
+            black_box(finder_with_entropy.find_best_split(
+                &multi_histograms,
+                total_g,
+                total_h,
+                total_n,
+            ))
         });
     });
 
@@ -899,7 +922,12 @@ fn benchmark_split_finding(c: &mut Criterion) {
 
     group.bench_function("splitfinder_100_features_no_entropy", |b| {
         b.iter(|| {
-            black_box(finder_no_entropy.find_best_split(&wide_histograms, total_g, total_h, total_n))
+            black_box(finder_no_entropy.find_best_split(
+                &wide_histograms,
+                total_g,
+                total_h,
+                total_n,
+            ))
         });
     });
 
@@ -907,7 +935,7 @@ fn benchmark_split_finding(c: &mut Criterion) {
 }
 
 fn benchmark_4bit_unpacking(c: &mut Criterion) {
-    use treeboost::dataset::packed::PackedColumn;
+    use treeboost::dataset::packed::{PackedColumn, PackedDataset};
 
     let mut group = c.benchmark_group("4bit_unpacking");
     group.measurement_time(Duration::from_secs(5));
@@ -956,7 +984,55 @@ fn benchmark_4bit_unpacking(c: &mut Criterion) {
     });
 
     group.finish();
+
+    // Benchmark to_binned() conversion (PackedDataset -> BinnedDataset)
+    let mut group = c.benchmark_group("packed_to_binned");
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(20);
+
+    for (num_rows, num_features) in [(10_000, 20), (100_000, 20), (100_000, 100)] {
+        // Create a BinnedDataset with low-cardinality features (packable)
+        let mut features = Vec::with_capacity(num_rows * num_features);
+        for _ in 0..num_features {
+            for r in 0..num_rows {
+                features.push((r % 16) as u8);
+            }
+        }
+        let targets: Vec<f32> = (0..num_rows).map(|i| i as f32).collect();
+        let feature_info: Vec<FeatureInfo> = (0..num_features)
+            .map(|f| FeatureInfo {
+                name: format!("f{}", f),
+                feature_type: FeatureType::Categorical,
+                num_bins: 16,
+                bin_boundaries: vec![],
+            })
+            .collect();
+
+        let binned = BinnedDataset::new(num_rows, features, targets, feature_info);
+        let packed = PackedDataset::from_binned(&binned);
+
+        eprintln!(
+            "PackedDataset {num_rows}x{num_features}: {:.1}% memory savings",
+            packed.memory_savings() * 100.0
+        );
+
+        group.bench_function(format!("to_binned_{}x{}", num_rows, num_features), |b| {
+            b.iter(|| {
+                black_box(packed.to_binned());
+            });
+        });
+    }
+
+    group.finish();
 }
 
-criterion_group!(benches, benchmark_prediction_components, benchmark_histogram_building, benchmark_training_components, benchmark_efb, benchmark_split_finding, benchmark_4bit_unpacking);
+criterion_group!(
+    benches,
+    benchmark_prediction_components,
+    benchmark_histogram_building,
+    benchmark_training_components,
+    benchmark_efb,
+    benchmark_split_finding,
+    benchmark_4bit_unpacking
+);
 criterion_main!(benches);
