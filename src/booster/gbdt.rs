@@ -202,7 +202,7 @@ impl GBDTModel {
 
         for tree in trees {
             for (_, node) in tree.internal_nodes() {
-                if let Some((feature_idx, _, _, _)) = node.split_info() {
+                if let Some((feature_idx, _, _, _, _)) = node.split_info() {
                     importances[feature_idx] += node.sum_hessians;
                 }
             }
@@ -338,9 +338,12 @@ impl GBDTModel {
         pred
     }
 
-    /// Predict for all rows (optimized with row-wise bin caching)
+    /// Predict for all rows using tree-wise batch prediction
     ///
-    /// Routes to parallel or sequential prediction based on config.parallel_prediction
+    /// This approach traverses one tree for ALL rows before moving to the next tree,
+    /// which is more cache-friendly than row-wise traversal.
+    ///
+    /// Routes to parallel or sequential based on config.parallel_prediction
     pub fn predict(&self, dataset: &BinnedDataset) -> Vec<f32> {
         if self.config.parallel_prediction {
             self.predict_parallel(dataset)
@@ -349,8 +352,65 @@ impl GBDTModel {
         }
     }
 
-    /// Single-threaded prediction (for small datasets or when parallelism not desired)
+    /// Single-threaded tree-wise batch prediction
+    ///
+    /// Traverses each tree for all rows before moving to the next tree.
+    /// More cache-friendly than row-wise traversal.
     pub fn predict_sequential(&self, dataset: &BinnedDataset) -> Vec<f32> {
+        let num_rows = dataset.num_rows();
+
+        // Initialize predictions with base value
+        let mut predictions = vec![self.base_prediction; num_rows];
+
+        // Tree-wise: traverse each tree for all rows
+        for tree in &self.trees {
+            tree.predict_batch_add(dataset, &mut predictions);
+        }
+
+        predictions
+    }
+
+    /// Parallel tree-wise batch prediction
+    ///
+    /// Splits rows into chunks and processes each chunk in parallel.
+    /// Each chunk uses tree-wise traversal internally.
+    pub fn predict_parallel(&self, dataset: &BinnedDataset) -> Vec<f32> {
+        let num_rows = dataset.num_rows();
+
+        // For small datasets, use sequential
+        if num_rows < 1000 || self.trees.is_empty() {
+            return self.predict_sequential(dataset);
+        }
+
+        // Initialize predictions with base value
+        let mut predictions = vec![self.base_prediction; num_rows];
+
+        // Determine chunk size for parallelism (target ~4 chunks per thread)
+        let num_threads = rayon::current_num_threads();
+        let chunk_size = (num_rows / (num_threads * 4)).max(256);
+
+        // Process chunks in parallel, each chunk does tree-wise traversal
+        predictions
+            .par_chunks_mut(chunk_size)
+            .enumerate()
+            .for_each(|(chunk_idx, chunk)| {
+                let start_row = chunk_idx * chunk_size;
+
+                // For each tree, process this chunk of rows
+                for tree in &self.trees {
+                    for (i, pred) in chunk.iter_mut().enumerate() {
+                        let row_idx = start_row + i;
+                        *pred += tree.predict(|f| dataset.get_bin(row_idx, f));
+                    }
+                }
+            });
+
+        predictions
+    }
+
+    /// Legacy row-wise prediction (kept for comparison/testing)
+    #[doc(hidden)]
+    pub fn predict_row_wise(&self, dataset: &BinnedDataset) -> Vec<f32> {
         let num_rows = dataset.num_rows();
         let num_features = dataset.num_features();
 
@@ -374,34 +434,107 @@ impl GBDTModel {
         predictions
     }
 
-    /// Parallel prediction using Rayon
-    pub fn predict_parallel(&self, dataset: &BinnedDataset) -> Vec<f32> {
-        let num_features = dataset.num_features();
-        let base = self.base_prediction;
-
-        (0..dataset.num_rows())
-            .into_par_iter()
-            .map(|row_idx| {
-                // Cache bins for this row
-                let row_bins: Vec<u8> = (0..num_features)
-                    .map(|f| dataset.get_bin(row_idx, f))
-                    .collect();
-
-                // Traverse all trees
-                let mut pred = base;
-                for tree in &self.trees {
-                    pred += tree.predict(|f| row_bins[f]);
-                }
-                pred
-            })
-            .collect()
-    }
-
     /// Predict with conformal intervals
     ///
     /// Returns (predictions, lower_bounds, upper_bounds)
     pub fn predict_with_intervals(&self, dataset: &BinnedDataset) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let predictions = self.predict(dataset);
+
+        let q = self.conformal_q.unwrap_or(0.0);
+        let lower: Vec<f32> = predictions.iter().map(|&p| p - q).collect();
+        let upper: Vec<f32> = predictions.iter().map(|&p| p + q).collect();
+
+        (predictions, lower, upper)
+    }
+
+    // ============================================================================
+    // Raw prediction methods (no binning required)
+    // ============================================================================
+
+    /// Predict using raw feature values (no binning needed)
+    ///
+    /// This is the primary prediction method for external use (e.g., Python bindings).
+    /// Uses the split_value stored in tree nodes to compare directly against raw values,
+    /// avoiding the overhead of binning on every prediction call.
+    ///
+    /// # Arguments
+    /// * `features` - Row-major feature matrix: features[row * num_features + feature]
+    ///                Shape: (num_rows, num_features)
+    ///
+    /// # Returns
+    /// Vector of predictions for each row
+    pub fn predict_raw(&self, features: &[f64]) -> Vec<f32> {
+        let num_features = self.num_features();
+        if num_features == 0 {
+            return vec![];
+        }
+
+        let num_rows = features.len() / num_features;
+        debug_assert_eq!(features.len(), num_rows * num_features);
+
+        if self.config.parallel_prediction && num_rows >= 1000 {
+            self.predict_raw_parallel(features, num_features)
+        } else {
+            self.predict_raw_sequential(features, num_features)
+        }
+    }
+
+    /// Single-threaded raw prediction using tree-wise traversal
+    fn predict_raw_sequential(&self, features: &[f64], num_features: usize) -> Vec<f32> {
+        let num_rows = features.len() / num_features;
+
+        // Initialize predictions with base value
+        let mut predictions = vec![self.base_prediction; num_rows];
+
+        // Tree-wise: traverse each tree for all rows
+        for tree in &self.trees {
+            tree.predict_batch_add_raw(features, num_features, &mut predictions);
+        }
+
+        predictions
+    }
+
+    /// Parallel raw prediction using tree-wise traversal
+    fn predict_raw_parallel(&self, features: &[f64], num_features: usize) -> Vec<f32> {
+        let num_rows = features.len() / num_features;
+
+        // For small datasets, use sequential
+        if num_rows < 1000 || self.trees.is_empty() {
+            return self.predict_raw_sequential(features, num_features);
+        }
+
+        // Initialize predictions with base value
+        let mut predictions = vec![self.base_prediction; num_rows];
+
+        // Determine chunk size for parallelism
+        let num_threads = rayon::current_num_threads();
+        let chunk_size = (num_rows / (num_threads * 4)).max(256);
+
+        // Process chunks in parallel
+        predictions
+            .par_chunks_mut(chunk_size)
+            .enumerate()
+            .for_each(|(chunk_idx, chunk)| {
+                let start_row = chunk_idx * chunk_size;
+                let chunk_features_start = start_row * num_features;
+
+                // Each thread processes its chunk through all trees
+                for tree in &self.trees {
+                    for (i, pred) in chunk.iter_mut().enumerate() {
+                        let row_offset = chunk_features_start + i * num_features;
+                        *pred += tree.predict_raw(|f| features[row_offset + f]);
+                    }
+                }
+            });
+
+        predictions
+    }
+
+    /// Predict raw with conformal intervals
+    ///
+    /// Returns (predictions, lower_bounds, upper_bounds)
+    pub fn predict_raw_with_intervals(&self, features: &[f64]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let predictions = self.predict_raw(features);
 
         let q = self.conformal_q.unwrap_or(0.0);
         let lower: Vec<f32> = predictions.iter().map(|&p| p - q).collect();
@@ -457,7 +590,7 @@ impl GBDTModel {
         for tree in &self.trees {
             for (_, node) in tree.internal_nodes() {
                 // Safe to unwrap: internal_nodes() filters to only internal nodes
-                let (feature_idx, _, _, _) = node.split_info().unwrap();
+                let (feature_idx, _, _, _, _) = node.split_info().unwrap();
                 // Use hessian as importance weight (proxy for sample weight)
                 importances[feature_idx] += node.sum_hessians;
             }

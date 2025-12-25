@@ -11,6 +11,9 @@ pub enum NodeType {
         feature_idx: usize,
         /// Bin threshold (samples with bin <= threshold go left)
         bin_threshold: u8,
+        /// Actual split value (for raw prediction without binning)
+        /// Samples with value <= split_value go left
+        split_value: f64,
         /// Left child node index
         left_child: usize,
         /// Right child node index
@@ -54,6 +57,7 @@ impl Node {
     pub fn internal(
         feature_idx: usize,
         bin_threshold: u8,
+        split_value: f64,
         left_child: usize,
         right_child: usize,
         depth: usize,
@@ -65,6 +69,7 @@ impl Node {
             node_type: NodeType::Internal {
                 feature_idx,
                 bin_threshold,
+                split_value,
                 left_child,
                 right_child,
             },
@@ -91,15 +96,17 @@ impl Node {
     }
 
     /// Get split info, returning None if this is not an internal node
+    /// Returns (feature_idx, bin_threshold, split_value, left_child, right_child)
     #[inline]
-    pub fn split_info(&self) -> Option<(usize, u8, usize, usize)> {
+    pub fn split_info(&self) -> Option<(usize, u8, f64, usize, usize)> {
         match self.node_type {
             NodeType::Internal {
                 feature_idx,
                 bin_threshold,
+                split_value,
                 left_child,
                 right_child,
-            } => Some((feature_idx, bin_threshold, left_child, right_child)),
+            } => Some((feature_idx, bin_threshold, split_value, left_child, right_child)),
             NodeType::Leaf { .. } => None,
         }
     }
@@ -130,15 +137,16 @@ mod tests {
 
     #[test]
     fn test_internal_node() {
-        let node = Node::internal(3, 128, 1, 2, 1, 200, 15.0, 30.0);
+        let node = Node::internal(3, 128, 5.5, 1, 2, 1, 200, 15.0, 30.0);
 
         assert!(!node.is_leaf());
         assert_eq!(node.leaf_value(), None);
         let split = node.split_info();
         assert!(split.is_some());
-        let (f, t, l, r) = split.unwrap();
+        let (f, t, v, l, r) = split.unwrap();
         assert_eq!(f, 3);
         assert_eq!(t, 128);
+        assert!((v - 5.5).abs() < 1e-10);
         assert_eq!(l, 1);
         assert_eq!(r, 2);
     }

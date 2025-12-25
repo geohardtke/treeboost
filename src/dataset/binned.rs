@@ -302,6 +302,40 @@ impl BinnedDataset {
             Err(idx) => idx.min(info.num_bins as usize - 1) as u8,
         }
     }
+
+    /// Get the actual split value for a given feature and bin threshold
+    ///
+    /// For raw prediction without binning, we need the actual threshold value.
+    /// Samples with value <= split_value go left.
+    ///
+    /// # Arguments
+    /// * `feature_idx` - Feature index
+    /// * `bin_threshold` - Bin threshold from tree split
+    ///
+    /// # Returns
+    /// The actual split value (f64) for raw data comparison
+    #[inline]
+    pub fn get_split_value(&self, feature_idx: usize, bin_threshold: u8) -> f64 {
+        let info = &self.feature_info[feature_idx];
+
+        // Edge cases
+        if info.bin_boundaries.is_empty() {
+            return 0.0;
+        }
+
+        // bin_threshold is the largest bin that goes left
+        // bin_boundaries[i] is the upper bound of bin i
+        // So split_value = bin_boundaries[bin_threshold] (if exists)
+        // For bin_threshold = 0, samples in bin 0 go left, threshold is boundaries[0]
+        let idx = bin_threshold as usize;
+        if idx < info.bin_boundaries.len() {
+            info.bin_boundaries[idx]
+        } else {
+            // bin_threshold >= num_bins - 1, use the last boundary
+            // or max value (everything goes left)
+            info.bin_boundaries.last().copied().unwrap_or(f64::MAX)
+        }
+    }
 }
 
 #[cfg(test)]

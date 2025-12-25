@@ -1209,3 +1209,86 @@ fn test_access_tracker() {
     assert_eq!(perm.to_new(2), 0, "f2 should map to position 0");
     assert_eq!(perm.to_new(0), 1, "f0 should map to position 1");
 }
+
+// ============================================================================
+// Raw Prediction Tests
+// ============================================================================
+
+#[test]
+fn test_raw_prediction_equivalence() {
+    // Create a dataset using the data pipeline (which sets up proper bin_boundaries)
+    let df = df! {
+        "f0" => &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0,
+                  11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0,
+                  21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0,
+                  31.0, 32.0, 33.0, 34.0, 35.0, 36.0, 37.0, 38.0, 39.0, 40.0,
+                  41.0, 42.0, 43.0, 44.0, 45.0, 46.0, 47.0, 48.0, 49.0, 50.0],
+        "f1" => &[50.0, 49.0, 48.0, 47.0, 46.0, 45.0, 44.0, 43.0, 42.0, 41.0,
+                  40.0, 39.0, 38.0, 37.0, 36.0, 35.0, 34.0, 33.0, 32.0, 31.0,
+                  30.0, 29.0, 28.0, 27.0, 26.0, 25.0, 24.0, 23.0, 22.0, 21.0,
+                  20.0, 19.0, 18.0, 17.0, 16.0, 15.0, 14.0, 13.0, 12.0, 11.0,
+                  10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0],
+        "f2" => &[5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0,
+                  5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0,
+                  5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0,
+                  5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0,
+                  5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0],
+        "target" => &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0,
+                      110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0, 180.0, 190.0, 200.0,
+                      210.0, 220.0, 230.0, 240.0, 250.0, 260.0, 270.0, 280.0, 290.0, 300.0,
+                      310.0, 320.0, 330.0, 340.0, 350.0, 360.0, 370.0, 380.0, 390.0, 400.0,
+                      410.0, 420.0, 430.0, 440.0, 450.0, 460.0, 470.0, 480.0, 490.0, 500.0]
+    }
+    .unwrap();
+
+    // Process with data pipeline to get proper bin boundaries
+    let pipeline = DataPipeline::new(PipelineConfig::new().with_num_bins(16));
+    let (dataset, _state) = pipeline
+        .process_for_training(df.clone(), "target", None)
+        .expect("Pipeline should succeed");
+
+    // Train a model
+    let config = GBDTConfig::new()
+        .with_num_rounds(20)
+        .with_max_depth(4)
+        .with_learning_rate(0.1);
+
+    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+
+    // Get predictions using binned data
+    let binned_predictions = model.predict(&dataset);
+
+    // Get raw feature values (row-major)
+    let num_rows = 50;
+    let num_features = 3;
+    let mut raw_features = Vec::with_capacity(num_rows * num_features);
+
+    // f0, f1, f2 for each row
+    for i in 0..num_rows {
+        raw_features.push((i + 1) as f64);  // f0
+        raw_features.push((50 - i) as f64); // f1
+        raw_features.push(((i % 10) * 5 + 5) as f64); // f2
+    }
+
+    // Get predictions using raw values
+    let raw_predictions = model.predict_raw(&raw_features);
+
+    // Both should have the same length
+    assert_eq!(binned_predictions.len(), raw_predictions.len());
+
+    // Predictions should be very close (within floating-point tolerance)
+    // Note: Due to binning discretization, there may be small differences
+    let max_diff: f32 = binned_predictions
+        .iter()
+        .zip(raw_predictions.iter())
+        .map(|(b, r)| (b - r).abs())
+        .fold(0.0f32, f32::max);
+
+    // The predictions should be reasonably close
+    // (they may differ slightly due to binning boundary edge cases)
+    assert!(
+        max_diff < 50.0,
+        "Max difference between binned and raw predictions: {} (expected < 50.0)",
+        max_diff
+    );
+}

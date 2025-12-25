@@ -350,7 +350,6 @@ impl PyGBDTConfig {
 #[pyclass(name = "GBDTModel")]
 pub struct PyGBDTModel {
     model: GBDTModel,
-    binner: QuantileBinner,
 }
 
 #[pymethods]
@@ -427,24 +426,49 @@ impl PyGBDTModel {
             GBDTModel::train(&dataset, config.inner.clone())
         }).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-        Ok(Self { model, binner })
+        Ok(Self { model })
     }
 
     /// Predict for new data
     ///
     /// Args:
     ///     features: 2D numpy array of shape (n_samples, n_features)
+    ///               Accepts float32 or float64 arrays
     ///
     /// Returns:
     ///     1D numpy array of predictions
+    #[pyo3(signature = (features))]
     fn predict<'py>(
         &self,
         py: Python<'py>,
-        features: PyReadonlyArray2<'py, f32>,
+        features: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyArray1<f32>>> {
-        let features = features.as_array();
-        let num_rows = features.nrows();
-        let num_features = features.ncols();
+        // Try f64 first (most common for numpy), then f32
+        let (num_features, raw_features) = if let Ok(arr) =
+            features.extract::<PyReadonlyArray2<'py, f64>>()
+        {
+            let arr = arr.as_array();
+            let num_rows = arr.nrows();
+            let num_cols = arr.ncols();
+            let mut raw = Vec::with_capacity(num_rows * num_cols);
+            for row in arr.rows() {
+                raw.extend(row.iter().copied());
+            }
+            (num_cols, raw)
+        } else if let Ok(arr) = features.extract::<PyReadonlyArray2<'py, f32>>() {
+            let arr = arr.as_array();
+            let num_rows = arr.nrows();
+            let num_cols = arr.ncols();
+            let mut raw = Vec::with_capacity(num_rows * num_cols);
+            for row in arr.rows() {
+                raw.extend(row.iter().map(|&v| v as f64));
+            }
+            (num_cols, raw)
+        } else {
+            return Err(PyValueError::new_err(
+                "features must be a 2D numpy array of float32 or float64",
+            ));
+        };
 
         if num_features != self.model.num_features() {
             return Err(PyValueError::new_err(format!(
@@ -454,27 +478,8 @@ impl PyGBDTModel {
             )));
         }
 
-        // Bin the input features using stored feature info
-        let feature_info = self.model.feature_info();
-        let mut binned_data = Vec::with_capacity(num_rows * num_features);
-
-        for (col_idx, info) in feature_info.iter().enumerate() {
-            let col: Vec<f64> = features.column(col_idx).iter().map(|&v| v as f64).collect();
-            let binned = self.binner.bin_column(&col, &info.bin_boundaries);
-            binned_data.extend(binned);
-        }
-
-        // Create dataset for prediction
-        let targets = vec![0.0f32; num_rows]; // Dummy targets
-        let dataset = BinnedDataset::new(
-            num_rows,
-            binned_data,
-            targets,
-            feature_info.to_vec(),
-        );
-
-        // Predict (release GIL)
-        let predictions = py.allow_threads(|| self.model.predict(&dataset));
+        // Predict using raw values (release GIL)
+        let predictions = py.allow_threads(|| self.model.predict_raw(&raw_features));
 
         Ok(PyArray1::from_vec(py, predictions))
     }
@@ -483,21 +488,46 @@ impl PyGBDTModel {
     ///
     /// Args:
     ///     features: 2D numpy array of shape (n_samples, n_features)
+    ///               Accepts float32 or float64 arrays
     ///
     /// Returns:
     ///     Tuple of (predictions, lower_bounds, upper_bounds) as numpy arrays
+    #[pyo3(signature = (features))]
     fn predict_with_intervals<'py>(
         &self,
         py: Python<'py>,
-        features: PyReadonlyArray2<'py, f32>,
+        features: &Bound<'py, PyAny>,
     ) -> PyResult<(
         Bound<'py, PyArray1<f32>>,
         Bound<'py, PyArray1<f32>>,
         Bound<'py, PyArray1<f32>>,
     )> {
-        let features = features.as_array();
-        let num_rows = features.nrows();
-        let num_features = features.ncols();
+        // Try f64 first, then f32
+        let (num_features, raw_features) = if let Ok(arr) =
+            features.extract::<PyReadonlyArray2<'py, f64>>()
+        {
+            let arr = arr.as_array();
+            let num_rows = arr.nrows();
+            let num_cols = arr.ncols();
+            let mut raw = Vec::with_capacity(num_rows * num_cols);
+            for row in arr.rows() {
+                raw.extend(row.iter().copied());
+            }
+            (num_cols, raw)
+        } else if let Ok(arr) = features.extract::<PyReadonlyArray2<'py, f32>>() {
+            let arr = arr.as_array();
+            let num_rows = arr.nrows();
+            let num_cols = arr.ncols();
+            let mut raw = Vec::with_capacity(num_rows * num_cols);
+            for row in arr.rows() {
+                raw.extend(row.iter().map(|&v| v as f64));
+            }
+            (num_cols, raw)
+        } else {
+            return Err(PyValueError::new_err(
+                "features must be a 2D numpy array of float32 or float64",
+            ));
+        };
 
         if num_features != self.model.num_features() {
             return Err(PyValueError::new_err(format!(
@@ -507,22 +537,9 @@ impl PyGBDTModel {
             )));
         }
 
-        // Bin the input features
-        let feature_info = self.model.feature_info();
-        let mut binned_data = Vec::with_capacity(num_rows * num_features);
-
-        for (col_idx, info) in feature_info.iter().enumerate() {
-            let col: Vec<f64> = features.column(col_idx).iter().map(|&v| v as f64).collect();
-            let binned = self.binner.bin_column(&col, &info.bin_boundaries);
-            binned_data.extend(binned);
-        }
-
-        let targets = vec![0.0f32; num_rows];
-        let dataset = BinnedDataset::new(num_rows, binned_data, targets, feature_info.to_vec());
-
         // Predict with intervals (release GIL)
         let (preds, lower, upper) =
-            py.allow_threads(|| self.model.predict_with_intervals(&dataset));
+            py.allow_threads(|| self.model.predict_raw_with_intervals(&raw_features));
 
         Ok((
             PyArray1::from_vec(py, preds),
@@ -561,10 +578,7 @@ impl PyGBDTModel {
         let model = serialize::load_model(path)
             .map_err(|e| PyIOError::new_err(e.to_string()))?;
 
-        // Create a default binner (will use stored bin boundaries from model)
-        let binner = QuantileBinner::new(255);
-
-        Ok(Self { model, binner })
+        Ok(Self { model })
     }
 
     /// Get number of trees in the ensemble

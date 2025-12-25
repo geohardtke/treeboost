@@ -135,6 +135,9 @@ pub struct SplitInfo {
     pub feature_idx: usize,
     /// Bin threshold (samples with bin <= threshold go left)
     pub bin_threshold: u8,
+    /// Actual split value for raw prediction (samples with value <= split_value go left)
+    /// This is populated from bin_boundaries during tree growth.
+    pub split_value: f64,
     /// Split gain (higher is better)
     pub gain: f32,
     /// Left child gradient sum
@@ -156,6 +159,7 @@ impl Default for SplitInfo {
         Self {
             feature_idx: 0,
             bin_threshold: 0,
+            split_value: 0.0,
             gain: f32::NEG_INFINITY,
             left_gradient: 0.0,
             left_hessian: 0.0,
@@ -451,9 +455,11 @@ impl SplitFinder {
         }
 
         // Convert kernel result to SplitInfo
+        // Note: split_value will be populated later by the tree grower from bin_boundaries
         Some(SplitInfo {
             feature_idx,
             bin_threshold: candidate.bin_threshold,
+            split_value: 0.0, // Populated by tree grower
             gain: candidate.gain,
             left_gradient: candidate.left_gradient,
             left_hessian: candidate.left_hessian,

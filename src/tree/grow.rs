@@ -343,11 +343,18 @@ impl TreeGrower {
             let left_idx = tree.add_node(left_node);
             let right_idx = tree.add_node(right_node);
 
+            // Get the actual split value from bin boundaries
+            let split_value = dataset.get_split_value(
+                split_info.feature_idx,
+                split_info.bin_threshold,
+            );
+
             // Convert current leaf to internal node
             let current_node = tree.get_node_mut(candidate.node_idx);
             current_node.node_type = crate::tree::NodeType::Internal {
                 feature_idx: split_info.feature_idx,
                 bin_threshold: split_info.bin_threshold,
+                split_value,
                 left_child: left_idx,
                 right_child: right_idx,
             };
