@@ -1,6 +1,14 @@
 //! Split finding with Shannon Entropy regularization
+//!
+//! This module uses SIMD-optimized kernels for split finding when possible.
+//! The SIMD path is taken when:
+//! - No entropy regularization (entropy_weight == 0.0)
+//! - No monotonic constraints
+//!
+//! Otherwise falls back to scalar implementation with full feature support.
 
-use crate::histogram::{Histogram, NodeHistograms};
+use crate::histogram::{Histogram, NodeHistograms, NUM_BINS};
+use crate::kernel::find_best_split as kernel_find_best_split;
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// Monotonic constraint for a feature
@@ -254,6 +262,17 @@ impl SplitFinder {
             .unwrap_or(MonotonicConstraint::None)
     }
 
+    /// Check if we can use the SIMD fast path for a feature
+    ///
+    /// SIMD is used when:
+    /// - No entropy regularization (entropy_weight == 0.0)
+    /// - No monotonic constraint for this feature
+    #[inline]
+    fn can_use_simd(&self, feature_idx: usize) -> bool {
+        self.entropy_weight == 0.0
+            && self.get_constraint(feature_idx) == MonotonicConstraint::None
+    }
+
     /// Check if a split satisfies monotonic constraints
     ///
     /// For a valid monotonic split:
@@ -361,6 +380,94 @@ impl SplitFinder {
 
     /// Find the best split for a single feature
     fn find_best_split_for_feature(
+        &self,
+        histogram: &Histogram,
+        feature_idx: usize,
+        total_gradient: f32,
+        total_hessian: f32,
+        total_count: u32,
+    ) -> Option<SplitInfo> {
+        // Use SIMD fast path when no entropy regularization or monotonic constraints
+        if self.can_use_simd(feature_idx) {
+            return self.find_best_split_for_feature_simd(
+                histogram,
+                feature_idx,
+                total_gradient,
+                total_hessian,
+                total_count,
+            );
+        }
+
+        // Fall back to scalar implementation with full feature support
+        self.find_best_split_for_feature_scalar(
+            histogram,
+            feature_idx,
+            total_gradient,
+            total_hessian,
+            total_count,
+        )
+    }
+
+    /// SIMD-optimized split finding for a single feature
+    ///
+    /// Uses the kernel's vectorized implementation for maximum performance.
+    /// Only used when entropy_weight == 0 and no monotonic constraints.
+    fn find_best_split_for_feature_simd(
+        &self,
+        histogram: &Histogram,
+        feature_idx: usize,
+        total_gradient: f32,
+        total_hessian: f32,
+        total_count: u32,
+    ) -> Option<SplitInfo> {
+        // Extract raw arrays from histogram for SIMD kernel
+        let bins = histogram.bins();
+        let mut hist_grads = [0.0f32; NUM_BINS];
+        let mut hist_hess = [0.0f32; NUM_BINS];
+        let mut hist_counts = [0u32; NUM_BINS];
+
+        for i in 0..NUM_BINS {
+            hist_grads[i] = bins[i].sum_gradients;
+            hist_hess[i] = bins[i].sum_hessians;
+            hist_counts[i] = bins[i].count;
+        }
+
+        // Call SIMD kernel
+        let candidate = kernel_find_best_split(
+            &hist_grads,
+            &hist_hess,
+            &hist_counts,
+            total_gradient,
+            total_hessian,
+            total_count,
+            self.lambda,
+            self.min_samples_leaf as u32,
+            self.min_hessian_leaf,
+        )?;
+
+        // Check min_gain threshold
+        if candidate.gain < self.min_gain {
+            return None;
+        }
+
+        // Convert kernel result to SplitInfo
+        Some(SplitInfo {
+            feature_idx,
+            bin_threshold: candidate.bin_threshold,
+            gain: candidate.gain,
+            left_gradient: candidate.left_gradient,
+            left_hessian: candidate.left_hessian,
+            left_count: candidate.left_count,
+            right_gradient: candidate.right_gradient,
+            right_hessian: candidate.right_hessian,
+            right_count: candidate.right_count,
+        })
+    }
+
+    /// Scalar split finding with full feature support
+    ///
+    /// Supports entropy regularization and monotonic constraints.
+    fn find_best_split_for_feature_scalar(
         &self,
         histogram: &Histogram,
         feature_idx: usize,

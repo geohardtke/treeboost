@@ -1,7 +1,153 @@
-//! Scalar fallback implementations for histogram operations
+//! Scalar fallback implementations for GBDT operations
 //!
 //! These implementations work on any architecture without SIMD support.
 //! They serve as the baseline and are used when SIMD is not available.
+
+// ============================================================================
+// Split Finding
+// ============================================================================
+
+/// Result of split finding for a single feature
+#[derive(Debug, Clone, Copy)]
+pub struct SplitCandidate {
+    /// Bin threshold (samples with bin <= threshold go left)
+    pub bin_threshold: u8,
+    /// Split gain (higher is better)
+    pub gain: f32,
+    /// Left child gradient sum
+    pub left_gradient: f32,
+    /// Left child hessian sum
+    pub left_hessian: f32,
+    /// Left child sample count
+    pub left_count: u32,
+    /// Right child gradient sum
+    pub right_gradient: f32,
+    /// Right child hessian sum
+    pub right_hessian: f32,
+    /// Right child sample count
+    pub right_count: u32,
+}
+
+impl Default for SplitCandidate {
+    fn default() -> Self {
+        Self {
+            bin_threshold: 0,
+            gain: f32::NEG_INFINITY,
+            left_gradient: 0.0,
+            left_hessian: 0.0,
+            left_count: 0,
+            right_gradient: 0.0,
+            right_hessian: 0.0,
+            right_count: 0,
+        }
+    }
+}
+
+impl SplitCandidate {
+    /// Check if this split is valid
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.gain > f32::NEG_INFINITY && self.left_count > 0 && self.right_count > 0
+    }
+}
+
+/// Find the best split for a histogram using scalar code
+#[inline]
+pub fn find_best_split_scalar(
+    hist_grads: &[f32; 256],
+    hist_hess: &[f32; 256],
+    hist_counts: &[u32; 256],
+    total_gradient: f32,
+    total_hessian: f32,
+    total_count: u32,
+    lambda: f32,
+    min_samples_leaf: u32,
+    min_hessian_leaf: f32,
+) -> Option<SplitCandidate> {
+    let mut best = SplitCandidate::default();
+
+    // Parent score (constant, compute once)
+    let parent_score = (total_gradient * total_gradient) / (total_hessian + lambda);
+
+    // Cumulative sums for left child
+    let mut left_g = 0.0f32;
+    let mut left_h = 0.0f32;
+    let mut left_n = 0u32;
+
+    // Scan through bins 0..254 (last bin can't be a threshold since right would be empty)
+    for bin in 0..255u8 {
+        let bin_idx = bin as usize;
+
+        // Skip empty bins
+        if hist_counts[bin_idx] == 0 {
+            continue;
+        }
+
+        // Accumulate left child stats
+        left_g += hist_grads[bin_idx];
+        left_h += hist_hess[bin_idx];
+        left_n += hist_counts[bin_idx];
+
+        // Compute right child stats
+        let right_g = total_gradient - left_g;
+        let right_h = total_hessian - left_h;
+        let right_n = total_count - left_n;
+
+        // Check leaf constraints
+        if left_n < min_samples_leaf || right_n < min_samples_leaf {
+            continue;
+        }
+        if left_h < min_hessian_leaf || right_h < min_hessian_leaf {
+            continue;
+        }
+
+        // Compute gain: 0.5 * (left_score + right_score - parent_score)
+        let left_score = (left_g * left_g) / (left_h + lambda);
+        let right_score = (right_g * right_g) / (right_h + lambda);
+        let gain = 0.5 * (left_score + right_score - parent_score);
+
+        if gain > best.gain {
+            best.bin_threshold = bin;
+            best.gain = gain;
+            best.left_gradient = left_g;
+            best.left_hessian = left_h;
+            best.left_count = left_n;
+            best.right_gradient = right_g;
+            best.right_hessian = right_h;
+            best.right_count = right_n;
+        }
+    }
+
+    if best.is_valid() {
+        Some(best)
+    } else {
+        None
+    }
+}
+
+/// Fallback SIMD implementation - just calls scalar
+#[inline]
+pub fn find_best_split_simd(
+    hist_grads: &[f32; 256],
+    hist_hess: &[f32; 256],
+    hist_counts: &[u32; 256],
+    total_gradient: f32,
+    total_hessian: f32,
+    total_count: u32,
+    lambda: f32,
+    min_samples_leaf: u32,
+    min_hessian_leaf: f32,
+) -> Option<SplitCandidate> {
+    find_best_split_scalar(
+        hist_grads, hist_hess, hist_counts,
+        total_gradient, total_hessian, total_count,
+        lambda, min_samples_leaf, min_hessian_leaf,
+    )
+}
+
+// ============================================================================
+// Histogram Accumulation
+// ============================================================================
 
 /// Scalar histogram accumulation with indexed rows
 ///

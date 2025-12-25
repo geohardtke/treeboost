@@ -752,5 +752,159 @@ fn benchmark_efb(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, benchmark_prediction_components, benchmark_histogram_building, benchmark_training_components, benchmark_efb);
+fn benchmark_split_finding(c: &mut Criterion) {
+    use treeboost::histogram::{Histogram, NodeHistograms};
+    use treeboost::tree::SplitFinder;
+    use treeboost::kernel::{find_best_split_scalar, find_best_split_simd, find_best_split, has_avx2};
+
+    let mut group = c.benchmark_group("SplitFindingProfile");
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(100);
+
+    // Report SIMD availability
+    eprintln!("AVX2 available: {}", has_avx2());
+
+    // Create a histogram with realistic data distribution
+    let create_histogram = |seed: u64| -> Histogram {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut hist = Histogram::new();
+        // Simulate 10k samples distributed across bins
+        for _ in 0..10_000 {
+            let bin: u8 = rng.gen();
+            let grad = rng.gen_range(-1.0..1.0);
+            let hess = rng.gen_range(0.5..1.5);
+            hist.accumulate(bin, grad, hess);
+        }
+        hist
+    };
+
+    // Create raw histogram arrays for kernel benchmarks
+    let create_raw_histogram = |seed: u64| -> ([f32; 256], [f32; 256], [u32; 256], f32, f32, u32) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut grads = [0.0f32; 256];
+        let mut hess = [0.0f32; 256];
+        let mut counts = [0u32; 256];
+        let mut total_g = 0.0f32;
+        let mut total_h = 0.0f32;
+        let mut total_n = 0u32;
+
+        for _ in 0..10_000 {
+            let bin: u8 = rng.gen();
+            let g = rng.gen_range(-1.0..1.0);
+            let h = rng.gen_range(0.5..1.5);
+            grads[bin as usize] += g;
+            hess[bin as usize] += h;
+            counts[bin as usize] += 1;
+            total_g += g;
+            total_h += h;
+            total_n += 1;
+        }
+        (grads, hess, counts, total_g, total_h, total_n)
+    };
+
+    let hist = create_histogram(42);
+    let (grads, hess, counts, total_g, total_h, total_n) = create_raw_histogram(42);
+
+    // Benchmark kernel-level scalar split finding
+    group.bench_function("kernel_scalar_single_feature", |b| {
+        b.iter(|| {
+            black_box(find_best_split_scalar(
+                &grads, &hess, &counts,
+                total_g, total_h, total_n,
+                1.0, 1, 1.0,
+            ))
+        });
+    });
+
+    // Benchmark kernel-level SIMD split finding
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2() {
+        group.bench_function("kernel_simd_single_feature", |b| {
+            b.iter(|| {
+                black_box(unsafe {
+                    find_best_split_simd(
+                        &grads, &hess, &counts,
+                        total_g, total_h, total_n,
+                        1.0, 1, 1.0,
+                    )
+                })
+            });
+        });
+    }
+
+    // Benchmark runtime-dispatched split finding (auto-selects best)
+    group.bench_function("kernel_dispatched_single_feature", |b| {
+        b.iter(|| {
+            black_box(find_best_split(
+                &grads, &hess, &counts,
+                total_g, total_h, total_n,
+                1.0, 1, 1.0,
+            ))
+        });
+    });
+
+    // Benchmark high-level SplitFinder (includes histogram extraction overhead)
+    let mut histograms = NodeHistograms::new(1);
+    *histograms.get_mut(0) = hist.clone();
+
+    let finder_no_entropy = SplitFinder::new()
+        .with_lambda(1.0)
+        .with_min_samples_leaf(1)
+        .with_min_hessian_leaf(1.0);
+
+    group.bench_function("splitfinder_single_feature_no_entropy", |b| {
+        b.iter(|| {
+            black_box(finder_no_entropy.find_best_split(&histograms, total_g, total_h, total_n))
+        });
+    });
+
+    // With entropy regularization (forces scalar path)
+    let finder_with_entropy = SplitFinder::new()
+        .with_lambda(1.0)
+        .with_min_samples_leaf(1)
+        .with_min_hessian_leaf(1.0)
+        .with_entropy_weight(0.1);
+
+    group.bench_function("splitfinder_single_feature_with_entropy", |b| {
+        b.iter(|| {
+            black_box(finder_with_entropy.find_best_split(&histograms, total_g, total_h, total_n))
+        });
+    });
+
+    // Multi-feature benchmark (realistic GBDT scenario)
+    let num_features = 20;
+    let mut multi_histograms = NodeHistograms::new(num_features);
+    for f in 0..num_features {
+        *multi_histograms.get_mut(f) = create_histogram(42 + f as u64);
+    }
+
+    group.bench_function("splitfinder_20_features_no_entropy", |b| {
+        b.iter(|| {
+            black_box(finder_no_entropy.find_best_split(&multi_histograms, total_g, total_h, total_n))
+        });
+    });
+
+    group.bench_function("splitfinder_20_features_with_entropy", |b| {
+        b.iter(|| {
+            black_box(finder_with_entropy.find_best_split(&multi_histograms, total_g, total_h, total_n))
+        });
+    });
+
+    // 100 features (wide dataset)
+    let num_features_wide = 100;
+    let mut wide_histograms = NodeHistograms::new(num_features_wide);
+    for f in 0..num_features_wide {
+        *wide_histograms.get_mut(f) = create_histogram(42 + f as u64);
+    }
+
+    group.bench_function("splitfinder_100_features_no_entropy", |b| {
+        b.iter(|| {
+            black_box(finder_no_entropy.find_best_split(&wide_histograms, total_g, total_h, total_n))
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, benchmark_prediction_components, benchmark_histogram_building, benchmark_training_components, benchmark_efb, benchmark_split_finding);
 criterion_main!(benches);

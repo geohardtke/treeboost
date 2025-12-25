@@ -1,4 +1,4 @@
-//! SIMD-optimized kernels for histogram operations
+//! SIMD-optimized kernels for GBDT operations
 //!
 //! # Architecture Support
 //!
@@ -15,6 +15,12 @@ pub mod fallback;
 
 #[cfg(target_arch = "x86_64")]
 pub mod x86;
+
+#[cfg(target_arch = "x86_64")]
+pub use x86::{find_best_split_scalar, find_best_split_simd, SplitCandidate};
+
+#[cfg(not(target_arch = "x86_64"))]
+pub use fallback::{find_best_split_scalar, find_best_split_simd, SplitCandidate};
 
 use std::sync::OnceLock;
 
@@ -68,6 +74,62 @@ pub fn has_avx2() -> bool {
 #[inline]
 pub fn has_avx512() -> bool {
     matches!(simd_level(), SimdLevel::Avx512)
+}
+
+// ============================================================================
+// Public API - Runtime-dispatched split finding
+// ============================================================================
+
+/// Find the best split for a histogram with runtime SIMD dispatch
+///
+/// Automatically selects the best available implementation:
+/// - AVX2/FMA on x86_64 with those features
+/// - Scalar fallback otherwise
+///
+/// # Arguments
+/// * `hist_grads` - Sum of gradients per bin [256]
+/// * `hist_hess` - Sum of hessians per bin [256]
+/// * `hist_counts` - Count per bin [256]
+/// * `total_gradient` - Total gradient sum across all bins
+/// * `total_hessian` - Total hessian sum across all bins
+/// * `total_count` - Total sample count across all bins
+/// * `lambda` - L2 regularization parameter
+/// * `min_samples_leaf` - Minimum samples required in each leaf
+/// * `min_hessian_leaf` - Minimum hessian sum required in each leaf
+///
+/// # Returns
+/// The best split candidate, or None if no valid split exists
+#[inline]
+pub fn find_best_split(
+    hist_grads: &[f32; 256],
+    hist_hess: &[f32; 256],
+    hist_counts: &[u32; 256],
+    total_gradient: f32,
+    total_hessian: f32,
+    total_count: u32,
+    lambda: f32,
+    min_samples_leaf: u32,
+    min_hessian_leaf: f32,
+) -> Option<SplitCandidate> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2() {
+            // Safety: we just checked for AVX2 support
+            return unsafe {
+                find_best_split_simd(
+                    hist_grads, hist_hess, hist_counts,
+                    total_gradient, total_hessian, total_count,
+                    lambda, min_samples_leaf, min_hessian_leaf,
+                )
+            };
+        }
+    }
+
+    find_best_split_scalar(
+        hist_grads, hist_hess, hist_counts,
+        total_gradient, total_hessian, total_count,
+        lambda, min_samples_leaf, min_hessian_leaf,
+    )
 }
 
 // ============================================================================
