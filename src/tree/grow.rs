@@ -1,4 +1,8 @@
 //! Tree growing with Best-First (Leaf-wise) strategy
+//!
+//! Uses a sorted row array with position tracking for zero-allocation partitioning.
+//! This is the LightGBM approach: a single Vec<usize> contains all row indices,
+//! partitioned in-place by node. Each node tracks its range (start, end) into this array.
 
 use crate::dataset::BinnedDataset;
 use crate::histogram::{HistogramBuilder, NodeHistograms};
@@ -8,21 +12,91 @@ use rand::SeedableRng;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-/// Candidate node for splitting
+/// Manages row indices during tree growth with zero-allocation partitioning.
+///
+/// Instead of storing row indices per node, we maintain a single sorted array
+/// where each node's rows are a contiguous slice. Partitioning is done in-place
+/// using the Dutch National Flag algorithm.
+struct RowPartitioner {
+    /// All row indices, partitioned by node (contiguous slices)
+    rows: Vec<usize>,
+}
+
+impl RowPartitioner {
+    /// Create a new partitioner from initial row indices
+    fn new(initial_rows: Vec<usize>) -> Self {
+        Self { rows: initial_rows }
+    }
+
+    /// Get a slice of rows for the given range
+    #[inline]
+    fn get_rows(&self, start: usize, end: usize) -> &[usize] {
+        &self.rows[start..end]
+    }
+
+    /// Partition rows in-place using Dutch National Flag algorithm.
+    ///
+    /// After partitioning, rows[start..mid] go left, rows[mid..end] go right.
+    /// Returns the midpoint index.
+    fn partition_in_place(
+        &mut self,
+        dataset: &BinnedDataset,
+        start: usize,
+        end: usize,
+        feature_idx: usize,
+        bin_threshold: u8,
+    ) -> usize {
+        // Dutch National Flag: partition in-place with single pass
+        // Left pointer scans right, right pointer scans left
+        let mut left = start;
+        let mut right = end;
+
+        while left < right {
+            // Find first row from left that should go right
+            while left < right {
+                let row_idx = self.rows[left];
+                let bin = dataset.get_bin(row_idx, feature_idx);
+                if bin > bin_threshold {
+                    break;
+                }
+                left += 1;
+            }
+
+            // Find first row from right that should go left
+            while left < right {
+                right -= 1;
+                let row_idx = self.rows[right];
+                let bin = dataset.get_bin(row_idx, feature_idx);
+                if bin <= bin_threshold {
+                    // Swap and continue
+                    self.rows.swap(left, right);
+                    left += 1;
+                    break;
+                }
+            }
+        }
+
+        left // Midpoint: rows[start..left] go left, rows[left..end] go right
+    }
+}
+
+/// Candidate node for splitting (zero-allocation version)
 #[derive(Debug)]
 struct SplitCandidate {
     /// Node index in tree
     node_idx: usize,
-    /// Row indices belonging to this node
-    row_indices: Vec<usize>,
+    /// Start index in RowPartitioner.rows (inclusive)
+    row_start: usize,
+    /// End index in RowPartitioner.rows (exclusive)
+    row_end: usize,
     /// Precomputed histograms (if available)
     histograms: Option<NodeHistograms>,
     /// Best split info (if computed)
     split_info: Option<SplitInfo>,
-    /// Gradient sum (for debugging)
+    /// Gradient sum
     #[allow(dead_code)]
     sum_gradients: f32,
-    /// Hessian sum (for debugging)
+    /// Hessian sum
     #[allow(dead_code)]
     sum_hessians: f32,
     /// Features used in ancestors (for interaction constraints)
@@ -57,9 +131,9 @@ impl SplitCandidate {
         self.split_info.as_ref().map(|s| s.gain).unwrap_or(f32::NEG_INFINITY)
     }
 
-    #[allow(dead_code)]
-    fn count(&self) -> u32 {
-        self.row_indices.len() as u32
+    #[inline]
+    fn row_count(&self) -> usize {
+        self.row_end - self.row_start
     }
 }
 
@@ -219,6 +293,7 @@ impl TreeGrower {
         row_indices: &[usize],
     ) -> Tree {
         let num_features = dataset.num_features();
+        let num_rows = row_indices.len();
         let histogram_builder = HistogramBuilder::new();
         let split_finder = self.create_split_finder();
 
@@ -228,7 +303,7 @@ impl TreeGrower {
             let n_features = n_features.max(1); // At least one feature
             let mut rng = rand::rngs::StdRng::seed_from_u64(
                 // Use row count as seed variation per tree
-                (row_indices.len() as u64).wrapping_mul(31337)
+                (num_rows as u64).wrapping_mul(31337)
             );
             let mut all_features: Vec<usize> = (0..num_features).collect();
             all_features.shuffle(&mut rng);
@@ -246,7 +321,7 @@ impl TreeGrower {
         // Initialize tree with root leaf
         let mut tree = Tree::new(
             initial_weight * self.learning_rate,
-            row_indices.len(),
+            num_rows,
             total_gradient,
             total_hessian,
         );
@@ -254,9 +329,16 @@ impl TreeGrower {
         // Initialize priority queue with root candidate
         let mut candidates: BinaryHeap<SplitCandidate> = BinaryHeap::new();
 
+        // Initialize row partitioner with all rows (single allocation for entire tree growth)
+        let mut partitioner = RowPartitioner::new(row_indices.to_vec());
+
         // Build root histograms from subsampled rows (feature-parallel via Rayon)
-        let all_rows: Vec<usize> = row_indices.to_vec();
-        let root_histograms = histogram_builder.build(dataset, &all_rows, gradients, hessians);
+        let root_histograms = histogram_builder.build(
+            dataset,
+            partitioner.get_rows(0, num_rows),
+            gradients,
+            hessians,
+        );
 
         // Compute effective feature mask for root (no ancestors)
         let root_feature_mask = self.compute_effective_feature_mask(
@@ -270,13 +352,14 @@ impl TreeGrower {
             &root_histograms,
             total_gradient,
             total_hessian,
-            row_indices.len() as u32,
+            num_rows as u32,
             root_feature_mask.as_deref(),
         );
 
         candidates.push(SplitCandidate {
             node_idx: 0,
-            row_indices: all_rows,
+            row_start: 0,
+            row_end: num_rows,
             histograms: Some(root_histograms),
             split_info: root_split,
             sum_gradients: total_gradient,
@@ -294,7 +377,7 @@ impl TreeGrower {
             }
 
             let split_info = match &candidate.split_info {
-                Some(info) if info.is_valid() => info,
+                Some(info) if info.is_valid() => info.clone(),
                 _ => continue, // No valid split
             };
 
@@ -303,13 +386,21 @@ impl TreeGrower {
                 continue;
             }
 
-            // Perform the split: partition row indices
-            let (left_rows, right_rows) = self.partition_rows(
+            // Perform the split: partition rows in-place (zero allocation!)
+            let mid = partitioner.partition_in_place(
                 dataset,
-                &candidate.row_indices,
+                candidate.row_start,
+                candidate.row_end,
                 split_info.feature_idx,
                 split_info.bin_threshold,
             );
+
+            let left_start = candidate.row_start;
+            let left_end = mid;
+            let right_start = mid;
+            let right_end = candidate.row_end;
+            let left_count = left_end - left_start;
+            let right_count = right_end - right_start;
 
             // Create child leaf nodes
             let left_weight = Node::compute_leaf_weight(
@@ -328,14 +419,14 @@ impl TreeGrower {
             let left_node = Node::leaf(
                 left_weight * self.learning_rate,
                 child_depth,
-                left_rows.len(),
+                left_count,
                 split_info.left_gradient,
                 split_info.left_hessian,
             );
             let right_node = Node::leaf(
                 right_weight * self.learning_rate,
                 child_depth,
-                right_rows.len(),
+                right_count,
                 split_info.right_gradient,
                 split_info.right_hessian,
             );
@@ -369,13 +460,15 @@ impl TreeGrower {
             // Build histograms for children using subtraction trick
             let parent_histograms = candidate.histograms.unwrap();
 
-            // Determine smaller child
-            let (smaller_rows, smaller_idx, larger_rows, larger_idx, smaller_g, smaller_h, larger_g, larger_h) =
-                if left_rows.len() <= right_rows.len() {
+            // Determine smaller child for histogram subtraction trick
+            let (smaller_start, smaller_end, smaller_idx, larger_start, larger_end, larger_idx, smaller_g, smaller_h, larger_g, larger_h) =
+                if left_count <= right_count {
                     (
-                        left_rows,
+                        left_start,
+                        left_end,
                         left_idx,
-                        right_rows,
+                        right_start,
+                        right_end,
                         right_idx,
                         split_info.left_gradient,
                         split_info.left_hessian,
@@ -384,9 +477,11 @@ impl TreeGrower {
                     )
                 } else {
                     (
-                        right_rows,
+                        right_start,
+                        right_end,
                         right_idx,
-                        left_rows,
+                        left_start,
+                        left_end,
                         left_idx,
                         split_info.right_gradient,
                         split_info.right_hessian,
@@ -395,9 +490,16 @@ impl TreeGrower {
                     )
                 };
 
+            let smaller_count = smaller_end - smaller_start;
+            let larger_count = larger_end - larger_start;
+
             // Build histogram for smaller child directly (feature-parallel via Rayon)
-            let smaller_histograms =
-                histogram_builder.build(dataset, &smaller_rows, gradients, hessians);
+            let smaller_histograms = histogram_builder.build(
+                dataset,
+                partitioner.get_rows(smaller_start, smaller_end),
+                gradients,
+                hessians,
+            );
 
             // Compute larger child histogram using subtraction
             let larger_histograms =
@@ -419,20 +521,21 @@ impl TreeGrower {
                 &smaller_histograms,
                 smaller_g,
                 smaller_h,
-                smaller_rows.len() as u32,
+                smaller_count as u32,
                 child_feature_mask.as_deref(),
             );
             let larger_split = split_finder.find_best_split_with_features(
                 &larger_histograms,
                 larger_g,
                 larger_h,
-                larger_rows.len() as u32,
+                larger_count as u32,
                 child_feature_mask.as_deref(),
             );
 
             candidates.push(SplitCandidate {
                 node_idx: smaller_idx,
-                row_indices: smaller_rows,
+                row_start: smaller_start,
+                row_end: smaller_end,
                 histograms: Some(smaller_histograms),
                 split_info: smaller_split,
                 sum_gradients: smaller_g,
@@ -442,7 +545,8 @@ impl TreeGrower {
 
             candidates.push(SplitCandidate {
                 node_idx: larger_idx,
-                row_indices: larger_rows,
+                row_start: larger_start,
+                row_end: larger_end,
                 histograms: Some(larger_histograms),
                 split_info: larger_split,
                 sum_gradients: larger_g,
@@ -494,28 +598,6 @@ impl TreeGrower {
         }
     }
 
-    /// Partition rows by split
-    fn partition_rows(
-        &self,
-        dataset: &BinnedDataset,
-        row_indices: &[usize],
-        feature_idx: usize,
-        bin_threshold: u8,
-    ) -> (Vec<usize>, Vec<usize>) {
-        let mut left = Vec::with_capacity(row_indices.len() / 2);
-        let mut right = Vec::with_capacity(row_indices.len() / 2);
-
-        for &row_idx in row_indices {
-            let bin = dataset.get_bin(row_idx, feature_idx);
-            if bin <= bin_threshold {
-                left.push(row_idx);
-            } else {
-                right.push(row_idx);
-            }
-        }
-
-        (left, right)
-    }
 }
 
 #[cfg(test)]
