@@ -24,7 +24,7 @@
 //!
 //! The scatter (accumulation) is always scalar due to bin conflicts.
 
-use crate::dataset::BinnedDataset;
+use crate::dataset::{BinnedDataset, SparseColumn, DEFAULT_BIN};
 use crate::histogram::{Histogram, NodeHistograms};
 use rayon::prelude::*;
 
@@ -142,68 +142,87 @@ impl HistogramBuilder {
                     );
                 }
 
+                // Compute block totals for sparse default bin subtraction
+                let block_total_grad: f32 = grad_cache[..block_len].iter().sum();
+                let block_total_hess: f32 = hess_cache[..block_len].iter().sum();
+
                 // Now iterate ALL features while gradients are hot in L1
                 for feature_idx in 0..num_features {
-                    let feature_column = dataset.feature_column(feature_idx);
-                    let hist = local_hists.get_mut(feature_idx);
-                    let bins = hist.bins_mut();
+                    // Check for sparse feature
+                    if let Some(sparse_col) = dataset.sparse_column(feature_idx) {
+                        // Sparse path: only iterate non-default entries in this block
+                        Self::build_sparse_histogram_block(
+                            local_hists.get_mut(feature_idx),
+                            sparse_col,
+                            block_start,
+                            block_len,
+                            &grad_cache,
+                            &hess_cache,
+                            block_total_grad,
+                            block_total_hess,
+                        );
+                    } else {
+                        // Dense path: 8x unrolled accumulation
+                        let feature_column = dataset.feature_column(feature_idx);
+                        let hist = local_hists.get_mut(feature_idx);
+                        let bins = hist.bins_mut();
 
-                    // 8x unrolled accumulation with cached gradients
-                    let chunks = block_len / 8;
-                    let remainder = block_len % 8;
+                        let chunks = block_len / 8;
+                        let remainder = block_len % 8;
 
-                    unsafe {
-                        for i in 0..chunks {
-                            let base = i * 8;
-                            let row_base = block_start + base;
+                        unsafe {
+                            for i in 0..chunks {
+                                let base = i * 8;
+                                let row_base = block_start + base;
 
-                            // Load bins (sequential read from feature column)
-                            let bin0 = *feature_column.get_unchecked(row_base) as usize;
-                            let bin1 = *feature_column.get_unchecked(row_base + 1) as usize;
-                            let bin2 = *feature_column.get_unchecked(row_base + 2) as usize;
-                            let bin3 = *feature_column.get_unchecked(row_base + 3) as usize;
-                            let bin4 = *feature_column.get_unchecked(row_base + 4) as usize;
-                            let bin5 = *feature_column.get_unchecked(row_base + 5) as usize;
-                            let bin6 = *feature_column.get_unchecked(row_base + 6) as usize;
-                            let bin7 = *feature_column.get_unchecked(row_base + 7) as usize;
+                                // Load bins (sequential read from feature column)
+                                let bin0 = *feature_column.get_unchecked(row_base) as usize;
+                                let bin1 = *feature_column.get_unchecked(row_base + 1) as usize;
+                                let bin2 = *feature_column.get_unchecked(row_base + 2) as usize;
+                                let bin3 = *feature_column.get_unchecked(row_base + 3) as usize;
+                                let bin4 = *feature_column.get_unchecked(row_base + 4) as usize;
+                                let bin5 = *feature_column.get_unchecked(row_base + 5) as usize;
+                                let bin6 = *feature_column.get_unchecked(row_base + 6) as usize;
+                                let bin7 = *feature_column.get_unchecked(row_base + 7) as usize;
 
-                            // Load from L1 cache (fast!)
-                            let grad0 = *grad_cache.get_unchecked(base);
-                            let grad1 = *grad_cache.get_unchecked(base + 1);
-                            let grad2 = *grad_cache.get_unchecked(base + 2);
-                            let grad3 = *grad_cache.get_unchecked(base + 3);
-                            let grad4 = *grad_cache.get_unchecked(base + 4);
-                            let grad5 = *grad_cache.get_unchecked(base + 5);
-                            let grad6 = *grad_cache.get_unchecked(base + 6);
-                            let grad7 = *grad_cache.get_unchecked(base + 7);
+                                // Load from L1 cache (fast!)
+                                let grad0 = *grad_cache.get_unchecked(base);
+                                let grad1 = *grad_cache.get_unchecked(base + 1);
+                                let grad2 = *grad_cache.get_unchecked(base + 2);
+                                let grad3 = *grad_cache.get_unchecked(base + 3);
+                                let grad4 = *grad_cache.get_unchecked(base + 4);
+                                let grad5 = *grad_cache.get_unchecked(base + 5);
+                                let grad6 = *grad_cache.get_unchecked(base + 6);
+                                let grad7 = *grad_cache.get_unchecked(base + 7);
 
-                            let hess0 = *hess_cache.get_unchecked(base);
-                            let hess1 = *hess_cache.get_unchecked(base + 1);
-                            let hess2 = *hess_cache.get_unchecked(base + 2);
-                            let hess3 = *hess_cache.get_unchecked(base + 3);
-                            let hess4 = *hess_cache.get_unchecked(base + 4);
-                            let hess5 = *hess_cache.get_unchecked(base + 5);
-                            let hess6 = *hess_cache.get_unchecked(base + 6);
-                            let hess7 = *hess_cache.get_unchecked(base + 7);
+                                let hess0 = *hess_cache.get_unchecked(base);
+                                let hess1 = *hess_cache.get_unchecked(base + 1);
+                                let hess2 = *hess_cache.get_unchecked(base + 2);
+                                let hess3 = *hess_cache.get_unchecked(base + 3);
+                                let hess4 = *hess_cache.get_unchecked(base + 4);
+                                let hess5 = *hess_cache.get_unchecked(base + 5);
+                                let hess6 = *hess_cache.get_unchecked(base + 6);
+                                let hess7 = *hess_cache.get_unchecked(base + 7);
 
-                            // Scatter to histogram bins
-                            bins.get_unchecked_mut(bin0).accumulate(grad0, hess0);
-                            bins.get_unchecked_mut(bin1).accumulate(grad1, hess1);
-                            bins.get_unchecked_mut(bin2).accumulate(grad2, hess2);
-                            bins.get_unchecked_mut(bin3).accumulate(grad3, hess3);
-                            bins.get_unchecked_mut(bin4).accumulate(grad4, hess4);
-                            bins.get_unchecked_mut(bin5).accumulate(grad5, hess5);
-                            bins.get_unchecked_mut(bin6).accumulate(grad6, hess6);
-                            bins.get_unchecked_mut(bin7).accumulate(grad7, hess7);
-                        }
+                                // Scatter to histogram bins
+                                bins.get_unchecked_mut(bin0).accumulate(grad0, hess0);
+                                bins.get_unchecked_mut(bin1).accumulate(grad1, hess1);
+                                bins.get_unchecked_mut(bin2).accumulate(grad2, hess2);
+                                bins.get_unchecked_mut(bin3).accumulate(grad3, hess3);
+                                bins.get_unchecked_mut(bin4).accumulate(grad4, hess4);
+                                bins.get_unchecked_mut(bin5).accumulate(grad5, hess5);
+                                bins.get_unchecked_mut(bin6).accumulate(grad6, hess6);
+                                bins.get_unchecked_mut(bin7).accumulate(grad7, hess7);
+                            }
 
-                        // Handle remainder
-                        let rem_base = chunks * 8;
-                        for i in 0..remainder {
-                            let bin = *feature_column.get_unchecked(block_start + rem_base + i) as usize;
-                            let grad = *grad_cache.get_unchecked(rem_base + i);
-                            let hess = *hess_cache.get_unchecked(rem_base + i);
-                            bins.get_unchecked_mut(bin).accumulate(grad, hess);
+                            // Handle remainder
+                            let rem_base = chunks * 8;
+                            for i in 0..remainder {
+                                let bin = *feature_column.get_unchecked(block_start + rem_base + i) as usize;
+                                let grad = *grad_cache.get_unchecked(rem_base + i);
+                                let hess = *hess_cache.get_unchecked(rem_base + i);
+                                bins.get_unchecked_mut(bin).accumulate(grad, hess);
+                            }
                         }
                     }
                 }
@@ -247,78 +266,97 @@ impl HistogramBuilder {
                     }
                 }
 
+                // Compute block totals for sparse default bin subtraction
+                let block_total_grad: f32 = grad_cache[..block_len].iter().sum();
+                let block_total_hess: f32 = hess_cache[..block_len].iter().sum();
+
                 // Now iterate ALL features while gradients are hot in L1
                 for feature_idx in 0..num_features {
-                    let feature_column = dataset.feature_column(feature_idx);
-                    let hist = local_hists.get_mut(feature_idx);
-                    let bins = hist.bins_mut();
+                    // Check for sparse feature - for indexed rows, use the simpler path
+                    // since we need to intersect sparse indices with chunk indices
+                    if let Some(sparse_col) = dataset.sparse_column(feature_idx) {
+                        Self::build_sparse_histogram_indexed(
+                            local_hists.get_mut(feature_idx),
+                            sparse_col,
+                            chunk,
+                            &grad_cache,
+                            &hess_cache,
+                            block_len,
+                            block_total_grad,
+                            block_total_hess,
+                        );
+                    } else {
+                        // Dense path: 8x unrolled accumulation
+                        let feature_column = dataset.feature_column(feature_idx);
+                        let hist = local_hists.get_mut(feature_idx);
+                        let bins = hist.bins_mut();
 
-                    // 8x unrolled accumulation with cached gradients
-                    let chunks_count = block_len / 8;
-                    let remainder = block_len % 8;
+                        let chunks_count = block_len / 8;
+                        let remainder = block_len % 8;
 
-                    unsafe {
-                        for i in 0..chunks_count {
-                            let base = i * 8;
+                        unsafe {
+                            for i in 0..chunks_count {
+                                let base = i * 8;
 
-                            // Load row indices
-                            let idx0 = *chunk.get_unchecked(base);
-                            let idx1 = *chunk.get_unchecked(base + 1);
-                            let idx2 = *chunk.get_unchecked(base + 2);
-                            let idx3 = *chunk.get_unchecked(base + 3);
-                            let idx4 = *chunk.get_unchecked(base + 4);
-                            let idx5 = *chunk.get_unchecked(base + 5);
-                            let idx6 = *chunk.get_unchecked(base + 6);
-                            let idx7 = *chunk.get_unchecked(base + 7);
+                                // Load row indices
+                                let idx0 = *chunk.get_unchecked(base);
+                                let idx1 = *chunk.get_unchecked(base + 1);
+                                let idx2 = *chunk.get_unchecked(base + 2);
+                                let idx3 = *chunk.get_unchecked(base + 3);
+                                let idx4 = *chunk.get_unchecked(base + 4);
+                                let idx5 = *chunk.get_unchecked(base + 5);
+                                let idx6 = *chunk.get_unchecked(base + 6);
+                                let idx7 = *chunk.get_unchecked(base + 7);
 
-                            // Load bins (scattered read from feature column)
-                            let bin0 = *feature_column.get_unchecked(idx0) as usize;
-                            let bin1 = *feature_column.get_unchecked(idx1) as usize;
-                            let bin2 = *feature_column.get_unchecked(idx2) as usize;
-                            let bin3 = *feature_column.get_unchecked(idx3) as usize;
-                            let bin4 = *feature_column.get_unchecked(idx4) as usize;
-                            let bin5 = *feature_column.get_unchecked(idx5) as usize;
-                            let bin6 = *feature_column.get_unchecked(idx6) as usize;
-                            let bin7 = *feature_column.get_unchecked(idx7) as usize;
+                                // Load bins (scattered read from feature column)
+                                let bin0 = *feature_column.get_unchecked(idx0) as usize;
+                                let bin1 = *feature_column.get_unchecked(idx1) as usize;
+                                let bin2 = *feature_column.get_unchecked(idx2) as usize;
+                                let bin3 = *feature_column.get_unchecked(idx3) as usize;
+                                let bin4 = *feature_column.get_unchecked(idx4) as usize;
+                                let bin5 = *feature_column.get_unchecked(idx5) as usize;
+                                let bin6 = *feature_column.get_unchecked(idx6) as usize;
+                                let bin7 = *feature_column.get_unchecked(idx7) as usize;
 
-                            // Load from L1 cache (fast!)
-                            let grad0 = *grad_cache.get_unchecked(base);
-                            let grad1 = *grad_cache.get_unchecked(base + 1);
-                            let grad2 = *grad_cache.get_unchecked(base + 2);
-                            let grad3 = *grad_cache.get_unchecked(base + 3);
-                            let grad4 = *grad_cache.get_unchecked(base + 4);
-                            let grad5 = *grad_cache.get_unchecked(base + 5);
-                            let grad6 = *grad_cache.get_unchecked(base + 6);
-                            let grad7 = *grad_cache.get_unchecked(base + 7);
+                                // Load from L1 cache (fast!)
+                                let grad0 = *grad_cache.get_unchecked(base);
+                                let grad1 = *grad_cache.get_unchecked(base + 1);
+                                let grad2 = *grad_cache.get_unchecked(base + 2);
+                                let grad3 = *grad_cache.get_unchecked(base + 3);
+                                let grad4 = *grad_cache.get_unchecked(base + 4);
+                                let grad5 = *grad_cache.get_unchecked(base + 5);
+                                let grad6 = *grad_cache.get_unchecked(base + 6);
+                                let grad7 = *grad_cache.get_unchecked(base + 7);
 
-                            let hess0 = *hess_cache.get_unchecked(base);
-                            let hess1 = *hess_cache.get_unchecked(base + 1);
-                            let hess2 = *hess_cache.get_unchecked(base + 2);
-                            let hess3 = *hess_cache.get_unchecked(base + 3);
-                            let hess4 = *hess_cache.get_unchecked(base + 4);
-                            let hess5 = *hess_cache.get_unchecked(base + 5);
-                            let hess6 = *hess_cache.get_unchecked(base + 6);
-                            let hess7 = *hess_cache.get_unchecked(base + 7);
+                                let hess0 = *hess_cache.get_unchecked(base);
+                                let hess1 = *hess_cache.get_unchecked(base + 1);
+                                let hess2 = *hess_cache.get_unchecked(base + 2);
+                                let hess3 = *hess_cache.get_unchecked(base + 3);
+                                let hess4 = *hess_cache.get_unchecked(base + 4);
+                                let hess5 = *hess_cache.get_unchecked(base + 5);
+                                let hess6 = *hess_cache.get_unchecked(base + 6);
+                                let hess7 = *hess_cache.get_unchecked(base + 7);
 
-                            // Scatter to histogram bins
-                            bins.get_unchecked_mut(bin0).accumulate(grad0, hess0);
-                            bins.get_unchecked_mut(bin1).accumulate(grad1, hess1);
-                            bins.get_unchecked_mut(bin2).accumulate(grad2, hess2);
-                            bins.get_unchecked_mut(bin3).accumulate(grad3, hess3);
-                            bins.get_unchecked_mut(bin4).accumulate(grad4, hess4);
-                            bins.get_unchecked_mut(bin5).accumulate(grad5, hess5);
-                            bins.get_unchecked_mut(bin6).accumulate(grad6, hess6);
-                            bins.get_unchecked_mut(bin7).accumulate(grad7, hess7);
-                        }
+                                // Scatter to histogram bins
+                                bins.get_unchecked_mut(bin0).accumulate(grad0, hess0);
+                                bins.get_unchecked_mut(bin1).accumulate(grad1, hess1);
+                                bins.get_unchecked_mut(bin2).accumulate(grad2, hess2);
+                                bins.get_unchecked_mut(bin3).accumulate(grad3, hess3);
+                                bins.get_unchecked_mut(bin4).accumulate(grad4, hess4);
+                                bins.get_unchecked_mut(bin5).accumulate(grad5, hess5);
+                                bins.get_unchecked_mut(bin6).accumulate(grad6, hess6);
+                                bins.get_unchecked_mut(bin7).accumulate(grad7, hess7);
+                            }
 
-                        // Handle remainder
-                        let rem_base = chunks_count * 8;
-                        for i in 0..remainder {
-                            let idx = *chunk.get_unchecked(rem_base + i);
-                            let bin = *feature_column.get_unchecked(idx) as usize;
-                            let grad = *grad_cache.get_unchecked(rem_base + i);
-                            let hess = *hess_cache.get_unchecked(rem_base + i);
-                            bins.get_unchecked_mut(bin).accumulate(grad, hess);
+                            // Handle remainder
+                            let rem_base = chunks_count * 8;
+                            for i in 0..remainder {
+                                let idx = *chunk.get_unchecked(rem_base + i);
+                                let bin = *feature_column.get_unchecked(idx) as usize;
+                                let grad = *grad_cache.get_unchecked(rem_base + i);
+                                let hess = *hess_cache.get_unchecked(rem_base + i);
+                                bins.get_unchecked_mut(bin).accumulate(grad, hess);
+                            }
                         }
                     }
                 }
@@ -352,18 +390,226 @@ impl HistogramBuilder {
             hess_cache[i] = hessians[row_idx];
         }
 
+        // Compute totals for sparse default bin subtraction
+        let total_grad: f32 = grad_cache.iter().sum();
+        let total_hess: f32 = hess_cache.iter().sum();
+        let total_count = block_len as u32;
+
         // Process all features with cached gradients
         for feature_idx in 0..num_features {
-            let feature_column = dataset.feature_column(feature_idx);
-            let hist = node_hists.get_mut(feature_idx);
+            // Check if this feature has a sparse representation
+            if let Some(sparse_col) = dataset.sparse_column(feature_idx) {
+                // Sparse path: only iterate non-default entries
+                Self::build_sparse_histogram(
+                    node_hists.get_mut(feature_idx),
+                    sparse_col,
+                    row_indices,
+                    gradients,
+                    hessians,
+                    total_grad,
+                    total_hess,
+                    total_count,
+                );
+            } else {
+                // Dense path
+                let feature_column = dataset.feature_column(feature_idx);
+                let hist = node_hists.get_mut(feature_idx);
 
-            for (i, &row_idx) in row_indices.iter().enumerate() {
-                let bin = feature_column[row_idx];
-                hist.accumulate(bin, grad_cache[i], hess_cache[i]);
+                for (i, &row_idx) in row_indices.iter().enumerate() {
+                    let bin = feature_column[row_idx];
+                    hist.accumulate(bin, grad_cache[i], hess_cache[i]);
+                }
             }
         }
 
         node_hists
+    }
+
+    /// Build histogram for a sparse feature using default bin subtraction
+    ///
+    /// Only iterates non-default entries, then computes default bin by:
+    /// `default_bin = total - sum(non_default_bins)`
+    fn build_sparse_histogram(
+        hist: &mut Histogram,
+        sparse_col: &SparseColumn,
+        row_indices: &[usize],
+        gradients: &[f32],
+        hessians: &[f32],
+        total_grad: f32,
+        total_hess: f32,
+        total_count: u32,
+    ) {
+        // Create a set of active row indices for O(1) lookup
+        // For small row_indices, linear search is faster than HashSet
+        let is_contiguous = row_indices.first() == Some(&0)
+            && row_indices.last() == Some(&(row_indices.len() - 1));
+
+        let mut non_default_grad = 0.0f32;
+        let mut non_default_hess = 0.0f32;
+        let mut non_default_count = 0u32;
+
+        if is_contiguous {
+            // Fast path: row_indices is 0..n, just check bounds
+            let n = row_indices.len();
+            for (&row_idx, &bin) in sparse_col.indices.iter().zip(sparse_col.values.iter()) {
+                let row_idx = row_idx as usize;
+                if row_idx < n {
+                    let grad = gradients[row_idx];
+                    let hess = hessians[row_idx];
+                    hist.accumulate(bin, grad, hess);
+                    non_default_grad += grad;
+                    non_default_hess += hess;
+                    non_default_count += 1;
+                }
+            }
+        } else {
+            // Slower path: need to check membership in row_indices
+            // For efficiency, we use binary search since row_indices are sorted
+            for (&row_idx, &bin) in sparse_col.indices.iter().zip(sparse_col.values.iter()) {
+                let row_idx = row_idx as usize;
+                if row_indices.binary_search(&row_idx).is_ok() {
+                    let grad = gradients[row_idx];
+                    let hess = hessians[row_idx];
+                    hist.accumulate(bin, grad, hess);
+                    non_default_grad += grad;
+                    non_default_hess += hess;
+                    non_default_count += 1;
+                }
+            }
+        }
+
+        // Compute default bin (bin 0) by subtraction
+        let default_bin = hist.get_mut(DEFAULT_BIN);
+        default_bin.sum_gradients = total_grad - non_default_grad;
+        default_bin.sum_hessians = total_hess - non_default_hess;
+        default_bin.count = total_count - non_default_count;
+    }
+
+    /// Build histogram for a sparse feature block (contiguous rows)
+    ///
+    /// Optimized for cache-blocked processing with contiguous row ranges.
+    fn build_sparse_histogram_block(
+        hist: &mut Histogram,
+        sparse_col: &SparseColumn,
+        block_start: usize,
+        block_len: usize,
+        grad_cache: &[f32; BLOCK_SIZE],
+        hess_cache: &[f32; BLOCK_SIZE],
+        block_total_grad: f32,
+        block_total_hess: f32,
+    ) {
+        let block_end = block_start + block_len;
+
+        let mut non_default_grad = 0.0f32;
+        let mut non_default_hess = 0.0f32;
+        let mut non_default_count = 0u32;
+
+        // Binary search to find first index >= block_start
+        let start_pos = sparse_col
+            .indices
+            .partition_point(|&idx| (idx as usize) < block_start);
+
+        // Iterate only the non-default entries within this block
+        for i in start_pos..sparse_col.indices.len() {
+            let row_idx = sparse_col.indices[i] as usize;
+            if row_idx >= block_end {
+                break;
+            }
+
+            let bin = sparse_col.values[i];
+            let cache_idx = row_idx - block_start;
+
+            unsafe {
+                let grad = *grad_cache.get_unchecked(cache_idx);
+                let hess = *hess_cache.get_unchecked(cache_idx);
+                hist.accumulate(bin, grad, hess);
+                non_default_grad += grad;
+                non_default_hess += hess;
+                non_default_count += 1;
+            }
+        }
+
+        // Compute default bin (bin 0) by subtraction
+        let default_bin = hist.get_mut(DEFAULT_BIN);
+        default_bin.sum_gradients += block_total_grad - non_default_grad;
+        default_bin.sum_hessians += block_total_hess - non_default_hess;
+        default_bin.count += block_len as u32 - non_default_count;
+    }
+
+    /// Build histogram for sparse feature with indexed (non-contiguous) rows
+    ///
+    /// Uses the feature column to look up bins, but only accumulates non-default.
+    /// Then computes default bin by subtraction.
+    fn build_sparse_histogram_indexed(
+        hist: &mut Histogram,
+        sparse_col: &SparseColumn,
+        chunk: &[usize],
+        grad_cache: &[f32; BLOCK_SIZE],
+        hess_cache: &[f32; BLOCK_SIZE],
+        block_len: usize,
+        block_total_grad: f32,
+        block_total_hess: f32,
+    ) {
+        let mut non_default_grad = 0.0f32;
+        let mut non_default_hess = 0.0f32;
+        let mut non_default_count = 0u32;
+
+        // Find the range of chunk indices for quick rejection
+        let chunk_min = chunk.first().copied().unwrap_or(0);
+        let chunk_max = chunk.last().copied().unwrap_or(0);
+
+        // Binary search to find the range of sparse entries that could overlap with chunk
+        let sparse_start = sparse_col
+            .indices
+            .partition_point(|&idx| (idx as usize) < chunk_min);
+        let sparse_end = sparse_col
+            .indices
+            .partition_point(|&idx| (idx as usize) <= chunk_max);
+
+        let sparse_range = sparse_end - sparse_start;
+
+        // Choose strategy based on which is smaller to iterate
+        if sparse_range <= chunk.len() / 2 {
+            // Sparse-first: iterate sparse entries in range, binary search in chunk
+            for i in sparse_start..sparse_end {
+                let row_idx = sparse_col.indices[i] as usize;
+                let bin = sparse_col.values[i];
+                // Binary search in chunk to find cache index
+                if let Ok(cache_idx) = chunk.binary_search(&row_idx) {
+                    unsafe {
+                        let grad = *grad_cache.get_unchecked(cache_idx);
+                        let hess = *hess_cache.get_unchecked(cache_idx);
+                        hist.accumulate(bin, grad, hess);
+                        non_default_grad += grad;
+                        non_default_hess += hess;
+                        non_default_count += 1;
+                    }
+                }
+            }
+        } else {
+            // Chunk-first: iterate chunk, binary search in sparse indices
+            for (cache_idx, &row_idx) in chunk.iter().enumerate() {
+                // Binary search to see if this row has a non-default value
+                if let Ok(sparse_pos) = sparse_col.indices.binary_search(&(row_idx as u32)) {
+                    let bin = sparse_col.values[sparse_pos];
+                    unsafe {
+                        let grad = *grad_cache.get_unchecked(cache_idx);
+                        let hess = *hess_cache.get_unchecked(cache_idx);
+                        hist.accumulate(bin, grad, hess);
+                        non_default_grad += grad;
+                        non_default_hess += hess;
+                        non_default_count += 1;
+                    }
+                }
+                // If not found, this row has the default bin value (0)
+            }
+        }
+
+        // Compute default bin (bin 0) by subtraction
+        let default_bin = hist.get_mut(DEFAULT_BIN);
+        default_bin.sum_gradients += block_total_grad - non_default_grad;
+        default_bin.sum_hessians += block_total_hess - non_default_hess;
+        default_bin.count += block_len as u32 - non_default_count;
     }
 
     /// Reduce multiple partial histograms into one

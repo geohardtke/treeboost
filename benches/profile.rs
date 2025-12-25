@@ -25,6 +25,35 @@ fn generate_data(num_rows: usize, num_features: usize, seed: u64) -> (Vec<f64>, 
     (features, targets)
 }
 
+/// Generate sparse synthetic dataset with given sparsity ratio
+/// sparsity: fraction of zero values (e.g., 0.9 means 90% zeros)
+fn generate_sparse_data(
+    num_rows: usize,
+    num_features: usize,
+    sparsity: f64,
+    seed: u64,
+) -> (Vec<f64>, Vec<f64>) {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut features = Vec::with_capacity(num_rows * num_features);
+    let mut targets = Vec::with_capacity(num_rows);
+
+    for _ in 0..num_rows {
+        let mut row_sum = 0.0;
+        for f in 0..num_features {
+            // With probability `sparsity`, value is 0
+            let val: f64 = if rng.gen::<f64>() < sparsity {
+                0.0
+            } else {
+                rng.gen_range(1.0..10.0) // Non-zero values are 1-10
+            };
+            features.push(val);
+            row_sum += val * (f as f64 + 1.0) * 0.1;
+        }
+        targets.push(row_sum + rng.gen_range(-1.0..1.0));
+    }
+    (features, targets)
+}
+
 /// Convert to TreeBoost format
 fn to_treeboost_dataset(
     features: &[f64],
@@ -297,6 +326,40 @@ fn benchmark_histogram_building(c: &mut Criterion) {
         });
     });
 
+    // Sparse data benchmarks (90% zeros - common in text/recommender systems)
+    let (sparse_features, sparse_targets) = generate_sparse_data(num_rows, num_features, 0.9, 42);
+    let sparse_dataset = to_treeboost_dataset(&sparse_features, &sparse_targets, num_rows, num_features);
+    let sparse_gradients: Vec<f32> = (0..num_rows).map(|i| (i as f32) * 0.001).collect();
+    let sparse_hessians: Vec<f32> = vec![1.0; num_rows];
+
+    // Report sparsity detected
+    let num_sparse = sparse_dataset.num_sparse_features();
+    eprintln!("Sparse dataset: {}/{} features detected as sparse", num_sparse, num_features);
+
+    group.bench_function("histogram_sparse_data_contiguous_100k", |b| {
+        b.iter(|| {
+            black_box(builder.build(&sparse_dataset, &contiguous_rows, &sparse_gradients, &sparse_hessians))
+        });
+    });
+
+    group.bench_function("histogram_sparse_data_indexed_50k", |b| {
+        b.iter(|| {
+            black_box(builder.build(&sparse_dataset, &sparse_rows, &sparse_gradients, &sparse_hessians))
+        });
+    });
+
+    // 95% sparse (even more extreme - text data)
+    let (very_sparse_features, very_sparse_targets) = generate_sparse_data(num_rows, num_features, 0.95, 42);
+    let very_sparse_dataset = to_treeboost_dataset(&very_sparse_features, &very_sparse_targets, num_rows, num_features);
+    let num_very_sparse = very_sparse_dataset.num_sparse_features();
+    eprintln!("Very sparse dataset: {}/{} features detected as sparse", num_very_sparse, num_features);
+
+    group.bench_function("histogram_very_sparse_contiguous_100k", |b| {
+        b.iter(|| {
+            black_box(builder.build(&very_sparse_dataset, &contiguous_rows, &sparse_gradients, &sparse_hessians))
+        });
+    });
+
     // Benchmark a single tree grow (the main per-round cost)
     group.bench_function("single_tree_grow_100k", |b| {
         use treeboost::tree::TreeGrower;
@@ -503,6 +566,30 @@ fn benchmark_training_components(c: &mut Criterion) {
             .with_max_depth(6)
             .with_learning_rate(0.1)
             .with_goss(true);
+
+        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+    });
+
+    // Sparse data training (90% zeros - text/recommender systems)
+    group.bench_function("train_100k_rows_10_rounds_sparse", |b| {
+        let (features, targets) = generate_sparse_data(100_000, num_features, 0.9, 42);
+        let dataset = to_treeboost_dataset(&features, &targets, 100_000, num_features);
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(6)
+            .with_learning_rate(0.1);
+
+        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+    });
+
+    // Very sparse data (95% zeros)
+    group.bench_function("train_100k_rows_10_rounds_very_sparse", |b| {
+        let (features, targets) = generate_sparse_data(100_000, num_features, 0.95, 42);
+        let dataset = to_treeboost_dataset(&features, &targets, 100_000, num_features);
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(6)
+            .with_learning_rate(0.1);
 
         b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
     });
