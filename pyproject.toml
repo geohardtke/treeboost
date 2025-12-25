@@ -1,0 +1,41 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "treeboost"
+version = "0.1.0"
+description = "High-performance Gradient Boosted Decision Tree engine for large-scale tabular data"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.8"
+keywords = ["gbdt", "gradient-boosting", "machine-learning", "decision-tree", "xgboost"]
+authors = [{ name = "Farhan" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = ["numpy>=1.20"]
+
+[project.urls]
+Homepage = "https://github.com/ml-rust/treeboost"
+Repository = "https://github.com/ml-rust/treeboost"
+Documentation = "https://github.com/ml-rust/treeboost#readme"
+
+[tool.maturin]
+python-source = "python"
+module-name = "treeboost._core"
+bindings = "pyo3"
+features = ["python"]

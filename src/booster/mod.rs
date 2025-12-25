@@ -7,5 +7,5 @@
 mod config;
 mod gbdt;
 
-pub use config::GBDTConfig;
+pub use config::{GBDTConfig, LossType};
 pub use gbdt::GBDTModel;

@@ -44,6 +44,9 @@ pub mod loss;
 pub mod serialize;
 pub mod tree;
 
+#[cfg(feature = "python")]
+mod python;
+
 // Re-exports for convenience
 pub use booster::{GBDTConfig, GBDTModel};
 pub use dataset::{BinnedDataset, QuantileBinner};
@@ -74,3 +77,13 @@ pub enum TreeBoostError {
 }
 
 pub type Result<T> = std::result::Result<T, TreeBoostError>;
+
+// Python module entry point
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+
+#[cfg(feature = "python")]
+#[pymodule]
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    python::register_module(m)
+}
