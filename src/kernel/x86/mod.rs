@@ -6,9 +6,12 @@
 //!
 //! - `histogram`: Histogram accumulation kernels (gather/scatter)
 //! - `split`: Split finding kernels (gain calculation)
+//! - `unpack`: 4-bit bin unpacking kernels
 
 pub mod histogram;
 pub mod split;
+pub mod unpack;
 
 pub use histogram::{histogram_accumulate_avx2, histogram_accumulate_contiguous_avx2};
 pub use split::{find_best_split_scalar, find_best_split_simd, SplitCandidate};
+pub use unpack::{unpack_4bit, unpack_4bit_scalar};

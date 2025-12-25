@@ -13,7 +13,7 @@ mod binned;
 mod binner;
 mod bundler;
 mod loader;
-mod packed;
+pub mod packed;
 mod pipeline;
 mod reorder;
 

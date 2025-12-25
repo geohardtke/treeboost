@@ -146,6 +146,27 @@ pub fn find_best_split_simd(
 }
 
 // ============================================================================
+// 4-bit Unpacking
+// ============================================================================
+
+/// Scalar 4-bit unpacking
+#[inline]
+pub fn unpack_4bit_scalar(packed: &[u8], output: &mut [u8]) {
+    debug_assert!(output.len() >= packed.len() * 2);
+
+    for (i, &byte) in packed.iter().enumerate() {
+        output[i * 2] = byte >> 4;
+        output[i * 2 + 1] = byte & 0x0F;
+    }
+}
+
+/// Fallback unpacking (just calls scalar)
+#[inline]
+pub fn unpack_4bit(packed: &[u8], output: &mut [u8]) {
+    unpack_4bit_scalar(packed, output);
+}
+
+// ============================================================================
 // Histogram Accumulation
 // ============================================================================
 

@@ -906,5 +906,57 @@ fn benchmark_split_finding(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, benchmark_prediction_components, benchmark_histogram_building, benchmark_training_components, benchmark_efb, benchmark_split_finding);
+fn benchmark_4bit_unpacking(c: &mut Criterion) {
+    use treeboost::dataset::packed::PackedColumn;
+
+    let mut group = c.benchmark_group("4bit_unpacking");
+    group.measurement_time(Duration::from_secs(5));
+
+    // Create test data for various sizes
+    for num_rows in [1024, 8192, 65536, 262144] {
+        // Create packed column with values 0-15
+        let bins: Vec<u8> = (0..num_rows).map(|i| (i % 16) as u8).collect();
+        let packed = PackedColumn::from_bins(&bins);
+
+        // Pre-allocate output buffer
+        let mut buffer = vec![0u8; num_rows];
+
+        group.bench_function(format!("unpack_{}_rows", num_rows), |b| {
+            b.iter(|| {
+                packed.unpack_to_buffer(&mut buffer);
+                black_box(&buffer);
+            });
+        });
+
+        // Benchmark unpack() which allocates
+        group.bench_function(format!("unpack_alloc_{}_rows", num_rows), |b| {
+            b.iter(|| {
+                black_box(packed.unpack());
+            });
+        });
+    }
+
+    // Range unpacking benchmark (simulates histogram block processing)
+    let num_rows = 100_000;
+    let bins: Vec<u8> = (0..num_rows).map(|i| (i % 16) as u8).collect();
+    let packed = PackedColumn::from_bins(&bins);
+
+    let block_size = 2048;
+    let mut buffer = vec![0u8; block_size];
+
+    group.bench_function("unpack_range_2048_block", |b| {
+        b.iter(|| {
+            // Simulate processing multiple blocks
+            for start in (0..num_rows).step_by(block_size) {
+                let count = block_size.min(num_rows - start);
+                packed.unpack_range(start, count, &mut buffer[..count]);
+                black_box(&buffer);
+            }
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, benchmark_prediction_components, benchmark_histogram_building, benchmark_training_components, benchmark_efb, benchmark_split_finding, benchmark_4bit_unpacking);
 criterion_main!(benches);

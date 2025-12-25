@@ -86,12 +86,68 @@ impl PackedColumn {
     }
 
     /// Unpack to u8 slice for compatibility with histogram builder
+    ///
+    /// Uses SIMD-accelerated unpacking when available.
     pub fn unpack(&self) -> Vec<u8> {
-        let mut result = Vec::with_capacity(self.num_rows);
-        for i in 0..self.num_rows {
-            result.push(self.get(i));
-        }
+        let mut result = vec![0u8; self.num_rows];
+        self.unpack_to_buffer(&mut result);
         result
+    }
+
+    /// Unpack into a pre-allocated buffer
+    ///
+    /// Uses SIMD-accelerated unpacking (AVX2) when available.
+    ///
+    /// # Arguments
+    /// * `buffer` - Output buffer, must have length >= self.num_rows
+    pub fn unpack_to_buffer(&self, buffer: &mut [u8]) {
+        debug_assert!(buffer.len() >= self.num_rows);
+
+        // Handle odd row count: we may have packed one extra padding byte
+        let full_bytes = self.num_rows / 2;
+
+        if full_bytes > 0 {
+            // Unpack full bytes using SIMD kernel
+            crate::kernel::unpack_4bit(&self.data[..full_bytes], &mut buffer[..full_bytes * 2]);
+        }
+
+        // Handle odd row count manually (last row if num_rows is odd)
+        if self.num_rows % 2 == 1 {
+            let last_byte = self.data[full_bytes];
+            buffer[self.num_rows - 1] = last_byte >> 4;
+        }
+    }
+
+    /// Unpack a range of rows into a buffer
+    ///
+    /// Optimized for histogram building where we process blocks of rows.
+    ///
+    /// # Arguments
+    /// * `start_row` - First row to unpack
+    /// * `count` - Number of rows to unpack
+    /// * `buffer` - Output buffer, must have length >= count
+    pub fn unpack_range(&self, start_row: usize, count: usize, buffer: &mut [u8]) {
+        debug_assert!(start_row + count <= self.num_rows);
+        debug_assert!(buffer.len() >= count);
+
+        // Fast path: if start is even and count is even, we can use SIMD directly
+        if start_row % 2 == 0 && count % 2 == 0 {
+            let start_byte = start_row / 2;
+            let byte_count = count / 2;
+            crate::kernel::unpack_4bit(&self.data[start_byte..start_byte + byte_count], &mut buffer[..count]);
+            return;
+        }
+
+        // Fallback: handle unaligned access
+        for i in 0..count {
+            buffer[i] = self.get(start_row + i);
+        }
+    }
+
+    /// Get raw packed data (for direct SIMD processing)
+    #[inline]
+    pub fn packed_data(&self) -> &[u8] {
+        &self.data
     }
 
     /// Iterate over bins (for histogram building)

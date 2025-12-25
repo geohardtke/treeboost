@@ -18,9 +18,13 @@ pub mod x86;
 
 #[cfg(target_arch = "x86_64")]
 pub use x86::{find_best_split_scalar, find_best_split_simd, SplitCandidate};
+#[cfg(target_arch = "x86_64")]
+pub use x86::{unpack_4bit, unpack_4bit_scalar};
 
 #[cfg(not(target_arch = "x86_64"))]
 pub use fallback::{find_best_split_scalar, find_best_split_simd, SplitCandidate};
+#[cfg(not(target_arch = "x86_64"))]
+pub use fallback::{unpack_4bit, unpack_4bit_scalar};
 
 use std::sync::OnceLock;
 
