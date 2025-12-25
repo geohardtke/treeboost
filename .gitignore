@@ -1,0 +1,83 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Claude Code
+.claude/
+CLAUDE.md
+
+# Benchmark results and profiling
+*.profraw
+*.profdata
+perf.data
+perf.data.old
+flamegraph.svg
+cachegrind.out.*
+callgrind.out.*
+
+# Model files and checkpoints
+*.rkyv
+*.bin
+*.onnx
+*.safetensors
+*.gguf
+
+# Data files (real data - ignored)
+*.csv
+*.parquet
+*.arrow
+*.feather
+*.xlsx
+
+# Keep synthetic test samples (tracked in git)
+# Small CSV samples are tracked, large parquet files are generated locally
+!samples/synthetic/*.csv
+!samples/synthetic/README.md
+# Generated parquet files (run scripts/generate_samples.py to create)
+# samples/synthetic/*.parquet - NOT tracked (too large)
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+
+# Python (if any bindings added)
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+*.whl
+.venv/
+venv/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+target
+
+# Resources - external dependencies (keep tracked via path deps in Cargo.toml)
+# Uncomment if you don't want to track these:
+# /resources/
+
+# OS files
+Thumbs.db
+.Spotlight-V100
+.Trashes
+resources/*
