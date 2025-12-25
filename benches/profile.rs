@@ -1,4 +1,4 @@
-//! Profiling benchmark to identify prediction bottlenecks
+//! Profiling benchmarks to identify training and prediction bottlenecks
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rand::prelude::*;
@@ -156,5 +156,114 @@ fn benchmark_prediction_components(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, benchmark_prediction_components);
+fn benchmark_training_components(c: &mut Criterion) {
+    let mut group = c.benchmark_group("TrainingProfile");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(20);
+
+    let num_features = 10;
+
+    // Small dataset training
+    group.bench_function("train_1k_rows_10_rounds", |b| {
+        let (features, targets) = generate_data(1_000, num_features, 42);
+        let dataset = to_treeboost_dataset(&features, &targets, 1_000, num_features);
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(6)
+            .with_learning_rate(0.1);
+
+        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+    });
+
+    // Medium dataset training
+    group.bench_function("train_10k_rows_10_rounds", |b| {
+        let (features, targets) = generate_data(10_000, num_features, 42);
+        let dataset = to_treeboost_dataset(&features, &targets, 10_000, num_features);
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(6)
+            .with_learning_rate(0.1);
+
+        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+    });
+
+    // More boosting rounds
+    group.bench_function("train_10k_rows_50_rounds", |b| {
+        let (features, targets) = generate_data(10_000, num_features, 42);
+        let dataset = to_treeboost_dataset(&features, &targets, 10_000, num_features);
+        let config = GBDTConfig::new()
+            .with_num_rounds(50)
+            .with_max_depth(6)
+            .with_learning_rate(0.1);
+
+        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+    });
+
+    // Deeper trees
+    group.bench_function("train_10k_rows_depth8", |b| {
+        let (features, targets) = generate_data(10_000, num_features, 42);
+        let dataset = to_treeboost_dataset(&features, &targets, 10_000, num_features);
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(8)
+            .with_learning_rate(0.1);
+
+        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+    });
+
+    // More features
+    let num_features_wide = 50;
+    group.bench_function("train_10k_rows_50_features", |b| {
+        let (features, targets) = generate_data(10_000, num_features_wide, 42);
+        let dataset = to_treeboost_dataset(&features, &targets, 10_000, num_features_wide);
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(6)
+            .with_learning_rate(0.1);
+
+        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+    });
+
+    // With entropy regularization
+    group.bench_function("train_10k_rows_entropy_reg", |b| {
+        let (features, targets) = generate_data(10_000, num_features, 42);
+        let dataset = to_treeboost_dataset(&features, &targets, 10_000, num_features);
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(6)
+            .with_learning_rate(0.1)
+            .with_entropy_weight(0.1);
+
+        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+    });
+
+    // With Pseudo-Huber loss
+    group.bench_function("train_10k_rows_huber", |b| {
+        let (features, targets) = generate_data(10_000, num_features, 42);
+        let dataset = to_treeboost_dataset(&features, &targets, 10_000, num_features);
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(6)
+            .with_learning_rate(0.1)
+            .with_pseudo_huber_loss(1.0);
+
+        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+    });
+
+    // Large dataset
+    group.bench_function("train_100k_rows_10_rounds", |b| {
+        let (features, targets) = generate_data(100_000, num_features, 42);
+        let dataset = to_treeboost_dataset(&features, &targets, 100_000, num_features);
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(6)
+            .with_learning_rate(0.1);
+
+        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, benchmark_prediction_components, benchmark_training_components);
 criterion_main!(benches);

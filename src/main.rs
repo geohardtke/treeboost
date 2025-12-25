@@ -89,6 +89,22 @@ enum Commands {
         /// Feature columns (comma-separated, or all if not specified)
         #[arg(long)]
         features: Option<String>,
+
+        /// Disable parallel prediction (use sequential instead)
+        #[arg(long)]
+        no_parallel: bool,
+
+        /// Disable column reordering optimization
+        #[arg(long)]
+        no_reorder: bool,
+
+        /// Disable 4-bit packed dataset optimization
+        #[arg(long)]
+        no_pack: bool,
+
+        /// Disable all performance optimizations
+        #[arg(long)]
+        no_optimizations: bool,
     },
 
     /// Make predictions using a trained model
@@ -152,6 +168,10 @@ fn main() -> Result<()> {
             conformal_quantile,
             num_bins,
             features,
+            no_parallel,
+            no_reorder,
+            no_pack,
+            no_optimizations,
         } => {
             println!("Loading data from {:?}...", data);
             let loader = DatasetLoader::new(num_bins);
@@ -196,6 +216,21 @@ fn main() -> Result<()> {
                          calib_ratio * 100.0, conformal_quantile * 100.0);
             }
 
+            // Apply optimization opt-outs
+            if no_optimizations {
+                config = config.without_optimizations();
+            } else {
+                if no_parallel {
+                    config = config.with_parallel_prediction(false);
+                }
+                if no_reorder {
+                    config = config.with_column_reordering(false);
+                }
+                if no_pack {
+                    config = config.with_packed_dataset(false);
+                }
+            }
+
             println!("\nTraining configuration:");
             println!("  Rounds: {}", rounds);
             println!("  Max depth: {}", max_depth);
@@ -205,6 +240,10 @@ fn main() -> Result<()> {
             if entropy_weight > 0.0 {
                 println!("  Entropy weight: {}", entropy_weight);
             }
+            println!("  Optimizations:");
+            println!("    Parallel prediction: {}", config.parallel_prediction);
+            println!("    Column reordering: {}", config.column_reordering);
+            println!("    4-bit packing: {}", config.packed_dataset);
 
             println!("\nTraining model...");
             let model = GBDTModel::train(&dataset, config)?;

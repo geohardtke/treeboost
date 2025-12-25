@@ -1,15 +1,13 @@
 //! GBDT model and training
 
 use crate::booster::GBDTConfig;
-use crate::dataset::BinnedDataset;
+use crate::dataset::{BinnedDataset, ColumnPermutation, FeatureInfo};
 use crate::tree::{Tree, TreeGrower};
 use crate::{Result, TreeBoostError};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rayon::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
-
-use crate::dataset::FeatureInfo;
 
 /// Trained GBDT model
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
@@ -24,6 +22,8 @@ pub struct GBDTModel {
     conformal_q: Option<f32>,
     /// Feature info from training (bin boundaries for consistent prediction)
     feature_info: Vec<FeatureInfo>,
+    /// Column permutation for cache-optimized prediction (if enabled)
+    column_permutation: Option<ColumnPermutation>,
 }
 
 impl GBDTModel {
@@ -118,6 +118,7 @@ impl GBDTModel {
             trees,
             conformal_q,
             feature_info: dataset.all_feature_info().to_vec(),
+            column_permutation: None,
         })
     }
 
@@ -157,8 +158,14 @@ impl GBDTModel {
     }
 
     /// Predict for all rows (optimized with row-wise bin caching)
+    ///
+    /// Routes to parallel or sequential prediction based on config.parallel_prediction
     pub fn predict(&self, dataset: &BinnedDataset) -> Vec<f32> {
-        self.predict_parallel(dataset)
+        if self.config.parallel_prediction {
+            self.predict_parallel(dataset)
+        } else {
+            self.predict_sequential(dataset)
+        }
     }
 
     /// Single-threaded prediction (for small datasets or when parallelism not desired)
@@ -257,6 +264,11 @@ impl GBDTModel {
         self.feature_info.len()
     }
 
+    /// Get column permutation (if optimized layout was applied)
+    pub fn column_permutation(&self) -> Option<&ColumnPermutation> {
+        self.column_permutation.as_ref()
+    }
+
     /// Compute feature importances (gain-based)
     pub fn feature_importances(&self, num_features: usize) -> Vec<f32> {
         let mut importances = vec![0.0f32; num_features];
@@ -279,6 +291,33 @@ impl GBDTModel {
         }
 
         importances
+    }
+
+    /// Create a cache-optimized dataset by reordering columns based on feature importance
+    ///
+    /// More frequently used features are placed at the beginning of the dataset
+    /// for better CPU cache locality during tree traversal.
+    ///
+    /// Returns the reordered dataset and the permutation mapping (new_idx -> original_idx)
+    pub fn optimize_dataset_layout(
+        &self,
+        dataset: &BinnedDataset,
+    ) -> (BinnedDataset, crate::dataset::ColumnPermutation) {
+        let importances = self.feature_importances(dataset.num_features());
+        let permutation = crate::dataset::ColumnPermutation::from_importances(&importances);
+        let optimized = crate::dataset::reorder_dataset(dataset, &permutation);
+        (optimized, permutation)
+    }
+
+    /// Create a memory-optimized packed dataset from a BinnedDataset
+    ///
+    /// Uses 4-bit packing for features with ≤16 unique bins,
+    /// providing up to 50% memory savings for low-cardinality features.
+    pub fn create_packed_dataset(
+        &self,
+        dataset: &BinnedDataset,
+    ) -> crate::dataset::PackedDataset {
+        crate::dataset::PackedDataset::from_binned(dataset)
     }
 }
 

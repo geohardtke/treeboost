@@ -45,32 +45,32 @@ Comparison of TreeBoost against other pure-Rust GBDT implementations.
 | Dataset Size | TreeBoost | forust  | gbdt-rs | TreeBoost vs forust | TreeBoost vs gbdt-rs |
 | ------------ | --------- | ------- | ------- | ------------------- | -------------------- |
 | 100 rows     | 32 µs     | 96 µs   | 142 µs  | **3.0x faster**     | **4.4x faster**      |
-| 1K rows      | 166 µs    | 896 µs  | 1.26 ms | **5.4x faster**     | **7.6x faster**      |
-| 10K rows     | 933 µs    | 8.99 ms | 11.6 ms | **9.6x faster**     | **12.4x faster**     |
+| 1K rows      | 135 µs    | 896 µs  | 1.26 ms | **6.6x faster**     | **9.3x faster**      |
+| 10K rows     | 856 µs    | 8.99 ms | 11.6 ms | **10.5x faster**    | **13.6x faster**     |
 
 ### Throughput (elements/second)
 
 | Dataset Size | TreeBoost | forust | gbdt-rs |
 | ------------ | --------- | ------ | ------- |
 | 100 rows     | 3.1M      | 1.0M   | 704K    |
-| 1K rows      | 6.0M      | 1.1M   | 792K    |
-| 10K rows     | **10.7M** | 1.1M   | 860K    |
+| 1K rows      | 7.4M      | 1.1M   | 792K    |
+| 10K rows     | **11.7M** | 1.1M   | 860K    |
 
 ### Key Observations - Prediction
 
 - TreeBoost uses Rayon parallel prediction with row-wise bin caching
 - Prediction throughput improves with batch size due to parallelism efficiency
-- At 10K rows: TreeBoost is **10x faster** than forust and **12x faster** than gbdt-rs
+- At 10K rows: TreeBoost is **10.5x faster** than forust and **13.6x faster** than gbdt-rs
 
 ## Parallel Training (100K rows, 100 rounds)
 
 | Implementation  | Time       | Throughput        |
 | --------------- | ---------- | ----------------- |
-| **TreeBoost**   | **858 ms** | **116.6K elem/s** |
+| **TreeBoost**   | **833 ms** | **120K elem/s**   |
 | forust-parallel | 2.17 s     | 46.1K elem/s      |
 | gbdt-rs         | 6.47 s     | 15.5K elem/s      |
 
-TreeBoost is **2.5x faster** than forust in parallel mode and **7.5x faster** than gbdt-rs.
+TreeBoost is **2.6x faster** than forust in parallel mode and **7.8x faster** than gbdt-rs.
 
 ## Optimization Details
 
@@ -101,8 +101,8 @@ TreeBoost is **2.5x faster** than forust in parallel mode and **7.5x faster** th
 # Full competitor benchmark
 cargo bench --bench competitors
 
-# Prediction profiling
-cargo bench --bench prediction_profile
+# Profile benchmarks (training + prediction)
+cargo bench --bench profile
 
 # Training benchmark only
 cargo bench --bench competitors -- "Training"
@@ -112,6 +112,9 @@ cargo bench --bench competitors -- "Prediction"
 
 # Parallel training only
 cargo bench --bench competitors -- "ParallelTraining"
+
+# TreeBoost only (skip competitors)
+cargo bench --bench competitors -- "TreeBoost"
 ```
 
 ## Methodology

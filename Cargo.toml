@@ -65,7 +65,7 @@ name = "competitors"
 harness = false
 
 [[bench]]
-name = "prediction_profile"
+name = "profile"
 harness = false
 
 [[bench]]

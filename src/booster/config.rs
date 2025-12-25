@@ -1,5 +1,6 @@
 //! GBDT training configuration
 
+use crate::dataset::OrderingStrategy;
 use crate::loss::{LossFunction, MseLoss, PseudoHuberLoss};
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -74,6 +75,16 @@ pub struct GBDTConfig {
     pub calibration_ratio: f32,
     /// Conformal prediction quantile (e.g., 0.9 for 90% coverage)
     pub conformal_quantile: f32,
+
+    // Performance optimizations (all ON by default)
+    /// Use parallel prediction via Rayon (default: true)
+    pub parallel_prediction: bool,
+    /// Reorder columns by feature importance for cache locality (default: true)
+    pub column_reordering: bool,
+    /// Column reordering strategy (default: ByImportance)
+    pub reordering_strategy: OrderingStrategy,
+    /// Use 4-bit packing for low-cardinality features (default: true)
+    pub packed_dataset: bool,
 }
 
 impl Default for GBDTConfig {
@@ -107,6 +118,12 @@ impl Default for GBDTConfig {
             // Conformal
             calibration_ratio: 0.0,
             conformal_quantile: 0.9,
+
+            // Performance optimizations (all ON by default)
+            parallel_prediction: true,
+            column_reordering: true,
+            reordering_strategy: OrderingStrategy::ByImportance,
+            packed_dataset: true,
         }
     }
 }
@@ -203,6 +220,38 @@ impl GBDTConfig {
     /// Set minimum gain for splitting
     pub fn with_min_gain(mut self, min_gain: f32) -> Self {
         self.min_gain = min_gain;
+        self
+    }
+
+    /// Enable/disable parallel prediction (default: enabled)
+    pub fn with_parallel_prediction(mut self, enabled: bool) -> Self {
+        self.parallel_prediction = enabled;
+        self
+    }
+
+    /// Enable/disable column reordering for cache locality (default: enabled)
+    pub fn with_column_reordering(mut self, enabled: bool) -> Self {
+        self.column_reordering = enabled;
+        self
+    }
+
+    /// Set column reordering strategy
+    pub fn with_reordering_strategy(mut self, strategy: OrderingStrategy) -> Self {
+        self.reordering_strategy = strategy;
+        self
+    }
+
+    /// Enable/disable 4-bit packed dataset for memory optimization (default: enabled)
+    pub fn with_packed_dataset(mut self, enabled: bool) -> Self {
+        self.packed_dataset = enabled;
+        self
+    }
+
+    /// Disable all performance optimizations (for debugging/comparison)
+    pub fn without_optimizations(mut self) -> Self {
+        self.parallel_prediction = false;
+        self.column_reordering = false;
+        self.packed_dataset = false;
         self
     }
 

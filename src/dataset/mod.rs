@@ -4,14 +4,24 @@
 //! - `BinnedDataset`: Columnar u8 storage for binned features
 //! - `QuantileBinner`: T-Digest based quantile binning
 //! - `DataPipeline`: Full dirty data pipeline (CMS filter → Target Encode → Bin)
+//! - `PackedColumn`: 4-bit packed storage for memory efficiency
+//! - `ColumnPermutation`: Cache-aware column reordering
 //! - Data loading utilities for Polars DataFrames
 
 mod binned;
 mod binner;
 mod loader;
+mod packed;
 mod pipeline;
+mod reorder;
 
 pub use binned::{BinEntry, BinnedDataset, FeatureInfo, FeatureType};
 pub use binner::{DatasetBinner, QuantileBinner, DEFAULT_NUM_BINS, MAX_BINS};
 pub use loader::DatasetLoader;
+pub use packed::{
+    can_pack, optimal_storage, FeatureStorage, PackedColumn, PackedDataset, StorageMode,
+};
 pub use pipeline::{CategoricalEncodingState, DataPipeline, PipelineConfig, PipelineState};
+pub use reorder::{
+    reorder_dataset, AccessTracker, ColumnPermutation, OrderingStrategy, ReorderBuilder,
+};

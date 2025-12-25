@@ -1,11 +1,11 @@
 //! Integration tests for TreeBoost
 
+use polars::prelude::*;
 use treeboost::booster::{GBDTConfig, GBDTModel};
 use treeboost::dataset::{BinnedDataset, DataPipeline, FeatureInfo, FeatureType, PipelineConfig};
 use treeboost::encoding::{CategoryFilter, CategoryMapping, OrderedTargetEncoder};
 use treeboost::inference::ConformalPredictor;
 use treeboost::serialize::{load_model, save_model};
-use polars::prelude::*;
 
 /// Create a synthetic regression dataset for testing
 fn create_synthetic_dataset(n: usize, seed: u64) -> BinnedDataset {
@@ -106,10 +106,15 @@ fn test_pseudo_huber_loss() {
         .map(|(_, &p)| p)
         .collect();
 
-    let mean_pred: f32 = non_outlier_predictions.iter().sum::<f32>() / non_outlier_predictions.len() as f32;
+    let mean_pred: f32 =
+        non_outlier_predictions.iter().sum::<f32>() / non_outlier_predictions.len() as f32;
 
     // Mean prediction should be in reasonable range (not pulled to extremes)
-    assert!(mean_pred > 0.0 && mean_pred < 20.0, "Mean prediction {} is extreme", mean_pred);
+    assert!(
+        mean_pred > 0.0 && mean_pred < 20.0,
+        "Mean prediction {} is extreme",
+        mean_pred
+    );
 }
 
 #[test]
@@ -130,8 +135,14 @@ fn test_conformal_prediction() {
 
     // All intervals should be valid
     for i in 0..predictions.len() {
-        assert!(lower[i] < predictions[i], "Lower bound should be less than prediction");
-        assert!(upper[i] > predictions[i], "Upper bound should be greater than prediction");
+        assert!(
+            lower[i] < predictions[i],
+            "Lower bound should be less than prediction"
+        );
+        assert!(
+            upper[i] > predictions[i],
+            "Upper bound should be greater than prediction"
+        );
         assert!(lower[i] < upper[i], "Lower should be less than upper");
     }
 }
@@ -140,9 +151,7 @@ fn test_conformal_prediction() {
 fn test_model_serialization() {
     let dataset = create_synthetic_dataset(200, 789);
 
-    let config = GBDTConfig::new()
-        .with_num_rounds(10)
-        .with_max_depth(3);
+    let config = GBDTConfig::new().with_num_rounds(10).with_max_depth(3);
 
     let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
     let original_predictions = model.predict(&dataset);
@@ -163,7 +172,10 @@ fn test_model_serialization() {
     let loaded_predictions = loaded_model.predict(&dataset);
 
     for (orig, loaded) in original_predictions.iter().zip(loaded_predictions.iter()) {
-        assert!((orig - loaded).abs() < 1e-6, "Predictions should match after load");
+        assert!(
+            (orig - loaded).abs() < 1e-6,
+            "Predictions should match after load"
+        );
     }
 }
 
@@ -171,9 +183,7 @@ fn test_model_serialization() {
 fn test_feature_importance() {
     let dataset = create_synthetic_dataset(500, 321);
 
-    let config = GBDTConfig::new()
-        .with_num_rounds(50)
-        .with_max_depth(5);
+    let config = GBDTConfig::new().with_num_rounds(50).with_max_depth(5);
 
     let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
     let importances = model.feature_importances(5);
@@ -182,17 +192,28 @@ fn test_feature_importance() {
 
     // Importances should sum to ~1
     let total: f32 = importances.iter().sum();
-    assert!((total - 1.0).abs() < 0.01, "Importances should sum to 1, got {}", total);
+    assert!(
+        (total - 1.0).abs() < 0.01,
+        "Importances should sum to 1, got {}",
+        total
+    );
 
     // All importances should be non-negative
     for (i, &imp) in importances.iter().enumerate() {
-        assert!(imp >= 0.0, "Importance for feature {} should be non-negative", i);
+        assert!(
+            imp >= 0.0,
+            "Importance for feature {} should be non-negative",
+            i
+        );
     }
 
     // First two features should have higher importance (they define the target)
     // This is a soft check - may not always hold due to correlation
     let top_two: f32 = importances[0] + importances[1];
-    assert!(top_two > 0.2, "Top two features should have significant importance");
+    assert!(
+        top_two > 0.2,
+        "Top two features should have significant importance"
+    );
 }
 
 #[test]
@@ -359,7 +380,8 @@ fn test_entropy_regularization() {
         .with_max_depth(6)
         .with_entropy_weight(0.0);
 
-    let model_no_entropy = GBDTModel::train(&dataset, config_no_entropy).expect("Training should succeed");
+    let model_no_entropy =
+        GBDTModel::train(&dataset, config_no_entropy).expect("Training should succeed");
 
     // Train with entropy regularization
     let config_entropy = GBDTConfig::new()
@@ -367,7 +389,8 @@ fn test_entropy_regularization() {
         .with_max_depth(6)
         .with_entropy_weight(0.1);
 
-    let model_entropy = GBDTModel::train(&dataset, config_entropy).expect("Training should succeed");
+    let model_entropy =
+        GBDTModel::train(&dataset, config_entropy).expect("Training should succeed");
 
     // Both models should produce reasonable predictions
     let preds_no_entropy = model_no_entropy.predict(&dataset);
@@ -402,7 +425,11 @@ fn test_max_leaves_constraint() {
 
     // Each tree should have at most 8 leaves
     for tree in model.trees() {
-        assert!(tree.num_leaves() <= 8, "Tree has {} leaves, expected <= 8", tree.num_leaves());
+        assert!(
+            tree.num_leaves() <= 8,
+            "Tree has {} leaves, expected <= 8",
+            tree.num_leaves()
+        );
     }
 }
 
@@ -429,7 +456,7 @@ fn test_data_pipeline_end_to_end() {
     let pipeline = DataPipeline::new(
         PipelineConfig::new()
             .with_num_bins(16)
-            .with_cms_params(0.01, 0.99, 2)  // min_count=2 to filter "typo_rare" and "rural"
+            .with_cms_params(0.01, 0.99, 2) // min_count=2 to filter "typo_rare" and "rural"
             .with_smoothing(5.0),
     );
 
@@ -516,7 +543,7 @@ fn test_pipeline_rare_category_filtering() {
     let pipeline = DataPipeline::new(
         PipelineConfig::new()
             .with_num_bins(8)
-            .with_cms_params(0.01, 0.99, 10)  // min_count=10 to filter many categories
+            .with_cms_params(0.01, 0.99, 10) // min_count=10 to filter many categories
             .with_smoothing(1.0),
     );
 
@@ -545,7 +572,10 @@ fn test_pipeline_rare_category_filtering() {
         .collect();
 
     assert!(kept_cats.contains(&"frequent"), "Should keep 'frequent'");
-    assert!(kept_cats.contains(&"also_frequent"), "Should keep 'also_frequent'");
+    assert!(
+        kept_cats.contains(&"also_frequent"),
+        "Should keep 'also_frequent'"
+    );
 }
 
 #[test]
@@ -560,8 +590,8 @@ fn test_pipeline_target_encoding_prevents_leakage() {
     let pipeline = DataPipeline::new(
         PipelineConfig::new()
             .with_num_bins(8)
-            .with_cms_params(0.01, 0.99, 1)  // Keep all categories
-            .with_smoothing(0.0),  // No smoothing for clearer test
+            .with_cms_params(0.01, 0.99, 1) // Keep all categories
+            .with_smoothing(0.0), // No smoothing for clearer test
     );
 
     let (_dataset, state) = pipeline
@@ -587,8 +617,14 @@ fn test_pipeline_target_encoding_prevents_leakage() {
     let enc_c = cat_state.encoding_map.encode("C");
 
     // A should be encoded ~20, B ~200, C ~2.5
-    assert!(enc_a < enc_b, "A (low target) should have lower encoding than B (high target)");
-    assert!(enc_c < enc_a, "C (very low target) should have lowest encoding");
+    assert!(
+        enc_a < enc_b,
+        "A (low target) should have lower encoding than B (high target)"
+    );
+    assert!(
+        enc_c < enc_a,
+        "C (very low target) should have lowest encoding"
+    );
 }
 
 // ============================================================================
@@ -669,7 +705,13 @@ fn test_parquet_large_mixed() {
         .load_parquet_for_training(
             parquet_path.to_str().unwrap(),
             "target",
-            Some(&["neighborhood", "property_type", "condition", "has_pool", "has_garage"]),
+            Some(&[
+                "neighborhood",
+                "property_type",
+                "condition",
+                "has_pool",
+                "has_garage",
+            ]),
         )
         .expect("Should load parquet with categoricals");
 
@@ -827,11 +869,7 @@ fn test_parquet_stress_test() {
         .expect("Should load stress test parquet");
     let load_time = start.elapsed();
 
-    println!(
-        "Loaded {} rows in {:?}",
-        dataset.num_rows(),
-        load_time
-    );
+    println!("Loaded {} rows in {:?}", dataset.num_rows(), load_time);
     assert!(dataset.num_rows() >= 100_000, "Expected at least 100K rows");
 
     // Train a model
@@ -850,11 +888,324 @@ fn test_parquet_stress_test() {
     let predictions = model.predict(&dataset);
     let predict_time = start.elapsed();
 
-    println!(
-        "Predicted {} rows in {:?}",
-        predictions.len(),
-        predict_time
-    );
+    println!("Predicted {} rows in {:?}", predictions.len(), predict_time);
 
     assert_eq!(predictions.len(), dataset.num_rows());
+}
+
+// ============================================================================
+// Optimization Tests
+// ============================================================================
+// These tests verify 4-bit packing and cache-aware column reordering
+
+/// Test 4-bit packed storage for low-cardinality features
+#[test]
+fn test_packed_dataset_memory_savings() {
+    use treeboost::dataset::{PackedDataset, StorageMode};
+
+    // Create dataset with mix of packable and non-packable features
+    let num_rows = 1000;
+    let mut features = Vec::with_capacity(num_rows * 4);
+
+    // f0: 16 bins (packable) - categorical with low cardinality
+    for r in 0..num_rows {
+        features.push((r % 16) as u8);
+    }
+    // f1: 8 bins (packable) - binary-like feature
+    for r in 0..num_rows {
+        features.push((r % 8) as u8);
+    }
+    // f2: 256 bins (not packable) - high precision numeric
+    for r in 0..num_rows {
+        features.push((r % 256) as u8);
+    }
+    // f3: 4 bins (packable) - quartile-binned feature
+    for r in 0..num_rows {
+        features.push((r % 4) as u8);
+    }
+
+    let targets: Vec<f32> = (0..num_rows).map(|i| i as f32 * 0.1).collect();
+    let feature_info: Vec<FeatureInfo> = vec![
+        FeatureInfo {
+            name: "categorical_16".to_string(),
+            feature_type: FeatureType::Categorical,
+            num_bins: 16,
+            bin_boundaries: vec![],
+        },
+        FeatureInfo {
+            name: "binary_like".to_string(),
+            feature_type: FeatureType::Categorical,
+            num_bins: 8,
+            bin_boundaries: vec![],
+        },
+        FeatureInfo {
+            name: "high_precision".to_string(),
+            feature_type: FeatureType::Numeric,
+            num_bins: 255,
+            bin_boundaries: vec![],
+        },
+        FeatureInfo {
+            name: "quartile".to_string(),
+            feature_type: FeatureType::Categorical,
+            num_bins: 4,
+            bin_boundaries: vec![],
+        },
+    ];
+
+    let binned = BinnedDataset::new(num_rows, features, targets, feature_info);
+    let packed = PackedDataset::from_binned(&binned);
+
+    // Verify storage modes
+    let modes = packed.storage_modes();
+    assert_eq!(
+        modes[0],
+        StorageMode::Packed4Bit,
+        "16-bin feature should be packed"
+    );
+    assert_eq!(
+        modes[1],
+        StorageMode::Packed4Bit,
+        "8-bin feature should be packed"
+    );
+    assert_eq!(modes[2], StorageMode::U8, "256-bin feature should be u8");
+    assert_eq!(
+        modes[3],
+        StorageMode::Packed4Bit,
+        "4-bin feature should be packed"
+    );
+
+    // Memory savings: 3 of 4 features are packed (50% each)
+    // Expected: (0.5 + 0.5 + 1.0 + 0.5) / 4 = 62.5% of original = 37.5% savings
+    let savings = packed.memory_savings();
+    assert!(
+        savings > 0.35 && savings < 0.40,
+        "Expected ~37.5% memory savings, got {:.1}%",
+        savings * 100.0
+    );
+
+    // Verify data integrity
+    for r in 0..num_rows {
+        for f in 0..4 {
+            assert_eq!(
+                packed.get_bin(r, f),
+                binned.get_bin(r, f),
+                "Data mismatch at row {}, feature {}",
+                r,
+                f
+            );
+        }
+    }
+
+    // Round-trip verification
+    let unpacked = packed.to_binned();
+    for r in 0..num_rows {
+        for f in 0..4 {
+            assert_eq!(
+                unpacked.get_bin(r, f),
+                binned.get_bin(r, f),
+                "Round-trip mismatch at row {}, feature {}",
+                r,
+                f
+            );
+        }
+    }
+}
+
+/// Test cache-aware column reordering based on feature importance
+#[test]
+fn test_column_reordering_by_importance() {
+
+    // Create a dataset where f2 is most important (highest correlation with target)
+    let num_rows = 500;
+    let num_features = 5;
+    let mut features = Vec::with_capacity(num_rows * num_features);
+
+    // Generate features where importance varies:
+    // f0: noise (low importance)
+    // f1: weak signal
+    // f2: strong signal (most important)
+    // f3: weak signal
+    // f4: noise (low importance)
+    for f in 0..num_features {
+        for r in 0..num_rows {
+            let base = (r * 17 + f * 31) % 256;
+            features.push(base as u8);
+        }
+    }
+
+    // Target strongly correlated with f2
+    let targets: Vec<f32> = (0..num_rows)
+        .map(|r| {
+            let f2_val = features[2 * num_rows + r] as f32 / 255.0;
+            f2_val * 100.0 + (r % 10) as f32 // Strong f2 signal + noise
+        })
+        .collect();
+
+    let feature_info: Vec<FeatureInfo> = (0..num_features)
+        .map(|i| FeatureInfo {
+            name: format!("f{}", i),
+            feature_type: FeatureType::Numeric,
+            num_bins: 255,
+            bin_boundaries: vec![],
+        })
+        .collect();
+
+    let dataset = BinnedDataset::new(num_rows, features, targets, feature_info);
+
+    // Train model to compute feature importances
+    let config = GBDTConfig::new()
+        .with_num_rounds(30)
+        .with_max_depth(4)
+        .with_learning_rate(0.1);
+
+    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+
+    // Get importance-based reordering
+    let (reordered, permutation) = model.optimize_dataset_layout(&dataset);
+
+    // Verify reordering happened
+    assert!(
+        !permutation.is_identity() || num_features <= 1,
+        "Should reorder unless trivial"
+    );
+
+    // Verify feature names match after reordering
+    for new_idx in 0..num_features {
+        let orig_idx = permutation.to_original(new_idx);
+        let orig_name = dataset.feature_info(orig_idx).name.clone();
+        let reordered_name = reordered.feature_info(new_idx).name.clone();
+        assert_eq!(
+            orig_name, reordered_name,
+            "Feature name mismatch at new index {}",
+            new_idx
+        );
+    }
+
+    // Verify data integrity after reordering
+    for r in 0..num_rows {
+        for new_idx in 0..num_features {
+            let orig_idx = permutation.to_original(new_idx);
+            assert_eq!(
+                reordered.get_bin(r, new_idx),
+                dataset.get_bin(r, orig_idx),
+                "Data mismatch at row {}, new_idx {} (orig {})",
+                r,
+                new_idx,
+                orig_idx
+            );
+        }
+    }
+
+    // Verify most important feature is first (or near first)
+    let importances = model.feature_importances(num_features);
+    let most_important_orig = importances
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i)
+        .unwrap();
+
+    let most_important_new = permutation.to_new(most_important_orig);
+    assert!(
+        most_important_new <= 1,
+        "Most important feature (orig {}) should be near front, but is at position {}",
+        most_important_orig,
+        most_important_new
+    );
+}
+
+/// Test that packed dataset predictions match original dataset predictions
+#[test]
+fn test_packed_dataset_prediction_equivalence() {
+    use treeboost::dataset::PackedDataset;
+
+    // Create packable dataset (all bins <= 15)
+    let num_rows = 200;
+    let num_features = 4;
+    let mut features = Vec::with_capacity(num_rows * num_features);
+
+    for f in 0..num_features {
+        for r in 0..num_rows {
+            features.push(((r * (f + 1) * 7) % 16) as u8);
+        }
+    }
+
+    let targets: Vec<f32> = (0..num_rows)
+        .map(|r| {
+            let f0 = features[r] as f32;
+            let f1 = features[num_rows + r] as f32;
+            f0 * 2.0 + f1 * 1.5 + (r % 5) as f32
+        })
+        .collect();
+
+    let feature_info: Vec<FeatureInfo> = (0..num_features)
+        .map(|i| FeatureInfo {
+            name: format!("f{}", i),
+            feature_type: FeatureType::Numeric,
+            num_bins: 16,
+            bin_boundaries: vec![],
+        })
+        .collect();
+
+    let dataset = BinnedDataset::new(num_rows, features, targets, feature_info);
+    let packed = PackedDataset::from_binned(&dataset);
+
+    // Train model on original dataset
+    let config = GBDTConfig::new()
+        .with_num_rounds(20)
+        .with_max_depth(3)
+        .with_learning_rate(0.1);
+
+    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+
+    // Get predictions on original
+    let preds_original = model.predict(&dataset);
+
+    // Convert packed back to binned for prediction
+    let unpacked = packed.to_binned();
+    let preds_unpacked = model.predict(&unpacked);
+
+    // Predictions should be identical
+    assert_eq!(preds_original.len(), preds_unpacked.len());
+    for (i, (orig, unp)) in preds_original.iter().zip(preds_unpacked.iter()).enumerate() {
+        assert!(
+            (orig - unp).abs() < 1e-6,
+            "Prediction mismatch at row {}: {} vs {}",
+            i,
+            orig,
+            unp
+        );
+    }
+}
+
+/// Test access tracker for dynamic reordering
+#[test]
+fn test_access_tracker() {
+    use treeboost::dataset::{AccessTracker, ColumnPermutation};
+
+    let mut tracker = AccessTracker::new(5);
+
+    // Simulate feature access patterns from tree traversal
+    // f2 accessed most, f0 second, others rarely
+    for _ in 0..100 {
+        tracker.record(2);
+    }
+    for _ in 0..50 {
+        tracker.record(0);
+    }
+    for _ in 0..10 {
+        tracker.record(1);
+    }
+    for _ in 0..5 {
+        tracker.record(3);
+    }
+    tracker.record(4);
+
+    let order = tracker.optimal_order();
+    assert_eq!(order[0], 2, "Most accessed (f2) should be first");
+    assert_eq!(order[1], 0, "Second most (f0) should be second");
+
+    let perm = ColumnPermutation::from_access_tracker(&tracker);
+    assert_eq!(perm.to_new(2), 0, "f2 should map to position 0");
+    assert_eq!(perm.to_new(0), 1, "f0 should map to position 1");
 }
