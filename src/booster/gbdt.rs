@@ -87,11 +87,25 @@ impl GBDTModel {
         let mut best_num_trees = 0;
 
         for _round in 0..config.num_rounds {
-            // Compute gradients and hessians (sequential - too fine-grained to parallelize)
-            for &idx in &train_indices {
-                let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
-                gradients[idx] = g;
-                hessians[idx] = h;
+            // Compute gradients and hessians
+            // Parallel mode: enable for large datasets (100k+ rows)
+            if config.parallel_gradient {
+                train_indices.par_iter().for_each(|&idx| {
+                    let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
+                    // SAFETY: Each idx is unique within train_indices, so no data races
+                    unsafe {
+                        let grad_ptr = gradients.as_ptr() as *mut f32;
+                        let hess_ptr = hessians.as_ptr() as *mut f32;
+                        *grad_ptr.add(idx) = g;
+                        *hess_ptr.add(idx) = h;
+                    }
+                });
+            } else {
+                for &idx in &train_indices {
+                    let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
+                    gradients[idx] = g;
+                    hessians[idx] = h;
+                }
             }
 
             // GOSS or random subsampling
@@ -121,30 +135,33 @@ impl GBDTModel {
             // Grow tree using subsampled training indices
             let tree = tree_grower.grow_with_indices(dataset, &gradients, &hessians, &sample_indices);
 
-            // Batch predict all rows and update predictions in parallel
-            let tree_predictions: Vec<f32> = (0..dataset.num_rows())
-                .into_par_iter()
-                .map(|row_idx| tree.predict_row(dataset, row_idx))
-                .collect();
-
-            // Update predictions
-            for (pred, tree_pred) in predictions.iter_mut().zip(tree_predictions.iter()) {
-                *pred += tree_pred;
-            }
+            // Update predictions using tree-wise batch prediction
+            // This is more cache-friendly than row-wise and avoids intermediate allocation
+            tree.predict_batch_add(dataset, &mut predictions);
 
             trees.push(tree);
 
             // Check for early stopping on validation set
             if early_stopping_enabled {
                 // Compute validation loss (MSE for simplicity, works with any loss)
-                let val_loss: f32 = validation_indices
-                    .iter()
-                    .map(|&idx| {
-                        let residual = targets[idx] - predictions[idx];
-                        residual * residual
-                    })
-                    .sum::<f32>()
-                    / validation_indices.len() as f32;
+                // Use parallel for large validation sets, sequential for small ones
+                let val_loss: f32 = if validation_indices.len() >= 10000 {
+                    validation_indices
+                        .par_iter()
+                        .map(|&idx| {
+                            let residual = targets[idx] - predictions[idx];
+                            residual * residual
+                        })
+                        .sum::<f32>()
+                } else {
+                    validation_indices
+                        .iter()
+                        .map(|&idx| {
+                            let residual = targets[idx] - predictions[idx];
+                            residual * residual
+                        })
+                        .sum::<f32>()
+                } / validation_indices.len() as f32;
 
                 if val_loss < best_val_loss {
                     best_val_loss = val_loss;
@@ -176,10 +193,17 @@ impl GBDTModel {
 
         // Compute conformal quantile if calibration set exists
         let conformal_q = if !calibration_indices.is_empty() {
-            let calib_residuals: Vec<f32> = calibration_indices
-                .iter()
-                .map(|&idx| (targets[idx] - predictions[idx]).abs())
-                .collect();
+            let calib_residuals: Vec<f32> = if calibration_indices.len() >= 10000 {
+                calibration_indices
+                    .par_iter()
+                    .map(|&idx| (targets[idx] - predictions[idx]).abs())
+                    .collect()
+            } else {
+                calibration_indices
+                    .iter()
+                    .map(|&idx| (targets[idx] - predictions[idx]).abs())
+                    .collect()
+            };
 
             Some(Self::compute_quantile(&calib_residuals, config.conformal_quantile))
         } else {

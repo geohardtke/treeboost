@@ -100,6 +100,9 @@ pub struct GBDTConfig {
     pub reordering_strategy: OrderingStrategy,
     /// Use 4-bit packing for low-cardinality features (default: true)
     pub packed_dataset: bool,
+    /// Use parallel gradient computation (default: false)
+    /// Experimental: may not provide stable speedups, benchmark before enabling
+    pub parallel_gradient: bool,
 
     // Monotonic constraints
     /// Monotonic constraints per feature (empty = no constraints)
@@ -157,6 +160,7 @@ impl Default for GBDTConfig {
             column_reordering: true,
             reordering_strategy: OrderingStrategy::ByImportance,
             packed_dataset: true,
+            parallel_gradient: false, // Enable for large datasets (100k+ rows)
 
             // Monotonic constraints
             monotonic_constraints: Vec::new(),
@@ -299,11 +303,21 @@ impl GBDTConfig {
         self
     }
 
+    /// Enable parallel gradient computation (default: false)
+    ///
+    /// Experimental: may not provide stable speedups, benchmark before enabling.
+    /// Use examples/find_crossover.rs to test on your specific data.
+    pub fn with_parallel_gradient(mut self, enabled: bool) -> Self {
+        self.parallel_gradient = enabled;
+        self
+    }
+
     /// Disable all performance optimizations (for debugging/comparison)
     pub fn without_optimizations(mut self) -> Self {
         self.parallel_prediction = false;
         self.column_reordering = false;
         self.packed_dataset = false;
+        self.parallel_gradient = false;
         self
     }
 

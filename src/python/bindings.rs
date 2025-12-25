@@ -289,6 +289,18 @@ impl PyGBDTConfig {
         self.inner.packed_dataset = value;
     }
 
+    /// Use parallel gradient computation (default: false)
+    /// Experimental: may not provide stable speedups, benchmark before enabling
+    #[getter]
+    fn parallel_gradient(&self) -> bool {
+        self.inner.parallel_gradient
+    }
+
+    #[setter]
+    fn set_parallel_gradient(&mut self, value: bool) {
+        self.inner.parallel_gradient = value;
+    }
+
     // Monotonic constraints
 
     /// Set monotonic constraints for features
