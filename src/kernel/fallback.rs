@@ -378,6 +378,58 @@ pub unsafe fn histogram_accumulate_contiguous_scalar(
     }
 }
 
+// ============================================================================
+// Histogram Merge/Subtract
+// ============================================================================
+
+/// Scalar merge of histogram gradient arrays
+#[inline]
+pub fn merge_histogram_grads_scalar(self_grads: &mut [f32; 256], other_grads: &[f32; 256]) {
+    for i in 0..256 {
+        self_grads[i] += other_grads[i];
+    }
+}
+
+/// Scalar merge of histogram hessian arrays
+#[inline]
+pub fn merge_histogram_hess_scalar(self_hess: &mut [f32; 256], other_hess: &[f32; 256]) {
+    for i in 0..256 {
+        self_hess[i] += other_hess[i];
+    }
+}
+
+/// Scalar merge of histogram count arrays
+#[inline]
+pub fn merge_histogram_counts_scalar(self_counts: &mut [u32; 256], other_counts: &[u32; 256]) {
+    for i in 0..256 {
+        self_counts[i] += other_counts[i];
+    }
+}
+
+/// Scalar subtract of histogram gradient arrays
+#[inline]
+pub fn subtract_histogram_grads_scalar(self_grads: &mut [f32; 256], other_grads: &[f32; 256]) {
+    for i in 0..256 {
+        self_grads[i] -= other_grads[i];
+    }
+}
+
+/// Scalar subtract of histogram hessian arrays
+#[inline]
+pub fn subtract_histogram_hess_scalar(self_hess: &mut [f32; 256], other_hess: &[f32; 256]) {
+    for i in 0..256 {
+        self_hess[i] -= other_hess[i];
+    }
+}
+
+/// Scalar subtract of histogram count arrays
+#[inline]
+pub fn subtract_histogram_counts_scalar(self_counts: &mut [u32; 256], other_counts: &[u32; 256]) {
+    for i in 0..256 {
+        self_counts[i] -= other_counts[i];
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

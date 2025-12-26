@@ -263,6 +263,104 @@ pub unsafe fn histogram_accumulate_contiguous(
     }
 }
 
+// ============================================================================
+// Public API - Runtime-dispatched histogram merge
+// ============================================================================
+
+/// Merge histogram gradient arrays with runtime SIMD dispatch
+///
+/// Adds `other_grads` into `self_grads`.
+#[inline]
+pub fn merge_histogram_grads(self_grads: &mut [f32; 256], other_grads: &[f32; 256]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2() {
+            unsafe {
+                x86::merge_histogram_grads_avx2(self_grads, other_grads);
+            }
+            return;
+        }
+    }
+    fallback::merge_histogram_grads_scalar(self_grads, other_grads);
+}
+
+/// Merge histogram hessian arrays with runtime SIMD dispatch
+#[inline]
+pub fn merge_histogram_hess(self_hess: &mut [f32; 256], other_hess: &[f32; 256]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2() {
+            unsafe {
+                x86::merge_histogram_hess_avx2(self_hess, other_hess);
+            }
+            return;
+        }
+    }
+    fallback::merge_histogram_hess_scalar(self_hess, other_hess);
+}
+
+/// Merge histogram count arrays with runtime SIMD dispatch
+#[inline]
+pub fn merge_histogram_counts(self_counts: &mut [u32; 256], other_counts: &[u32; 256]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2() {
+            unsafe {
+                x86::merge_histogram_counts_avx2(self_counts, other_counts);
+            }
+            return;
+        }
+    }
+    fallback::merge_histogram_counts_scalar(self_counts, other_counts);
+}
+
+/// Subtract histogram gradient arrays with runtime SIMD dispatch
+///
+/// Subtracts `other_grads` from `self_grads`.
+#[inline]
+pub fn subtract_histogram_grads(self_grads: &mut [f32; 256], other_grads: &[f32; 256]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2() {
+            unsafe {
+                x86::subtract_histogram_grads_avx2(self_grads, other_grads);
+            }
+            return;
+        }
+    }
+    fallback::subtract_histogram_grads_scalar(self_grads, other_grads);
+}
+
+/// Subtract histogram hessian arrays with runtime SIMD dispatch
+#[inline]
+pub fn subtract_histogram_hess(self_hess: &mut [f32; 256], other_hess: &[f32; 256]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2() {
+            unsafe {
+                x86::subtract_histogram_hess_avx2(self_hess, other_hess);
+            }
+            return;
+        }
+    }
+    fallback::subtract_histogram_hess_scalar(self_hess, other_hess);
+}
+
+/// Subtract histogram count arrays with runtime SIMD dispatch
+#[inline]
+pub fn subtract_histogram_counts(self_counts: &mut [u32; 256], other_counts: &[u32; 256]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2() {
+            unsafe {
+                x86::subtract_histogram_counts_avx2(self_counts, other_counts);
+            }
+            return;
+        }
+    }
+    fallback::subtract_histogram_counts_scalar(self_counts, other_counts);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
