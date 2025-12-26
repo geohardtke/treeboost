@@ -649,6 +649,53 @@ impl HistogramBuilder {
         row_indices[0] == 0 && row_indices.last() == Some(&(row_indices.len() - 1))
     }
 
+    /// Build histogram for a single feature from raw column data
+    ///
+    /// This is a lower-level API for use by the backend abstraction.
+    ///
+    /// # Arguments
+    /// * `feature_column` - Bin values for each row
+    /// * `row_indices` - Which rows to process
+    /// * `gradients` - Gradient values (full dataset)
+    /// * `hessians` - Hessian values (full dataset)
+    /// * `sparse_column` - Optional sparse representation of the feature
+    pub fn build_single_feature(
+        &self,
+        feature_column: &[u8],
+        row_indices: &[usize],
+        gradients: &[f32],
+        hessians: &[f32],
+        sparse_column: Option<&SparseColumn>,
+    ) -> Histogram {
+        let mut hist = Histogram::new();
+
+        if let Some(sparse_col) = sparse_column {
+            // Compute totals for sparse default bin subtraction
+            let total_grad: f32 = row_indices.iter().map(|&i| gradients[i]).sum();
+            let total_hess: f32 = row_indices.iter().map(|&i| hessians[i]).sum();
+            let total_count = row_indices.len() as u32;
+
+            Self::build_sparse_histogram(
+                &mut hist,
+                sparse_col,
+                row_indices,
+                gradients,
+                hessians,
+                total_grad,
+                total_hess,
+                total_count,
+            );
+        } else {
+            // Dense path
+            for &row_idx in row_indices {
+                let bin = feature_column[row_idx];
+                hist.accumulate(bin, gradients[row_idx], hessians[row_idx]);
+            }
+        }
+
+        hist
+    }
+
     /// Build sibling histogram using Histogram Subtraction Trick
     ///
     /// Instead of building the larger sibling directly,

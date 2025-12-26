@@ -241,6 +241,46 @@ impl Histogram {
         self.bins.iter().map(|b| b.count).sum()
     }
 
+    /// Get totals (gradient, hessian, count) across all bins
+    pub fn totals(&self) -> (f32, f32, u32) {
+        let mut g = 0.0f32;
+        let mut h = 0.0f32;
+        let mut n = 0u32;
+        for bin in &self.bins {
+            g += bin.sum_gradients;
+            h += bin.sum_hessians;
+            n += bin.count;
+        }
+        (g, h, n)
+    }
+
+    /// Get sum of gradients per bin as array
+    pub fn sum_gradients(&self) -> [f32; NUM_BINS] {
+        let mut result = [0.0f32; NUM_BINS];
+        for (i, bin) in self.bins.iter().enumerate() {
+            result[i] = bin.sum_gradients;
+        }
+        result
+    }
+
+    /// Get sum of hessians per bin as array
+    pub fn sum_hessians(&self) -> [f32; NUM_BINS] {
+        let mut result = [0.0f32; NUM_BINS];
+        for (i, bin) in self.bins.iter().enumerate() {
+            result[i] = bin.sum_hessians;
+        }
+        result
+    }
+
+    /// Get counts per bin as array
+    pub fn counts(&self) -> [u32; NUM_BINS] {
+        let mut result = [0u32; NUM_BINS];
+        for (i, bin) in self.bins.iter().enumerate() {
+            result[i] = bin.count;
+        }
+        result
+    }
+
     /// Iterate over bins
     pub fn iter(&self) -> impl Iterator<Item = (u8, &BinEntry)> {
         self.bins.iter().enumerate().map(|(i, b)| (i as u8, b))

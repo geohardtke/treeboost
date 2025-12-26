@@ -35,6 +35,7 @@
 //! let predictions = model.predict(&dataset);
 //! ```
 
+pub mod backend;
 pub mod booster;
 pub mod dataset;
 pub mod encoding;
@@ -49,6 +50,7 @@ pub mod tree;
 mod python;
 
 // Re-exports for convenience
+pub use backend::{BackendConfig, BackendSelector, BackendType, HistogramBackend};
 pub use booster::{GBDTConfig, GBDTModel};
 pub use dataset::{BinnedDataset, QuantileBinner};
 pub use inference::Prediction;

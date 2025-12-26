@@ -347,6 +347,30 @@ impl BinnedDataset {
     }
 }
 
+// Implement BinStorage trait for use with backend abstraction
+impl crate::backend::BinStorage for BinnedDataset {
+    fn get_bin(&self, row: usize, feature: usize) -> u8 {
+        self.features[feature * self.num_rows + row]
+    }
+
+    fn num_rows(&self) -> usize {
+        self.num_rows
+    }
+
+    fn num_features(&self) -> usize {
+        self.feature_info.len()
+    }
+
+    fn feature_column(&self, feature: usize) -> Option<&[u8]> {
+        let start = feature * self.num_rows;
+        Some(&self.features[start..start + self.num_rows])
+    }
+
+    fn sparse_column(&self, feature: usize) -> Option<&SparseColumn> {
+        self.sparse_columns.get(feature).and_then(|s| s.as_ref())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
