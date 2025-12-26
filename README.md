@@ -21,10 +21,10 @@ flowchart TD
 
 | Dataset Size | Best Backend | Speedup vs Scalar |
 |-------------|--------------|-------------------|
-| < 10K rows | Scalar | 1.0x |
-| 10K-100K | AVX-512/SVE2 | 1.5x |
-| 100K-1M | GPU | 2-5x |
-| > 1M rows | GPU | 10-50x |
+| < 5K rows | Scalar | 1.0x |
+| 5K-25K | GPU | 1.5-3.4x |
+| 25K-100K | GPU | 3.4-5.1x |
+| 100K-1M | GPU | 5.1-5.5x |
 
 ## Features
 
@@ -153,8 +153,22 @@ config.interaction_groups = [
 ## Benchmarks
 
 ```bash
+# Run backend comparison (GPU vs CPU)
+cargo run --release --features gpu --example backend_benchmark
+
+# Run full benchmark suite
 cargo bench --bench competitors
 ```
+
+### GPU Backend Performance (RTX 3060)
+
+| Rows | Scalar (AVX2) | WGPU (GPU) | Speedup |
+|------|---------------|------------|---------|
+| 5K | 0.23 ms | 0.15 ms | 1.55x |
+| 25K | 1.06 ms | 0.31 ms | 3.43x |
+| 100K | 4.21 ms | 0.82 ms | 5.13x |
+| 500K | 21.14 ms | 4.08 ms | 5.18x |
+| 1M | 42.11 ms | 7.81 ms | 5.39x |
 
 ## Project Structure
 

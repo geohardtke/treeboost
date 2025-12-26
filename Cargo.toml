@@ -14,6 +14,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 python = ["dep:pyo3", "dep:numpy"]
+gpu = ["dep:wgpu", "dep:pollster"]
 
 [[bin]]
 name = "treeboost"
@@ -61,6 +62,12 @@ pyo3 = { version = "0.23", features = ["extension-module"], optional = true }
 
 # NumPy support for Python bindings
 numpy = { version = "0.23", optional = true }
+
+# GPU compute via WebGPU (optional - for gpu feature)
+wgpu = { version = "23", optional = true }
+
+# Async executor for blocking WGPU calls (optional - for gpu feature)
+pollster = { version = "0.4", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

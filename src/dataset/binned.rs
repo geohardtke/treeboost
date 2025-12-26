@@ -8,9 +8,17 @@
 //! For sparse features (many zeros), we store only non-zero entries and compute
 //! the zero bin by subtraction: `zero_bin = total - sum(non_zero_bins)`.
 //! This provides up to 20x speedup on 95% sparse data.
+//!
+//! # Data Layouts
+//!
+//! - **Column-major** (default): `bins[feature][row]` - optimal for scalar CPU
+//! - **Row-major** (lazy): `bins[row][feature]` - optimal for GPU/tensor-tile
+//!
+//! Row-major layout is computed lazily on first GPU use and cached for reuse.
 
 use bytemuck::{Pod, Zeroable};
 use rkyv::{Archive, Deserialize, Serialize};
+use std::sync::OnceLock;
 
 /// Histogram bin entry for gradient/hessian accumulation
 #[repr(C)]
@@ -168,7 +176,9 @@ impl SparseColumn {
 ///
 /// Sparse features are additionally stored in CSR-like format for efficient
 /// histogram building on sparse data.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+///
+/// For GPU backends, a row-major layout is computed lazily and cached.
+#[derive(Archive, Serialize, Deserialize)]
 pub struct BinnedDataset {
     /// Number of rows (samples)
     num_rows: usize,
@@ -180,6 +190,36 @@ pub struct BinnedDataset {
     feature_info: Vec<FeatureInfo>,
     /// Sparse representations for sparse features (None if dense)
     sparse_columns: Vec<Option<SparseColumn>>,
+    /// Cached row-major layout for GPU backends (lazily computed)
+    /// Not serialized - recomputed on first GPU use after deserialization
+    #[rkyv(with = rkyv::with::Skip)]
+    row_major_cache: OnceLock<Vec<u8>>,
+}
+
+impl std::fmt::Debug for BinnedDataset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BinnedDataset")
+            .field("num_rows", &self.num_rows)
+            .field("num_features", &self.num_features())
+            .field("features_len", &self.features.len())
+            .field("sparse_features", &self.num_sparse_features())
+            .field("row_major_cached", &self.row_major_cache.get().is_some())
+            .finish()
+    }
+}
+
+impl Clone for BinnedDataset {
+    fn clone(&self) -> Self {
+        Self {
+            num_rows: self.num_rows,
+            features: self.features.clone(),
+            targets: self.targets.clone(),
+            feature_info: self.feature_info.clone(),
+            sparse_columns: self.sparse_columns.clone(),
+            // Don't clone cache - it will be recomputed if needed
+            row_major_cache: OnceLock::new(),
+        }
+    }
 }
 
 impl BinnedDataset {
@@ -218,6 +258,7 @@ impl BinnedDataset {
             targets,
             feature_info,
             sparse_columns,
+            row_major_cache: OnceLock::new(),
         }
     }
 
@@ -345,6 +386,33 @@ impl BinnedDataset {
             info.bin_boundaries.last().copied().unwrap_or(f64::MAX)
         }
     }
+
+    /// Get row-major layout for GPU backends (lazy conversion).
+    ///
+    /// Converts column-major `bins[feature][row]` to row-major `bins[row][feature]`.
+    /// Result is cached for subsequent calls.
+    ///
+    /// # Returns
+    /// A slice of row-major bin data: `bins[row * num_features + feature]`
+    pub fn as_row_major(&self) -> &[u8] {
+        self.row_major_cache.get_or_init(|| {
+            let num_rows = self.num_rows;
+            let num_features = self.num_features();
+            let mut row_major = vec![0u8; num_rows * num_features];
+
+            // Transpose: column-major → row-major
+            // Column-major: features[feature * num_rows + row]
+            // Row-major: row_major[row * num_features + feature]
+            for row in 0..num_rows {
+                for feature in 0..num_features {
+                    row_major[row * num_features + feature] =
+                        self.features[feature * num_rows + row];
+                }
+            }
+
+            row_major
+        })
+    }
 }
 
 // Implement BinStorage trait for use with backend abstraction
@@ -368,6 +436,11 @@ impl crate::backend::BinStorage for BinnedDataset {
 
     fn sparse_column(&self, feature: usize) -> Option<&SparseColumn> {
         self.sparse_columns.get(feature).and_then(|s| s.as_ref())
+    }
+
+    fn as_row_major(&self) -> Option<&[u8]> {
+        // Delegate to the lazy-cached method
+        Some(BinnedDataset::as_row_major(self))
     }
 }
 
@@ -445,5 +518,83 @@ mod tests {
         // Test targets
         assert_eq!(dataset.target(0), 1.0);
         assert_eq!(dataset.targets(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_row_major_conversion() {
+        let num_rows = 4;
+        let num_features = 2;
+
+        // Column-major: feature 0 = [0,1,2,3], feature 1 = [10,11,12,13]
+        let features = vec![0u8, 1, 2, 3, 10, 11, 12, 13];
+        let targets = vec![1.0f32, 2.0, 3.0, 4.0];
+        let feature_info = vec![
+            FeatureInfo {
+                name: "f0".to_string(),
+                feature_type: FeatureType::Numeric,
+                num_bins: 4,
+                bin_boundaries: vec![0.5, 1.5, 2.5],
+            },
+            FeatureInfo {
+                name: "f1".to_string(),
+                feature_type: FeatureType::Numeric,
+                num_bins: 4,
+                bin_boundaries: vec![10.5, 11.5, 12.5],
+            },
+        ];
+
+        let dataset = BinnedDataset::new(num_rows, features, targets, feature_info);
+
+        // Get row-major layout
+        let row_major = dataset.as_row_major();
+
+        // Verify row-major format: [row0_feat0, row0_feat1, row1_feat0, row1_feat1, ...]
+        // Row 0: (0, 10), Row 1: (1, 11), Row 2: (2, 12), Row 3: (3, 13)
+        assert_eq!(row_major.len(), num_rows * num_features);
+        assert_eq!(row_major[0 * num_features + 0], 0); // row 0, feature 0
+        assert_eq!(row_major[0 * num_features + 1], 10); // row 0, feature 1
+        assert_eq!(row_major[1 * num_features + 0], 1); // row 1, feature 0
+        assert_eq!(row_major[1 * num_features + 1], 11); // row 1, feature 1
+        assert_eq!(row_major[3 * num_features + 0], 3); // row 3, feature 0
+        assert_eq!(row_major[3 * num_features + 1], 13); // row 3, feature 1
+
+        // Verify caching (second call returns same data)
+        let row_major2 = dataset.as_row_major();
+        assert_eq!(row_major.as_ptr(), row_major2.as_ptr());
+    }
+
+    #[test]
+    fn test_row_major_via_bin_storage_trait() {
+        use crate::backend::BinStorage;
+
+        let features = vec![0u8, 1, 2, 3, 10, 11, 12, 13];
+        let targets = vec![1.0f32, 2.0, 3.0, 4.0];
+        let feature_info = vec![
+            FeatureInfo {
+                name: "f0".to_string(),
+                feature_type: FeatureType::Numeric,
+                num_bins: 4,
+                bin_boundaries: vec![],
+            },
+            FeatureInfo {
+                name: "f1".to_string(),
+                feature_type: FeatureType::Numeric,
+                num_bins: 4,
+                bin_boundaries: vec![],
+            },
+        ];
+
+        let dataset = BinnedDataset::new(4, features, targets, feature_info);
+
+        // Access via trait
+        let storage: &dyn BinStorage = &dataset;
+        let row_major = storage.as_row_major();
+        assert!(row_major.is_some());
+
+        let data = row_major.unwrap();
+        assert_eq!(data.len(), 8);
+        // Row 0: (0, 10)
+        assert_eq!(data[0], 0);
+        assert_eq!(data[1], 10);
     }
 }

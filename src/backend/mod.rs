@@ -3,8 +3,8 @@
 //! This module provides a vendor-agnostic abstraction layer for histogram
 //! building operations, enabling different hardware backends:
 //!
-//! - **Scalar**: Current CPU implementation (AVX2/NEON loads)
-//! - **WGPU**: GPU via Vulkan/Metal/DX12 (future)
+//! - **Scalar**: CPU implementation (AVX2/NEON loads)
+//! - **WGPU**: GPU via Vulkan/Metal/DX12 (all GPU vendors)
 //! - **AVX-512**: Tensor-tile with vpconflictd (future)
 //! - **SVE2**: ARM tensor-tile with HISTCNT (future)
 //! - **Native**: CUDA, ROCm, Metal direct (future extreme optimization)
@@ -13,9 +13,15 @@ mod config;
 pub mod scalar;
 mod traits;
 
+#[cfg(feature = "gpu")]
+pub mod wgpu;
+
 pub use config::{BackendConfig, BackendType};
 pub use scalar::ScalarBackend;
 pub use traits::{BinStorage, HistogramBackend, SparseColumn, SplitCandidate, SplitConfig};
+
+#[cfg(feature = "gpu")]
+pub use wgpu::WgpuBackend;
 
 /// Backend selector for choosing the best available backend.
 ///
@@ -69,9 +75,15 @@ impl BackendSelector {
     /// Detect the best available backend.
     fn detect_best(&self) -> Box<dyn HistogramBackend> {
         // Priority order: GPU > AVX-512 > SVE2 > Scalar
-        // Currently only scalar is implemented
 
-        // TODO: Check for WGPU availability
+        // Try WGPU (covers all GPUs via Vulkan/Metal/DX12)
+        #[cfg(feature = "gpu")]
+        {
+            if let Some(backend) = wgpu::WgpuBackend::new() {
+                return Box::new(backend);
+            }
+        }
+
         // TODO: Check for AVX-512 availability
         // TODO: Check for SVE2 availability
 
@@ -79,11 +91,17 @@ impl BackendSelector {
     }
 
     fn try_wgpu_or_fallback(&self) -> Box<dyn HistogramBackend> {
-        // TODO: Implement WGPU backend
+        #[cfg(feature = "gpu")]
+        {
+            if let Some(backend) = wgpu::WgpuBackend::new() {
+                return Box::new(backend);
+            }
+        }
+
         if self.config.fallback_to_scalar {
             Box::new(ScalarBackend::new())
         } else {
-            panic!("WGPU backend not yet implemented")
+            panic!("WGPU backend requested but not available (no GPU or 'gpu' feature disabled)")
         }
     }
 
@@ -166,9 +184,14 @@ mod tests {
     #[test]
     fn test_backend_selector_large_dataset() {
         let selector = BackendSelector::new();
-        // Large dataset - currently falls back to scalar since no GPU impl
+        // Large dataset - uses GPU if available, otherwise scalar
         let backend = selector.select(100_000);
-        assert!(backend.name().starts_with("Scalar"));
+        // Accept either WGPU or Scalar depending on GPU availability
+        assert!(
+            backend.name() == "WGPU" || backend.name().starts_with("Scalar"),
+            "Expected WGPU or Scalar, got: {}",
+            backend.name()
+        );
     }
 
     #[test]
@@ -180,11 +203,15 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_config_prefer_gpu_fallback() {
+    fn test_backend_config_prefer_gpu() {
         let config = BackendConfig::prefer_gpu();
         let selector = BackendSelector::with_config(config);
-        // Should fall back to scalar since WGPU not implemented
+        // Uses GPU if available, otherwise falls back to scalar
         let backend = selector.select(100_000);
-        assert!(backend.name().starts_with("Scalar"));
+        assert!(
+            backend.name() == "WGPU" || backend.name().starts_with("Scalar"),
+            "Expected WGPU or Scalar, got: {}",
+            backend.name()
+        );
     }
 }
