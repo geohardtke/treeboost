@@ -123,6 +123,8 @@ struct BufferPool {
     params: Option<Buffer>,
     bins: Option<PooledBuffer>,
     bins_cache_key: Option<CacheKey>, // Track what bins are currently uploaded (stable across training)
+    bins_4bit: Option<PooledBuffer>,  // 4-bit packed bins buffer
+    bins_4bit_cache_key: Option<CacheKey>,
     grad_hess: Option<PooledBuffer>,
     indices: Option<PooledBuffer>,
     batch_info: Option<PooledBuffer>, // Batch descriptors for batched mode
@@ -142,6 +144,8 @@ impl BufferPool {
             params: None,
             bins: None,
             bins_cache_key: None,
+            bins_4bit: None,
+            bins_4bit_cache_key: None,
             grad_hess: None,
             indices: None,
             batch_info: None,
@@ -158,15 +162,22 @@ impl BufferPool {
 /// GPU histogram kernel executor.
 pub struct HistogramKernel {
     device: Arc<GpuDevice>,
-    // Single-batch pipelines
+    // Single-batch pipelines (8-bit)
     pipeline_dense: ComputePipeline,
     pipeline_zero: ComputePipeline,
     bind_group_layout_dense: BindGroupLayout,
     bind_group_layout_zero: BindGroupLayout,
-    // Batched pipelines
+    // Batched pipelines (8-bit)
     pipeline_batched: ComputePipeline,
     pipeline_zero_batched: ComputePipeline,
     bind_group_layout_batched: BindGroupLayout,
+    // 4-bit bin pipelines (for datasets with max_bins <= 16)
+    pipeline_dense_4bit: ComputePipeline,
+    pipeline_zero_4bit: ComputePipeline,
+    bind_group_layout_dense_4bit: BindGroupLayout,
+    pipeline_batched_4bit: ComputePipeline,
+    pipeline_zero_batched_4bit: ComputePipeline,
+    bind_group_layout_batched_4bit: BindGroupLayout,
     /// Buffer pool for reusing allocations (Mutex for thread safety)
     buffer_pool: Mutex<BufferPool>,
     /// Whether subgroup operations are available on hardware
@@ -218,6 +229,36 @@ impl HistogramKernel {
         let bind_group_layout_zero = pipeline_zero.get_bind_group_layout(0);
         let bind_group_layout_batched = pipeline_batched.get_bind_group_layout(0);
 
+        // Create 4-bit pipelines for datasets with small bin counts
+        let shader_source_4bit = include_str!("shaders/histogram_4bit.wgsl");
+
+        let pipeline_dense_4bit = device.create_compute_pipeline(
+            "histogram_dense_4bit_pipeline",
+            shader_source_4bit,
+            "histogram_dense_4bit",
+        );
+
+        let pipeline_zero_4bit = device.create_compute_pipeline(
+            "zero_histograms_4bit_pipeline",
+            shader_source_4bit,
+            "zero_histograms_4bit",
+        );
+
+        let pipeline_batched_4bit = device.create_compute_pipeline(
+            "histogram_batched_4bit_pipeline",
+            shader_source_4bit,
+            "histogram_batched_4bit",
+        );
+
+        let pipeline_zero_batched_4bit = device.create_compute_pipeline(
+            "zero_histograms_batched_4bit_pipeline",
+            shader_source_4bit,
+            "zero_histograms_batched_4bit",
+        );
+
+        let bind_group_layout_dense_4bit = pipeline_dense_4bit.get_bind_group_layout(0);
+        let bind_group_layout_batched_4bit = pipeline_batched_4bit.get_bind_group_layout(0);
+
         // Check for subgroup support and create optimized pipelines if available
         // Note: Even if the device reports SUBGROUP support, the WGSL compiler may not
         // support the `enable subgroups;` extension yet (depends on wgpu/naga version).
@@ -267,6 +308,12 @@ impl HistogramKernel {
             pipeline_batched,
             pipeline_zero_batched,
             bind_group_layout_batched,
+            pipeline_dense_4bit,
+            pipeline_zero_4bit,
+            bind_group_layout_dense_4bit,
+            pipeline_batched_4bit,
+            pipeline_zero_batched_4bit,
+            bind_group_layout_batched_4bit,
             buffer_pool: Mutex::new(BufferPool::new()),
             subgroups_supported,
             use_subgroups: std::sync::atomic::AtomicBool::new(false), // Disabled by default
@@ -738,6 +785,268 @@ impl HistogramKernel {
                 if count > 0 {
                     hist.accumulate(bin as u8, sum_grad, sum_hess);
                     // Adjust count (accumulate adds 1, we want the actual count)
+                    let entry = hist.get_mut(bin as u8);
+                    entry.count = count;
+                }
+            }
+
+            histograms.push(hist);
+        }
+
+        histograms
+    }
+
+    /// Build histograms using 4-bit packed bins.
+    ///
+    /// This is optimized for datasets where all features have ≤16 bins.
+    /// Uses nibble-packed bin data for 50% memory bandwidth reduction.
+    ///
+    /// # Arguments
+    /// * `bins_4bit` - 4-bit packed bins in row-major order (2 features per byte)
+    /// * `grad_hess` - Interleaved gradients and hessians [(g0,h0), (g1,h1), ...]
+    /// * `row_indices` - Optional row indices (empty = use all rows)
+    /// * `num_rows` - Total number of rows
+    /// * `num_features` - Number of features
+    ///
+    /// # Returns
+    /// Vector of histograms, one per feature
+    pub fn build_histograms_4bit(
+        &self,
+        bins_4bit: &[u8],
+        grad_hess: &[(f32, f32)],
+        row_indices: &[usize],
+        num_rows: usize,
+        num_features: usize,
+    ) -> Vec<Histogram> {
+        let dev = &self.device;
+
+        // Quantize gradients/hessians to fixed-point i16 and pack into u32
+        let grad_hess_packed: Vec<u32> = grad_hess
+            .iter()
+            .map(|(g, h)| {
+                let grad_i16 = ((*g * FIXED_POINT_SCALE).clamp(-32767.0, 32767.0)) as i16;
+                let hess_i16 = ((*h * FIXED_POINT_SCALE).clamp(-32767.0, 32767.0)) as i16;
+                (grad_i16 as u16 as u32) | ((hess_i16 as u16 as u32) << 16)
+            })
+            .collect();
+
+        // Convert row indices to u32
+        let indices_u32: Vec<u32> = row_indices.iter().map(|&i| i as u32).collect();
+
+        // Pack 4-bit bins for GPU (already nibble-packed, just need u32 alignment)
+        let bins_aligned = bins_4bit.len() % 4 == 0;
+        let bins_packed_owned: Vec<u32>;
+        let bins_packed: &[u32] = if bins_aligned {
+            bytemuck::cast_slice(bins_4bit)
+        } else {
+            bins_packed_owned = pack_bins_u32(bins_4bit);
+            &bins_packed_owned
+        };
+
+        // Calculate required buffer sizes
+        let bins_size = (bins_packed.len() * 4) as u64;
+        let grad_hess_size = (grad_hess_packed.len() * 4) as u64;
+        let indices_size = if indices_u32.is_empty() {
+            4u64
+        } else {
+            (indices_u32.len() * 4) as u64
+        };
+        let hist_size = (num_features * 256 * 4) as u64;
+
+        // Create uniform buffer with parameters
+        let params = HistogramParams {
+            num_rows: num_rows as u32,
+            num_features: num_features as u32,
+            num_indices: indices_u32.len() as u32,
+            num_batches: 0, // Single batch mode
+        };
+
+        // Lock buffer pool and ensure all buffers exist
+        let mut pool = self.buffer_pool.lock().unwrap();
+
+        // Params buffer (fixed size, create once)
+        if pool.params.is_none() {
+            pool.params = Some(dev.create_uniform_buffer(
+                "params_buffer",
+                std::mem::size_of::<HistogramParams>() as u64,
+            ));
+        }
+
+        // Ensure 4-bit bins buffer (separate from 8-bit)
+        if Self::ensure_storage_buffer(dev, &mut pool.bins_4bit, "bins_4bit_buffer", bins_size, false) {
+            pool.bins_4bit_cache_key = None;
+        }
+        Self::ensure_storage_buffer(dev, &mut pool.grad_hess, "grad_hess_buffer", grad_hess_size, false);
+        Self::ensure_storage_buffer(dev, &mut pool.indices, "indices_buffer", indices_size, false);
+
+        // Ensure output histogram buffers
+        Self::ensure_storage_buffer(dev, &mut pool.hist_grad, "hist_grad", hist_size, true);
+        Self::ensure_storage_buffer(dev, &mut pool.hist_hess, "hist_hess", hist_size, true);
+        Self::ensure_storage_buffer(dev, &mut pool.hist_count, "hist_count", hist_size, true);
+
+        // Ensure staging buffers
+        Self::ensure_staging_buffer(dev, &mut pool.staging_grad, "staging_grad", hist_size);
+        Self::ensure_staging_buffer(dev, &mut pool.staging_hess, "staging_hess", hist_size);
+        Self::ensure_staging_buffer(dev, &mut pool.staging_count, "staging_count", hist_size);
+
+        // Write data to buffers with caching
+        dev.write_buffer(pool.params.as_ref().unwrap(), &[params]);
+
+        // 4-bit bins: check cache
+        let bins_key = CacheKey::from_slice(bins_4bit);
+        if pool.bins_4bit_cache_key != Some(bins_key) {
+            dev.write_buffer(&pool.bins_4bit.as_ref().unwrap().buffer, bins_packed);
+            pool.bins_4bit_cache_key = Some(bins_key);
+        }
+
+        dev.write_buffer(&pool.grad_hess.as_ref().unwrap().buffer, &grad_hess_packed);
+
+        if !indices_u32.is_empty() {
+            dev.write_buffer(&pool.indices.as_ref().unwrap().buffer, &indices_u32);
+        }
+
+        // Create bind groups using 4-bit layouts
+        let bind_group_zero = dev.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("zero_bind_group_4bit"),
+            layout: &self.pipeline_zero_4bit.get_bind_group_layout(0),
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: pool.params.as_ref().unwrap().as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 5,
+                    resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 6,
+                    resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let bind_group_dense = dev.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("histogram_bind_group_4bit"),
+            layout: &self.bind_group_layout_dense_4bit,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: pool.params.as_ref().unwrap().as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: pool.bins_4bit.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: pool.grad_hess.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: pool.indices.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 5,
+                    resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 6,
+                    resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Execute kernels
+        let mut encoder = dev.create_encoder("histogram_encoder_4bit");
+
+        // Zero histograms first
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("zero_pass_4bit"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline_zero_4bit);
+            pass.set_bind_group(0, &bind_group_zero, &[]);
+            let total_bins = (num_features * 256) as u32;
+            let workgroups = (total_bins + 255) / 256;
+            pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+
+        // Run 4-bit histogram kernel
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("histogram_pass_4bit"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline_dense_4bit);
+            pass.set_bind_group(0, &bind_group_dense, &[]);
+            pass.dispatch_workgroups(num_features as u32, 1, 1);
+        }
+
+        // Copy results to staging buffers
+        encoder.copy_buffer_to_buffer(
+            &pool.hist_grad.as_ref().unwrap().buffer,
+            0,
+            &pool.staging_grad.as_ref().unwrap().buffer,
+            0,
+            hist_size,
+        );
+        encoder.copy_buffer_to_buffer(
+            &pool.hist_hess.as_ref().unwrap().buffer,
+            0,
+            &pool.staging_hess.as_ref().unwrap().buffer,
+            0,
+            hist_size,
+        );
+        encoder.copy_buffer_to_buffer(
+            &pool.hist_count.as_ref().unwrap().buffer,
+            0,
+            &pool.staging_count.as_ref().unwrap().buffer,
+            0,
+            hist_size,
+        );
+
+        // Submit and wait
+        dev.submit_and_wait(encoder);
+
+        // Read back results (as i32 fixed-point)
+        let mut grad_data = vec![0i32; num_features * 256];
+        let mut hess_data = vec![0i32; num_features * 256];
+        let mut count_data = vec![0u32; num_features * 256];
+
+        dev.read_buffer(&pool.staging_grad.as_ref().unwrap().buffer, &mut grad_data);
+        dev.read_buffer(&pool.staging_hess.as_ref().unwrap().buffer, &mut hess_data);
+        dev.read_buffer(
+            &pool.staging_count.as_ref().unwrap().buffer,
+            &mut count_data,
+        );
+
+        // Drop pool borrow
+        drop(pool);
+
+        // Convert to Histogram structs with dequantization
+        let mut histograms = Vec::with_capacity(num_features);
+        for f in 0..num_features {
+            let mut hist = Histogram::new();
+            let offset = f * 256;
+
+            // Only check first 16 bins for 4-bit mode
+            for bin in 0..16 {
+                let idx = offset + bin;
+                let sum_grad = grad_data[idx] as f32 * FIXED_POINT_SCALE_INV;
+                let sum_hess = hess_data[idx] as f32 * FIXED_POINT_SCALE_INV;
+                let count = count_data[idx];
+
+                if count > 0 {
+                    hist.accumulate(bin as u8, sum_grad, sum_hess);
                     let entry = hist.get_mut(bin as u8);
                     entry.count = count;
                 }

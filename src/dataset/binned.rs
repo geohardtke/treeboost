@@ -194,6 +194,10 @@ pub struct BinnedDataset {
     /// Not serialized - recomputed on first GPU use after deserialization
     #[rkyv(with = rkyv::with::Skip)]
     row_major_cache: OnceLock<Vec<u8>>,
+    /// Cached 4-bit packed row-major layout for GPU backends (lazily computed)
+    /// Only used when all features have ≤16 bins
+    #[rkyv(with = rkyv::with::Skip)]
+    row_major_4bit_cache: OnceLock<Vec<u8>>,
 }
 
 impl std::fmt::Debug for BinnedDataset {
@@ -203,7 +207,10 @@ impl std::fmt::Debug for BinnedDataset {
             .field("num_features", &self.num_features())
             .field("features_len", &self.features.len())
             .field("sparse_features", &self.num_sparse_features())
+            .field("max_bins", &self.max_bins())
+            .field("supports_4bit", &self.supports_4bit())
             .field("row_major_cached", &self.row_major_cache.get().is_some())
+            .field("row_major_4bit_cached", &self.row_major_4bit_cache.get().is_some())
             .finish()
     }
 }
@@ -216,8 +223,9 @@ impl Clone for BinnedDataset {
             targets: self.targets.clone(),
             feature_info: self.feature_info.clone(),
             sparse_columns: self.sparse_columns.clone(),
-            // Don't clone cache - it will be recomputed if needed
+            // Don't clone caches - they will be recomputed if needed
             row_major_cache: OnceLock::new(),
+            row_major_4bit_cache: OnceLock::new(),
         }
     }
 }
@@ -259,6 +267,7 @@ impl BinnedDataset {
             feature_info,
             sparse_columns,
             row_major_cache: OnceLock::new(),
+            row_major_4bit_cache: OnceLock::new(),
         }
     }
 
@@ -413,6 +422,82 @@ impl BinnedDataset {
             row_major
         })
     }
+
+    /// Get maximum number of bins across all features.
+    #[inline]
+    pub fn max_bins(&self) -> u8 {
+        self.feature_info
+            .iter()
+            .map(|f| f.num_bins)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Check if dataset supports 4-bit bin packing.
+    ///
+    /// Returns true if all features have ≤16 bins, enabling 4-bit packing
+    /// for 50% memory bandwidth reduction on GPU.
+    #[inline]
+    pub fn supports_4bit(&self) -> bool {
+        self.max_bins() <= 16
+    }
+
+    /// Get 4-bit packed row-major layout for GPU backends (lazy conversion).
+    ///
+    /// Packs two 4-bit bin values into each byte (nibble packing).
+    /// Only valid when all features have ≤16 bins.
+    ///
+    /// Layout: For each row, features are packed in pairs:
+    /// - byte[i] = (feature[2i+1] << 4) | feature[2i]
+    /// - If odd number of features, last nibble is padded with 0
+    ///
+    /// # Panics
+    /// Panics if any feature has more than 16 bins.
+    ///
+    /// # Returns
+    /// A slice of 4-bit packed row-major bin data
+    pub fn as_row_major_4bit(&self) -> &[u8] {
+        self.row_major_4bit_cache.get_or_init(|| {
+            assert!(
+                self.supports_4bit(),
+                "4-bit packing requires all features to have ≤16 bins, max is {}",
+                self.max_bins()
+            );
+
+            let num_rows = self.num_rows;
+            let num_features = self.num_features();
+            // Each pair of features packs into 1 byte
+            let bytes_per_row = (num_features + 1) / 2;
+            let mut packed = vec![0u8; num_rows * bytes_per_row];
+
+            for row in 0..num_rows {
+                let row_offset = row * bytes_per_row;
+                for pair in 0..bytes_per_row {
+                    let f0 = pair * 2;
+                    let f1 = f0 + 1;
+
+                    // Get bin values (4-bit, clamped to 0-15)
+                    let bin0 = self.features[f0 * num_rows + row] & 0x0F;
+                    let bin1 = if f1 < num_features {
+                        self.features[f1 * num_rows + row] & 0x0F
+                    } else {
+                        0 // Padding for odd number of features
+                    };
+
+                    // Pack: low nibble = even feature, high nibble = odd feature
+                    packed[row_offset + pair] = bin0 | (bin1 << 4);
+                }
+            }
+
+            packed
+        })
+    }
+
+    /// Get the number of bytes per row in 4-bit packed format.
+    #[inline]
+    pub fn bytes_per_row_4bit(&self) -> usize {
+        (self.num_features() + 1) / 2
+    }
 }
 
 // Implement BinStorage trait for use with backend abstraction
@@ -441,6 +526,26 @@ impl crate::backend::BinStorage for BinnedDataset {
     fn as_row_major(&self) -> Option<&[u8]> {
         // Delegate to the lazy-cached method
         Some(BinnedDataset::as_row_major(self))
+    }
+
+    fn max_bins(&self) -> u8 {
+        BinnedDataset::max_bins(self)
+    }
+
+    fn supports_4bit(&self) -> bool {
+        BinnedDataset::supports_4bit(self)
+    }
+
+    fn as_row_major_4bit(&self) -> Option<&[u8]> {
+        if self.supports_4bit() {
+            Some(BinnedDataset::as_row_major_4bit(self))
+        } else {
+            None
+        }
+    }
+
+    fn bytes_per_row_4bit(&self) -> usize {
+        BinnedDataset::bytes_per_row_4bit(self)
     }
 }
 
@@ -596,5 +701,143 @@ mod tests {
         // Row 0: (0, 10)
         assert_eq!(data[0], 0);
         assert_eq!(data[1], 10);
+    }
+
+    #[test]
+    fn test_4bit_packing() {
+        let num_rows = 4;
+        let num_features = 3; // Odd number to test padding
+
+        // Column-major: feature 0 = [1,2,3,4], feature 1 = [5,6,7,8], feature 2 = [9,10,11,12]
+        // All values <= 15, so 4-bit packing is supported
+        let features = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let targets = vec![1.0f32, 2.0, 3.0, 4.0];
+        let feature_info = vec![
+            FeatureInfo {
+                name: "f0".to_string(),
+                feature_type: FeatureType::Numeric,
+                num_bins: 16, // Max 16 bins for 4-bit
+                bin_boundaries: vec![],
+            },
+            FeatureInfo {
+                name: "f1".to_string(),
+                feature_type: FeatureType::Numeric,
+                num_bins: 16,
+                bin_boundaries: vec![],
+            },
+            FeatureInfo {
+                name: "f2".to_string(),
+                feature_type: FeatureType::Numeric,
+                num_bins: 16,
+                bin_boundaries: vec![],
+            },
+        ];
+
+        let dataset = BinnedDataset::new(num_rows, features, targets, feature_info);
+
+        // Verify 4-bit support
+        assert!(dataset.supports_4bit());
+        assert_eq!(dataset.max_bins(), 16);
+        assert_eq!(dataset.bytes_per_row_4bit(), 2); // ceil(3/2) = 2 bytes per row
+
+        // Get 4-bit packed data
+        let packed = dataset.as_row_major_4bit();
+
+        // Expected layout (2 bytes per row):
+        // Row 0: byte0 = (5 << 4) | 1 = 0x51, byte1 = (0 << 4) | 9 = 0x09
+        // Row 1: byte0 = (6 << 4) | 2 = 0x62, byte1 = (0 << 4) | 10 = 0x0A
+        // Row 2: byte0 = (7 << 4) | 3 = 0x73, byte1 = (0 << 4) | 11 = 0x0B
+        // Row 3: byte0 = (8 << 4) | 4 = 0x84, byte1 = (0 << 4) | 12 = 0x0C
+
+        assert_eq!(packed.len(), num_rows * 2);
+
+        // Verify row 0
+        assert_eq!(packed[0], 0x51); // (5 << 4) | 1
+        assert_eq!(packed[1], 0x09); // (0 << 4) | 9
+
+        // Verify row 1
+        assert_eq!(packed[2], 0x62); // (6 << 4) | 2
+        assert_eq!(packed[3], 0x0A); // (0 << 4) | 10
+
+        // Verify row 3
+        assert_eq!(packed[6], 0x84); // (8 << 4) | 4
+        assert_eq!(packed[7], 0x0C); // (0 << 4) | 12
+
+        // Verify unpacking works correctly
+        for row in 0..num_rows {
+            let row_offset = row * 2;
+            // Feature 0 (low nibble of byte 0)
+            let bin0 = packed[row_offset] & 0x0F;
+            assert_eq!(bin0, (row + 1) as u8);
+            // Feature 1 (high nibble of byte 0)
+            let bin1 = (packed[row_offset] >> 4) & 0x0F;
+            assert_eq!(bin1, (row + 5) as u8);
+            // Feature 2 (low nibble of byte 1)
+            let bin2 = packed[row_offset + 1] & 0x0F;
+            assert_eq!(bin2, (row + 9) as u8);
+        }
+    }
+
+    #[test]
+    fn test_4bit_not_supported_for_large_bins() {
+        let features = vec![0u8, 1, 2, 3, 100, 101, 102, 103]; // Feature 1 has large values
+        let targets = vec![1.0f32, 2.0, 3.0, 4.0];
+        let feature_info = vec![
+            FeatureInfo {
+                name: "f0".to_string(),
+                feature_type: FeatureType::Numeric,
+                num_bins: 16,
+                bin_boundaries: vec![],
+            },
+            FeatureInfo {
+                name: "f1".to_string(),
+                feature_type: FeatureType::Numeric,
+                num_bins: 128, // More than 16 bins
+                bin_boundaries: vec![],
+            },
+        ];
+
+        let dataset = BinnedDataset::new(4, features, targets, feature_info);
+
+        assert!(!dataset.supports_4bit());
+        assert_eq!(dataset.max_bins(), 128);
+    }
+
+    #[test]
+    fn test_4bit_via_bin_storage_trait() {
+        use crate::backend::BinStorage;
+
+        let features = vec![1u8, 2, 5, 6];
+        let targets = vec![1.0f32, 2.0];
+        let feature_info = vec![
+            FeatureInfo {
+                name: "f0".to_string(),
+                feature_type: FeatureType::Numeric,
+                num_bins: 8,
+                bin_boundaries: vec![],
+            },
+            FeatureInfo {
+                name: "f1".to_string(),
+                feature_type: FeatureType::Numeric,
+                num_bins: 8,
+                bin_boundaries: vec![],
+            },
+        ];
+
+        let dataset = BinnedDataset::new(2, features, targets, feature_info);
+        let storage: &dyn BinStorage = &dataset;
+
+        assert!(storage.supports_4bit());
+        assert_eq!(storage.max_bins(), 8);
+
+        let packed = storage.as_row_major_4bit();
+        assert!(packed.is_some());
+
+        let data = packed.unwrap();
+        assert_eq!(data.len(), 2); // 2 rows, 1 byte per row (2 features)
+        // Row 0: (5 << 4) | 1 = 0x51
+        // Row 1: (6 << 4) | 2 = 0x62
+        assert_eq!(data[0], 0x51);
+        assert_eq!(data[1], 0x62);
     }
 }

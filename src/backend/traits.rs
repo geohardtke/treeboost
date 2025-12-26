@@ -44,6 +44,33 @@ pub trait BinStorage: Sync {
     fn as_row_major(&self) -> Option<&[u8]> {
         None
     }
+
+    /// Get maximum number of bins across all features.
+    fn max_bins(&self) -> u8 {
+        255 // Default: assume 8-bit bins
+    }
+
+    /// Check if dataset supports 4-bit bin packing.
+    ///
+    /// Returns true if all features have ≤16 bins.
+    fn supports_4bit(&self) -> bool {
+        self.max_bins() <= 16
+    }
+
+    /// Get 4-bit packed row-major layout (for tensor-tile backends with small bins).
+    ///
+    /// Packs two 4-bit bin values per byte:
+    /// - byte[i] = (feature[2i+1] << 4) | feature[2i]
+    ///
+    /// Returns None if not supported or storage is column-major.
+    fn as_row_major_4bit(&self) -> Option<&[u8]> {
+        None
+    }
+
+    /// Get bytes per row in 4-bit packed format.
+    fn bytes_per_row_4bit(&self) -> usize {
+        (self.num_features() + 1) / 2
+    }
 }
 
 /// Configuration for split finding.

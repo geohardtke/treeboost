@@ -257,6 +257,20 @@ impl HistogramBackend for WgpuBackend {
         let num_rows = bins.num_rows();
         let num_features = bins.num_features();
 
+        // Check if we can use 4-bit path (50% memory bandwidth reduction)
+        if bins.supports_4bit() {
+            if let Some(bins_4bit) = bins.as_row_major_4bit() {
+                return self.kernel.build_histograms_4bit(
+                    bins_4bit,
+                    grad_hess,
+                    row_indices,
+                    num_rows,
+                    num_features,
+                );
+            }
+        }
+
+        // Fall back to 8-bit path
         // Get row-major bins (converting if necessary)
         // Use Cow to avoid allocation when data is already row-major
         let bins_row_major: std::borrow::Cow<[u8]> = match bins.as_row_major() {
@@ -593,5 +607,154 @@ mod tests {
         }
 
         println!("WGPU correctly handles row indices");
+    }
+
+    /// Create a test dataset with known bin values for 4-bit testing
+    fn create_test_dataset_4bit(num_rows: usize, num_features: usize) -> BinnedDataset {
+        // Column-major layout: features[feature_idx * num_rows + row_idx]
+        let mut features = vec![0u8; num_rows * num_features];
+        for f in 0..num_features {
+            for r in 0..num_rows {
+                // Assign bins based on row index (0-15 for 4-bit)
+                features[f * num_rows + r] = (r % 16) as u8;
+            }
+        }
+
+        let targets: Vec<f32> = (0..num_rows).map(|i| i as f32).collect();
+        let feature_info: Vec<FeatureInfo> = (0..num_features)
+            .map(|i| FeatureInfo {
+                name: format!("feature_{}", i),
+                feature_type: FeatureType::Numeric,
+                num_bins: 16, // <=16 bins enables 4-bit path
+                bin_boundaries: vec![],
+            })
+            .collect();
+
+        BinnedDataset::new(num_rows, features, targets, feature_info)
+    }
+
+    #[test]
+    fn test_wgpu_4bit_matches_scalar() {
+        let wgpu_backend = match WgpuBackend::new() {
+            Some(b) => b,
+            None => {
+                println!("No GPU available, skipping WGPU 4-bit test");
+                return;
+            }
+        };
+        let scalar_backend = ScalarBackend::new();
+
+        // Create dataset with <=16 bins per feature (triggers 4-bit path)
+        let num_rows = 1000;
+        let num_features = 8;
+        let dataset = create_test_dataset_4bit(num_rows, num_features);
+
+        // Verify dataset supports 4-bit
+        assert!(dataset.supports_4bit());
+        assert!(dataset.max_bins() <= 16);
+
+        // Generate gradients and hessians
+        let grad_hess: Vec<(f32, f32)> = (0..num_rows)
+            .map(|i| (i as f32 * 0.01, 1.0))
+            .collect();
+
+        // Use all rows
+        let row_indices: Vec<usize> = (0..num_rows).collect();
+
+        // Build histograms with both backends
+        // WGPU should use 4-bit path automatically
+        let wgpu_hists = wgpu_backend.build_histograms(&dataset, &grad_hess, &row_indices);
+        let scalar_hists = scalar_backend.build_histograms(&dataset, &grad_hess, &row_indices);
+
+        assert_eq!(wgpu_hists.len(), scalar_hists.len());
+
+        // Compare histograms
+        for (f, (wgpu_hist, scalar_hist)) in wgpu_hists.iter().zip(scalar_hists.iter()).enumerate()
+        {
+            let (wgpu_total_grad, wgpu_total_hess, wgpu_total_count) = wgpu_hist.totals();
+            let (scalar_total_grad, scalar_total_hess, scalar_total_count) = scalar_hist.totals();
+
+            assert_eq!(
+                wgpu_total_count, scalar_total_count,
+                "Feature {}: count mismatch ({} vs {})",
+                f, wgpu_total_count, scalar_total_count
+            );
+
+            let grad_diff = (wgpu_total_grad - scalar_total_grad).abs();
+            let hess_diff = (wgpu_total_hess - scalar_total_hess).abs();
+
+            // Allow small tolerance for GPU float quantization
+            let grad_tolerance = scalar_total_grad.abs() * 0.01 + 0.1;
+            let hess_tolerance = scalar_total_hess.abs() * 0.01 + 0.1;
+
+            assert!(
+                grad_diff < grad_tolerance,
+                "Feature {}: gradient mismatch ({} vs {}, diff={})",
+                f,
+                wgpu_total_grad,
+                scalar_total_grad,
+                grad_diff
+            );
+            assert!(
+                hess_diff < hess_tolerance,
+                "Feature {}: hessian mismatch ({} vs {}, diff={})",
+                f,
+                wgpu_total_hess,
+                scalar_total_hess,
+                hess_diff
+            );
+        }
+
+        println!(
+            "WGPU 4-bit matches Scalar for {} rows × {} features (max_bins={})",
+            num_rows,
+            num_features,
+            dataset.max_bins()
+        );
+    }
+
+    #[test]
+    fn test_wgpu_4bit_with_odd_features() {
+        let wgpu_backend = match WgpuBackend::new() {
+            Some(b) => b,
+            None => {
+                println!("No GPU available, skipping WGPU 4-bit odd features test");
+                return;
+            }
+        };
+        let scalar_backend = ScalarBackend::new();
+
+        // Odd number of features to test nibble padding
+        let num_rows = 500;
+        let num_features = 7;
+        let dataset = create_test_dataset_4bit(num_rows, num_features);
+
+        assert!(dataset.supports_4bit());
+
+        let grad_hess: Vec<(f32, f32)> = (0..num_rows)
+            .map(|i| ((i as f32).sin() * 5.0, 1.0))
+            .collect();
+
+        let row_indices: Vec<usize> = (0..num_rows).collect();
+
+        let wgpu_hists = wgpu_backend.build_histograms(&dataset, &grad_hess, &row_indices);
+        let scalar_hists = scalar_backend.build_histograms(&dataset, &grad_hess, &row_indices);
+
+        // Verify counts match for all features
+        for f in 0..num_features {
+            let (_, _, wgpu_count) = wgpu_hists[f].totals();
+            let (_, _, scalar_count) = scalar_hists[f].totals();
+
+            assert_eq!(
+                wgpu_count, scalar_count,
+                "Feature {}: count mismatch with odd features",
+                f
+            );
+        }
+
+        println!(
+            "WGPU 4-bit correctly handles {} features (odd count)",
+            num_features
+        );
     }
 }
