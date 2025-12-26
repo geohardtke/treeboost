@@ -4,12 +4,23 @@
 
 use std::time::Instant;
 
-use treeboost::dataset::{BinnedDataset, FeatureInfo, FeatureType};
+use rayon::prelude::*;
+use treeboost::booster::{GBDTConfig, GBDTModel, LossType};
+use treeboost::dataset::{BinnedDataset, FeatureInfo, FeatureType, QuantileBinner};
 use treeboost::histogram::HistogramBuilder;
 use treeboost::tree::{SplitFinder, TreeGrower};
-use treeboost::booster::{GBDTConfig, GBDTModel, LossType};
 
-fn create_dataset(num_rows: usize, num_features: usize) -> BinnedDataset {
+/// Generate raw f32 features (row-major) and targets
+fn generate_raw_data(num_rows: usize, num_features: usize) -> (Vec<f32>, Vec<f32>) {
+    let features: Vec<f32> = (0..num_rows * num_features)
+        .map(|i| ((i * 17) % 1000) as f32 / 1000.0)
+        .collect();
+    let targets: Vec<f32> = (0..num_rows).map(|i| (i as f32 * 0.01).sin()).collect();
+    (features, targets)
+}
+
+/// Create pre-binned dataset (for train_binned benchmarks)
+fn create_binned_dataset(num_rows: usize, num_features: usize) -> BinnedDataset {
     let mut features = Vec::with_capacity(num_rows * num_features);
     for f in 0..num_features {
         for r in 0..num_rows {
@@ -31,554 +42,390 @@ fn create_dataset(num_rows: usize, num_features: usize) -> BinnedDataset {
 }
 
 fn main() {
-    println!("Detailed Training Breakdown");
-    println!("============================\n");
+    println!("═══════════════════════════════════════════════════════════════════════════════");
+    println!("                    TREEBOOST DETAILED TRAINING BREAKDOWN");
+    println!("═══════════════════════════════════════════════════════════════════════════════\n");
 
     let num_rows = 100_000;
     let num_features = 50;
     let num_rounds = 10;
 
-    println!("Dataset: {} rows × {} features", num_rows, num_features);
-    println!("Rounds: {}\n", num_rounds);
+    println!("Dataset:  {} rows × {} features", num_rows, num_features);
+    println!("Rounds:   {}", num_rounds);
+    println!("Max depth: 6, Max leaves: 31\n");
 
-    let dataset = create_dataset(num_rows, num_features);
+    // =========================================================================
+    // PHASE 1: BINNING (raw data → binned)
+    // =========================================================================
+    println!("───────────────────────────────────────────────────────────────────────────────");
+    println!("PHASE 1: BINNING (Converting raw floats → u8 bins)");
+    println!("───────────────────────────────────────────────────────────────────────────────\n");
 
-    // Create gradients that encourage splitting
-    let gradients: Vec<f32> = (0..num_rows)
-        .map(|i| if i < num_rows / 2 { -1.0 } else { 1.0 })
+    let (raw_features, raw_targets) = generate_raw_data(num_rows, num_features);
+    let binner = QuantileBinner::new(255);
+
+    // Sequential binning (old Python bindings behavior)
+    let start = Instant::now();
+    let mut _binned_seq = Vec::with_capacity(num_rows * num_features);
+    for f in 0..num_features {
+        let col: Vec<f64> = (0..num_rows)
+            .map(|r| raw_features[r * num_features + f] as f64)
+            .collect();
+        let boundaries = binner.compute_boundaries(&col);
+        let binned = binner.bin_column(&col, &boundaries);
+        _binned_seq.extend(binned);
+    }
+    let sequential_binning_time = start.elapsed().as_secs_f64() * 1000.0;
+    println!("Sequential binning:        {:>10.2} ms", sequential_binning_time);
+
+    // Parallel binning (new Rust high-level API)
+    let start = Instant::now();
+    let _binned_par: Vec<Vec<u8>> = (0..num_features)
+        .into_par_iter()
+        .map(|f| {
+            let col: Vec<f64> = (0..num_rows)
+                .map(|r| raw_features[r * num_features + f] as f64)
+                .collect();
+            let boundaries = binner.compute_boundaries(&col);
+            binner.bin_column(&col, &boundaries)
+        })
         .collect();
-    let hessians: Vec<f32> = vec![1.0; num_rows];
+    let parallel_binning_time = start.elapsed().as_secs_f64() * 1000.0;
+    println!("Parallel binning (Rayon):  {:>10.2} ms", parallel_binning_time);
+    println!(
+        "Speedup:                   {:>10.1}x",
+        sequential_binning_time / parallel_binning_time
+    );
 
     // =========================================================================
-    // 1. Single tree grow (what we optimized)
+    // PHASE 2: HIGH-LEVEL TRAIN (includes binning)
     // =========================================================================
-    println!("1. SINGLE TREE GROW");
-    println!("-------------------");
+    println!("\n───────────────────────────────────────────────────────────────────────────────");
+    println!("PHASE 2: HIGH-LEVEL train() (Raw floats → Trained model)");
+    println!("───────────────────────────────────────────────────────────────────────────────\n");
 
-    let grower = TreeGrower::new()
+    let config = GBDTConfig::new()
+        .with_num_rounds(num_rounds)
         .with_max_depth(6)
         .with_max_leaves(31)
         .with_learning_rate(0.1);
 
     // Warmup
-    for _ in 0..3 {
-        let _ = grower.grow(&dataset, &gradients, &hessians);
-    }
+    let _ = GBDTModel::train(&raw_features, num_features, &raw_targets, config.clone(), None);
 
-    let iterations = 20;
     let start = Instant::now();
-    for _ in 0..iterations {
-        let _ = grower.grow(&dataset, &gradients, &hessians);
-    }
-    let tree_grow_time = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
-    println!("Tree grow (avg of {}):     {:>8.3} ms", iterations, tree_grow_time);
+    let _ = GBDTModel::train(&raw_features, num_features, &raw_targets, config.clone(), None);
+    let high_level_train_time = start.elapsed().as_secs_f64() * 1000.0;
+
+    println!(
+        "GBDTModel::train():        {:>10.2} ms (includes binning)",
+        high_level_train_time
+    );
+    println!(
+        "  ├─ Binning (parallel):   {:>10.2} ms ({:.1}%)",
+        parallel_binning_time,
+        parallel_binning_time / high_level_train_time * 100.0
+    );
+    println!(
+        "  └─ Training:             {:>10.2} ms ({:.1}%)",
+        high_level_train_time - parallel_binning_time,
+        (high_level_train_time - parallel_binning_time) / high_level_train_time * 100.0
+    );
 
     // =========================================================================
-    // 2. Full training loop components
+    // PHASE 3: LOW-LEVEL TRAIN_BINNED (pre-binned data)
     // =========================================================================
-    println!("\n2. FULL TRAINING LOOP BREAKDOWN");
-    println!("--------------------------------");
+    println!("\n───────────────────────────────────────────────────────────────────────────────");
+    println!("PHASE 3: LOW-LEVEL train_binned() (Pre-binned → Trained model)");
+    println!("───────────────────────────────────────────────────────────────────────────────\n");
 
-    let config = GBDTConfig::new()
-        .with_num_rounds(num_rounds)
-        .with_max_depth(6)
-        .with_learning_rate(0.1);
+    let dataset = create_binned_dataset(num_rows, num_features);
 
     // Warmup
-    let _ = GBDTModel::train(&dataset, config.clone());
-
-    // Time full training
-    let start = Instant::now();
-    let _ = GBDTModel::train(&dataset, config.clone());
-    let total_train_time = start.elapsed().as_secs_f64() * 1000.0;
-
-    println!("Total training time:       {:>8.3} ms", total_train_time);
-    println!("Per round:                 {:>8.3} ms", total_train_time / num_rounds as f64);
-    println!("Tree grow portion:         {:>8.3} ms ({:.1}%)",
-        tree_grow_time * num_rounds as f64,
-        (tree_grow_time * num_rounds as f64 / total_train_time) * 100.0);
-
-    // =========================================================================
-    // 3. Gradient + Prediction update
-    // =========================================================================
-    println!("\n3. GRADIENT & PREDICTION UPDATE");
-    println!("--------------------------------");
-
-    let tree = grower.grow(&dataset, &gradients, &hessians);
-    let mut predictions = vec![0.0f32; num_rows];
-    let targets = dataset.targets();
-
-    // Gradient computation
-    let mut grads = vec![0.0f32; num_rows];
-    let mut hesss = vec![0.0f32; num_rows];
+    let _ = GBDTModel::train_binned(&dataset, config.clone());
 
     let start = Instant::now();
-    for _ in 0..iterations {
-        for i in 0..num_rows {
-            let residual = targets[i] - predictions[i];
-            grads[i] = -residual;
-            hesss[i] = 1.0;
-        }
-    }
-    let grad_time = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
-    println!("Gradient computation:      {:>8.3} ms", grad_time);
+    let _ = GBDTModel::train_binned(&dataset, config.clone());
+    let train_binned_time = start.elapsed().as_secs_f64() * 1000.0;
 
-    // Prediction update (batch add)
-    let start = Instant::now();
-    for _ in 0..iterations {
-        predictions.fill(0.0);
-        tree.predict_batch_add(&dataset, &mut predictions);
-    }
-    let predict_time = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
-    println!("Prediction update:         {:>8.3} ms", predict_time);
+    println!(
+        "GBDTModel::train_binned(): {:>10.2} ms",
+        train_binned_time
+    );
+    println!(
+        "Per round:                 {:>10.2} ms",
+        train_binned_time / num_rounds as f64
+    );
 
     // =========================================================================
-    // 4. Histogram building analysis
+    // PHASE 4: PER-ROUND BREAKDOWN
     // =========================================================================
-    println!("\n4. HISTOGRAM BUILDING ANALYSIS");
-    println!("-------------------------------");
-
-    let builder = HistogramBuilder::new();
-    let row_indices: Vec<usize> = (0..num_rows).collect();
-
-    // Full histogram build
-    let start = Instant::now();
-    for _ in 0..iterations {
-        let _ = builder.build(&dataset, &row_indices, &gradients, &hessians);
-    }
-    let full_hist_time = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
-    println!("Full histogram ({}k rows): {:>8.3} ms", num_rows/1000, full_hist_time);
-
-    // Histogram at different sizes (simulating tree levels)
-    let sizes = [50000, 25000, 12500, 6250, 3125, 1562];
-    let mut total_hist_estimate = full_hist_time;
-
-    for &size in &sizes {
-        let subset: Vec<usize> = (0..size).collect();
-        let start = Instant::now();
-        for _ in 0..iterations {
-            let _ = builder.build(&dataset, &subset, &gradients[..size], &hessians[..size]);
-        }
-        let time = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
-        println!("Histogram ({}k rows):      {:>8.3} ms", size/1000, time);
-        // Subtraction trick: we only build the smaller child
-        // At each level we have 2^level nodes, but only build half
-    }
-
-    // Histogram subtraction
-    let parent_hist = builder.build(&dataset, &row_indices, &gradients, &hessians);
-    let half_rows: Vec<usize> = (0..num_rows/2).collect();
-    let child_hist = builder.build(&dataset, &half_rows, &gradients[..num_rows/2], &hessians[..num_rows/2]);
-
-    let start = Instant::now();
-    for _ in 0..(iterations * 100) {
-        let _ = HistogramBuilder::build_sibling(&parent_hist, &child_hist);
-    }
-    let subtract_time = start.elapsed().as_secs_f64() * 1000.0 / (iterations * 100) as f64;
-    println!("Histogram subtraction:     {:>8.4} ms", subtract_time);
-
-    // =========================================================================
-    // 5. Split finding analysis
-    // =========================================================================
-    println!("\n5. SPLIT FINDING ANALYSIS");
-    println!("--------------------------");
-
-    let histograms = builder.build(&dataset, &row_indices, &gradients, &hessians);
-    let split_finder = SplitFinder::new()
-        .with_lambda(1.0)
-        .with_min_samples_leaf(1)
-        .with_min_hessian_leaf(1.0);
-
-    let total_grad: f32 = gradients.iter().sum();
-    let total_hess: f32 = hessians.iter().sum();
-
-    let start = Instant::now();
-    for _ in 0..(iterations * 10) {
-        let _ = split_finder.find_best_split(&histograms, total_grad, total_hess, num_rows as u32);
-    }
-    let split_time = start.elapsed().as_secs_f64() * 1000.0 / (iterations * 10) as f64;
-    println!("Split finding (1 node):    {:>8.4} ms", split_time);
-    println!("Split finding (30 nodes):  {:>8.3} ms", split_time * 30.0);
-
-    // =========================================================================
-    // 6. WHAT'S IN THE ACTUAL TREE GROW?
-    // =========================================================================
-    println!("\n6. TREE GROW COST BREAKDOWN");
-    println!("----------------------------");
-
-    // With subtraction trick, a 31-leaf tree needs:
-    // - 1 root histogram (100k rows)
-    // - ~15 smaller child histograms (using subtraction for the rest)
-    // - 30 split findings (one per internal node)
-    // - 30 histogram subtractions
-    // - 30 partitions (now in-place)
-
-    // Estimate histogram cost with subtraction trick
-    // Level 0: 1 hist @ 100k = full_hist_time
-    // Level 1: 1 hist @ 50k (smaller child)
-    // Level 2: 2 hist @ 25k
-    // Level 3: 4 hist @ 12.5k
-    // Level 4: 8 hist @ 6.25k
-    // Level 5: 15 hist @ 3k (remaining leaves)
-
-    // Get times for each size
-    let subset_50k: Vec<usize> = (0..50000).collect();
-    let start = Instant::now();
-    for _ in 0..iterations { let _ = builder.build(&dataset, &subset_50k, &gradients[..50000], &hessians[..50000]); }
-    let hist_50k = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
-
-    let subset_25k: Vec<usize> = (0..25000).collect();
-    let start = Instant::now();
-    for _ in 0..iterations { let _ = builder.build(&dataset, &subset_25k, &gradients[..25000], &hessians[..25000]); }
-    let hist_25k = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
-
-    let subset_12k: Vec<usize> = (0..12500).collect();
-    let start = Instant::now();
-    for _ in 0..iterations { let _ = builder.build(&dataset, &subset_12k, &gradients[..12500], &hessians[..12500]); }
-    let hist_12k = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
-
-    let subset_6k: Vec<usize> = (0..6250).collect();
-    let start = Instant::now();
-    for _ in 0..iterations { let _ = builder.build(&dataset, &subset_6k, &gradients[..6250], &hessians[..6250]); }
-    let hist_6k = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
-
-    let subset_3k: Vec<usize> = (0..3125).collect();
-    let start = Instant::now();
-    for _ in 0..iterations { let _ = builder.build(&dataset, &subset_3k, &gradients[..3125], &hessians[..3125]); }
-    let hist_3k = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
-
-    let estimated_hist_total = full_hist_time + hist_50k + 2.0*hist_25k + 4.0*hist_12k + 8.0*hist_6k;
-    let estimated_split_total = split_time * 30.0;
-    let estimated_subtract_total = subtract_time * 30.0;
-
-    println!("Histogram builds:          {:>8.3} ms", estimated_hist_total);
-    println!("  Root (100k):             {:>8.3} ms", full_hist_time);
-    println!("  Level 1 (50k×1):         {:>8.3} ms", hist_50k);
-    println!("  Level 2 (25k×2):         {:>8.3} ms", 2.0*hist_25k);
-    println!("  Level 3 (12k×4):         {:>8.3} ms", 4.0*hist_12k);
-    println!("  Level 4 (6k×8):          {:>8.3} ms", 8.0*hist_6k);
-    println!("Split finding (30×):       {:>8.3} ms", estimated_split_total);
-    println!("Histogram subtraction(30×):{:>8.3} ms", estimated_subtract_total);
-
-    let accounted = estimated_hist_total + estimated_split_total + estimated_subtract_total;
-    let unaccounted = tree_grow_time - accounted;
-
-    println!("---");
-    println!("ACCOUNTED:                 {:>8.3} ms", accounted);
-    println!("ACTUAL TREE GROW:          {:>8.3} ms", tree_grow_time);
-    println!("UNACCOUNTED OVERHEAD:      {:>8.3} ms ({:.1}%)",
-        unaccounted, (unaccounted / tree_grow_time) * 100.0);
-
-    // =========================================================================
-    // 7. LightGBM comparison
-    // =========================================================================
-    println!("\n7. VS LIGHTGBM");
-    println!("--------------");
-    let lgb_train = 268.0; // ms for 100 rounds on 100k×50
-    let lgb_per_round = lgb_train / 100.0;
-    let our_per_round = total_train_time / num_rounds as f64;
-
-    println!("LightGBM (100k×50, 100r):  {:>8.1} ms total", lgb_train);
-    println!("LightGBM per round:        {:>8.3} ms", lgb_per_round);
-    println!("TreeBoost per round:       {:>8.3} ms", our_per_round);
-    println!("Slowdown:                  {:>8.1}x", our_per_round / lgb_per_round);
-
-    println!("\nPer-round breakdown:");
-    println!("  Tree grow:               {:>8.3} ms", tree_grow_time);
-    println!("  Gradient:                {:>8.3} ms", grad_time);
-    println!("  Predict update:          {:>8.3} ms", predict_time);
-    println!("  Total estimated:         {:>8.3} ms", tree_grow_time + grad_time + predict_time);
-
-    // =========================================================================
-    // 8. MANUAL TRAINING LOOP (like GBDTModel::train but with timing)
-    // =========================================================================
-    println!("\n8. MANUAL TRAINING LOOP BREAKDOWN");
-    println!("----------------------------------");
+    println!("\n───────────────────────────────────────────────────────────────────────────────");
+    println!("PHASE 4: PER-ROUND BREAKDOWN (What happens each boosting iteration)");
+    println!("───────────────────────────────────────────────────────────────────────────────\n");
 
     let loss_fn = LossType::Mse.create();
     let targets = dataset.targets();
     let train_indices: Vec<usize> = (0..num_rows).collect();
 
-    // Compute base prediction
-    let start = Instant::now();
-    let base_prediction = 0.0f32; // simplified
-    let mut predictions = vec![base_prediction; num_rows];
+    let mut predictions = vec![0.0f32; num_rows];
     let mut gradients = vec![0.0f32; num_rows];
     let mut hessians = vec![0.0f32; num_rows];
-    let setup_time = start.elapsed().as_secs_f64() * 1000.0;
-    println!("Setup (alloc buffers):     {:>8.3} ms", setup_time);
 
     let grower = TreeGrower::new()
         .with_max_depth(6)
         .with_max_leaves(31)
         .with_learning_rate(0.1);
 
-    let mut total_gradient_time = 0.0;
-    let mut total_tree_grow_time = 0.0;
-    let mut total_predict_time = 0.0;
-    let mut total_sample_time = 0.0;
+    // Measure each component
+    let iterations = 10;
+    let mut gradient_times = Vec::with_capacity(iterations);
+    let mut tree_grow_times = Vec::with_capacity(iterations);
+    let mut predict_times = Vec::with_capacity(iterations);
 
-    for _round in 0..num_rounds {
-        // Gradient computation
+    for _ in 0..iterations {
+        // 1. Gradient computation
         let start = Instant::now();
         for &idx in &train_indices {
             let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
             gradients[idx] = g;
             hessians[idx] = h;
         }
-        total_gradient_time += start.elapsed().as_secs_f64() * 1000.0;
+        gradient_times.push(start.elapsed().as_secs_f64() * 1000.0);
 
-        // Sample indices (no subsampling, just copy)
+        // 2. Tree grow (FUSED path - gradient+histogram in single pass)
         let start = Instant::now();
-        let sample_indices: Vec<usize> = train_indices.clone();
-        total_sample_time += start.elapsed().as_secs_f64() * 1000.0;
+        let tree = grower.grow_fused(
+            &dataset,
+            &train_indices,
+            targets,
+            &predictions,
+            loss_fn.as_ref(),
+            &mut gradients,
+            &mut hessians,
+        );
+        tree_grow_times.push(start.elapsed().as_secs_f64() * 1000.0);
 
-        // Tree grow
-        let start = Instant::now();
-        let tree = grower.grow_with_indices(&dataset, &gradients, &hessians, &sample_indices);
-        total_tree_grow_time += start.elapsed().as_secs_f64() * 1000.0;
-
-        // Prediction update
+        // 3. Prediction update
         let start = Instant::now();
         tree.predict_batch_add(&dataset, &mut predictions);
-        total_predict_time += start.elapsed().as_secs_f64() * 1000.0;
+        predict_times.push(start.elapsed().as_secs_f64() * 1000.0);
     }
 
-    println!("Gradient comp (total):     {:>8.3} ms ({:.3} ms/round)",
-        total_gradient_time, total_gradient_time / num_rounds as f64);
-    println!("Sample indices (total):    {:>8.3} ms ({:.3} ms/round)",
-        total_sample_time, total_sample_time / num_rounds as f64);
-    println!("Tree grow (total):         {:>8.3} ms ({:.3} ms/round)",
-        total_tree_grow_time, total_tree_grow_time / num_rounds as f64);
-    println!("Predict update (total):    {:>8.3} ms ({:.3} ms/round)",
-        total_predict_time, total_predict_time / num_rounds as f64);
+    let avg_gradient = gradient_times.iter().sum::<f64>() / iterations as f64;
+    let avg_tree_grow = tree_grow_times.iter().sum::<f64>() / iterations as f64;
+    let avg_predict = predict_times.iter().sum::<f64>() / iterations as f64;
+    let avg_total = avg_gradient + avg_tree_grow + avg_predict;
 
-    let manual_total = total_gradient_time + total_sample_time + total_tree_grow_time + total_predict_time;
-    println!("---");
-    println!("MANUAL TOTAL:              {:>8.3} ms", manual_total);
-    println!("GBDTModel::train:          {:>8.3} ms", total_train_time);
-    println!("DIFFERENCE:                {:>8.3} ms", total_train_time - manual_total);
+    println!("FUSED PATH (no subsampling, no GOSS):");
+    println!(
+        "  1. Gradient computation: {:>10.3} ms ({:.1}%)",
+        avg_gradient,
+        avg_gradient / avg_total * 100.0
+    );
+    println!(
+        "  2. Tree grow (fused):    {:>10.3} ms ({:.1}%)",
+        avg_tree_grow,
+        avg_tree_grow / avg_total * 100.0
+    );
+    println!(
+        "  3. Prediction update:    {:>10.3} ms ({:.1}%)",
+        avg_predict,
+        avg_predict / avg_total * 100.0
+    );
+    println!("  ─────────────────────────────────────");
+    println!("  Total per round:         {:>10.3} ms", avg_total);
 
     // =========================================================================
-    // 9. SHUFFLED INDICES TEST (what GBDTModel::train does)
+    // PHASE 5: TREE GROW INTERNAL BREAKDOWN
     // =========================================================================
-    println!("\n9. SHUFFLED INDICES IMPACT");
-    println!("---------------------------");
+    println!("\n───────────────────────────────────────────────────────────────────────────────");
+    println!("PHASE 5: TREE GROW INTERNAL BREAKDOWN");
+    println!("───────────────────────────────────────────────────────────────────────────────\n");
 
-    use rand::seq::SliceRandom;
-    use rand::SeedableRng;
+    // Prepare gradients for histogram building
+    for &idx in &train_indices {
+        let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
+        gradients[idx] = g;
+        hessians[idx] = h;
+    }
 
-    let mut rng = rand::rngs::StdRng::seed_from_u64(123);
-    let mut shuffled_indices: Vec<usize> = (0..num_rows).collect();
-    shuffled_indices.shuffle(&mut rng);
+    let builder = HistogramBuilder::new();
+    let split_finder = SplitFinder::new()
+        .with_lambda(1.0)
+        .with_min_samples_leaf(1)
+        .with_min_hessian_leaf(1.0);
 
-    let mut predictions = vec![0.0f32; num_rows];
-    let mut gradients = vec![0.0f32; num_rows];
-    let mut hessians = vec![0.0f32; num_rows];
+    // Histogram building at various node sizes
+    // Note: Real child nodes have scattered indices, not contiguous!
+    // We test BOTH cases to show the difference
+    println!("Histogram building (scales with node size):");
+    println!("  [Contiguous path - root node]");
+    let sizes = [
+        (num_rows, "root"),
+        (50_000, "level 1"),
+        (25_000, "level 2"),
+        (12_500, "level 3"),
+        (6_250, "level 4"),
+        (3_125, "level 5"),
+    ];
 
-    let mut total_gradient_shuffled = 0.0;
-    let mut total_tree_grow_shuffled = 0.0;
-    let mut total_predict_shuffled = 0.0;
-
-    for _round in 0..num_rounds {
-        // Gradient computation with SHUFFLED indices
+    let mut hist_times = Vec::new();
+    for (size, label) in sizes.iter() {
+        let subset: Vec<usize> = (0..*size).collect();
         let start = Instant::now();
-        for &idx in &shuffled_indices {
-            let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
-            gradients[idx] = g;
-            hessians[idx] = h;
+        for _ in 0..iterations {
+            let _ = builder.build(&dataset, &subset, &gradients[..*size], &hessians[..*size]);
         }
-        total_gradient_shuffled += start.elapsed().as_secs_f64() * 1000.0;
+        let time = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
+        hist_times.push(time);
+        println!("  {:>6} rows ({}):    {:>10.3} ms", size, label, time);
+    }
 
-        // Tree grow with SHUFFLED indices
+    // Test with SCATTERED indices (simulates real child nodes after partition)
+    println!("\n  [Scattered path - child nodes after partition]");
+    let mut scattered_hist_times = Vec::new();
+    for (size, label) in sizes.iter().skip(1) {
+        // Create scattered indices: every other row
+        let scattered: Vec<usize> = (0..num_rows).step_by(num_rows / size).take(*size).collect();
         let start = Instant::now();
-        let tree = grower.grow_with_indices(&dataset, &gradients, &hessians, &shuffled_indices);
-        total_tree_grow_shuffled += start.elapsed().as_secs_f64() * 1000.0;
-
-        // Prediction update
-        let start = Instant::now();
-        tree.predict_batch_add(&dataset, &mut predictions);
-        total_predict_shuffled += start.elapsed().as_secs_f64() * 1000.0;
-    }
-
-    println!("With SEQUENTIAL indices:");
-    println!("  Gradient:                {:>8.3} ms/round", total_gradient_time / num_rounds as f64);
-    println!("  Tree grow:               {:>8.3} ms/round", total_tree_grow_time / num_rounds as f64);
-    println!("  Predict:                 {:>8.3} ms/round", total_predict_time / num_rounds as f64);
-    println!("\nWith SHUFFLED indices (like GBDTModel::train):");
-    println!("  Gradient:                {:>8.3} ms/round", total_gradient_shuffled / num_rounds as f64);
-    println!("  Tree grow:               {:>8.3} ms/round", total_tree_grow_shuffled / num_rounds as f64);
-    println!("  Predict:                 {:>8.3} ms/round", total_predict_shuffled / num_rounds as f64);
-
-    let seq_total = (total_gradient_time + total_tree_grow_time + total_predict_time) / num_rounds as f64;
-    let shuf_total = (total_gradient_shuffled + total_tree_grow_shuffled + total_predict_shuffled) / num_rounds as f64;
-    println!("\nTotal per round:");
-    println!("  Sequential:              {:>8.3} ms", seq_total);
-    println!("  Shuffled:                {:>8.3} ms", shuf_total);
-    println!("  Slowdown:                {:>8.1}x", shuf_total / seq_total);
-
-    // =========================================================================
-    // 10. GBDTMODEL::TRAIN OVERHEAD INVESTIGATION
-    // =========================================================================
-    println!("\n10. GBDTModel::train OVERHEAD BREAKDOWN");
-    println!("----------------------------------------");
-
-    // Measure what GBDTModel::train does that we're not measuring
-
-    // 1. split_for_training
-    let start = Instant::now();
-    for _ in 0..100 {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(123);
-        let mut indices: Vec<usize> = (0..num_rows).collect();
-        indices.shuffle(&mut rng);
-        std::hint::black_box(&indices);
-    }
-    let split_time = start.elapsed().as_secs_f64() * 1000.0 / 100.0;
-    println!("split_for_training (shuffle): {:>8.3} ms", split_time);
-
-    // 2. initial_prediction computation
-    let start = Instant::now();
-    for _ in 0..100 {
-        let train_targets: Vec<f32> = (0..num_rows).map(|i| targets[i]).collect();
-        let _base = train_targets.iter().sum::<f32>() / train_targets.len() as f32;
-    }
-    let init_pred_time = start.elapsed().as_secs_f64() * 1000.0 / 100.0;
-    println!("initial_prediction:           {:>8.3} ms", init_pred_time);
-
-    // 3. TreeGrower setup
-    let start = Instant::now();
-    for _ in 0..1000 {
-        let _grower = TreeGrower::new()
-            .with_max_depth(6)
-            .with_max_leaves(31)
-            .with_lambda(1.0)
-            .with_min_samples_leaf(1)
-            .with_min_hessian_leaf(1.0)
-            .with_entropy_weight(0.0)
-            .with_min_gain(0.0)
-            .with_learning_rate(0.1)
-            .with_colsample(1.0);
-    }
-    let grower_setup_time = start.elapsed().as_secs_f64() * 1000.0 / 1000.0;
-    println!("TreeGrower setup:             {:>8.4} ms", grower_setup_time);
-
-    // 4. sample_indices.extend_from_slice (what happens when no subsampling)
-    let mut sample_buf: Vec<usize> = Vec::with_capacity(num_rows);
-    let start = Instant::now();
-    for _ in 0..100 {
-        sample_buf.clear();
-        sample_buf.extend_from_slice(&shuffled_indices);
-    }
-    let extend_time = start.elapsed().as_secs_f64() * 1000.0 / 100.0;
-    println!("sample_indices extend:        {:>8.3} ms", extend_time);
-
-    // 5. trees.push(tree) - Vec allocation for tree storage
-    let mut trees_vec: Vec<treeboost::tree::Tree> = Vec::with_capacity(num_rounds);
-    let tree = grower.grow(&dataset, &gradients, &hessians);
-    let start = Instant::now();
-    for _ in 0..1000 {
-        trees_vec.push(tree.clone());
-    }
-    let push_time = start.elapsed().as_secs_f64() * 1000.0 / 1000.0;
-    println!("trees.push (clone):           {:>8.4} ms", push_time);
-
-    // 6. Full GBDTModel::train with timing points
-    println!("\nComparing 10 rounds:");
-
-    // What we measured in manual loop
-    let manual_per_round = (total_gradient_time + total_sample_time + total_tree_grow_time + total_predict_time) / num_rounds as f64;
-
-    // What GBDTModel::train does extra per round:
-    // - Nothing per round that we haven't measured, EXCEPT...
-
-    // Check if it's the sample_indices.clone() vs extend_from_slice
-    let start = Instant::now();
-    for _ in 0..100 {
-        let _cloned: Vec<usize> = shuffled_indices.clone();
-    }
-    let clone_time = start.elapsed().as_secs_f64() * 1000.0 / 100.0;
-    println!("Vec::clone (100k usize):      {:>8.3} ms", clone_time);
-
-    // One-time setup costs
-    let one_time = split_time + init_pred_time + grower_setup_time;
-    println!("\nOne-time setup costs:         {:>8.3} ms", one_time);
-    println!("Per-round overhead (extend):  {:>8.3} ms × {} = {:.3} ms",
-        extend_time, num_rounds, extend_time * num_rounds as f64);
-
-    let total_overhead = one_time + extend_time * num_rounds as f64;
-    println!("Total estimated overhead:     {:>8.3} ms", total_overhead);
-    println!("Actual difference:            {:>8.3} ms", total_train_time - manual_total);
-    println!("Still unexplained:            {:>8.3} ms",
-        (total_train_time - manual_total) - total_overhead);
-
-    // =========================================================================
-    // 11. COMPARE MANUAL LOOP WITH SHUFFLED INDICES
-    // =========================================================================
-    println!("\n11. MANUAL LOOP WITH SHUFFLED INDICES");
-    println!("--------------------------------------");
-    println!("(This should match GBDTModel::train more closely)");
-
-    // Reset state
-    let mut predictions = vec![0.0f32; num_rows];
-    let mut gradients = vec![0.0f32; num_rows];
-    let mut hessians = vec![0.0f32; num_rows];
-    let mut sample_indices_buf: Vec<usize> = Vec::with_capacity(num_rows);
-
-    let start_full = Instant::now();
-
-    // One-time: shuffle indices (what split_for_training does)
-    let mut rng = rand::rngs::StdRng::seed_from_u64(123);
-    let mut train_indices_shuffled: Vec<usize> = (0..num_rows).collect();
-    train_indices_shuffled.shuffle(&mut rng);
-
-    let mut loop_gradient_time = 0.0;
-    let mut loop_sample_time = 0.0;
-    let mut loop_tree_time = 0.0;
-    let mut loop_predict_time = 0.0;
-
-    for _round in 0..num_rounds {
-        // Gradient computation with SHUFFLED indices
-        let start = Instant::now();
-        for &idx in &train_indices_shuffled {
-            let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
-            gradients[idx] = g;
-            hessians[idx] = h;
+        for _ in 0..iterations {
+            let _ = builder.build(&dataset, &scattered, &gradients, &hessians);
         }
-        loop_gradient_time += start.elapsed().as_secs_f64() * 1000.0;
-
-        // Sample indices (extend from shuffled)
-        let start = Instant::now();
-        sample_indices_buf.clear();
-        sample_indices_buf.extend_from_slice(&train_indices_shuffled);
-        loop_sample_time += start.elapsed().as_secs_f64() * 1000.0;
-
-        // Tree grow with SHUFFLED indices
-        let start = Instant::now();
-        let tree = grower.grow_with_indices(&dataset, &gradients, &hessians, &sample_indices_buf);
-        loop_tree_time += start.elapsed().as_secs_f64() * 1000.0;
-
-        // Prediction update
-        let start = Instant::now();
-        tree.predict_batch_add(&dataset, &mut predictions);
-        loop_predict_time += start.elapsed().as_secs_f64() * 1000.0;
+        let time = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
+        scattered_hist_times.push(time);
+        println!("  {:>6} rows ({}):    {:>10.3} ms (scattered)", size, label, time);
     }
 
-    let full_loop_time = start_full.elapsed().as_secs_f64() * 1000.0;
+    // Histogram subtraction
+    let parent_hist = builder.build(&dataset, &train_indices, &gradients, &hessians);
+    let half: Vec<usize> = (0..num_rows / 2).collect();
+    let child_hist = builder.build(&dataset, &half, &gradients[..num_rows / 2], &hessians[..num_rows / 2]);
 
-    println!("Per-round breakdown (shuffled indices):");
-    println!("  Gradient:                {:>8.3} ms", loop_gradient_time / num_rounds as f64);
-    println!("  Sample indices:          {:>8.3} ms", loop_sample_time / num_rounds as f64);
-    println!("  Tree grow:               {:>8.3} ms", loop_tree_time / num_rounds as f64);
-    println!("  Predict:                 {:>8.3} ms", loop_predict_time / num_rounds as f64);
+    let start = Instant::now();
+    for _ in 0..iterations * 100 {
+        let _ = HistogramBuilder::build_sibling(&parent_hist, &child_hist);
+    }
+    let subtract_time = start.elapsed().as_secs_f64() * 1000.0 / (iterations * 100) as f64;
+    println!("\nHistogram subtraction:     {:>10.4} ms (nearly free!)", subtract_time);
 
-    let loop_total = loop_gradient_time + loop_sample_time + loop_tree_time + loop_predict_time;
-    println!("\nTotals (10 rounds):");
-    println!("  Sum of components:       {:>8.3} ms", loop_total);
-    println!("  Full loop measured:      {:>8.3} ms", full_loop_time);
-    println!("  Timing overhead:         {:>8.3} ms", full_loop_time - loop_total);
+    // Split finding
+    let total_grad: f32 = gradients.iter().sum();
+    let total_hess: f32 = hessians.iter().sum();
 
-    println!("\nComparison:");
-    println!("  Manual (shuffled):       {:>8.3} ms", full_loop_time);
-    println!("  GBDTModel::train:        {:>8.3} ms", total_train_time);
-    println!("  Difference:              {:>8.3} ms", total_train_time - full_loop_time);
+    let start = Instant::now();
+    for _ in 0..iterations * 10 {
+        let _ = split_finder.find_best_split(&parent_hist, total_grad, total_hess, num_rows as u32);
+    }
+    let split_time = start.elapsed().as_secs_f64() * 1000.0 / (iterations * 10) as f64;
+    println!("Split finding (per node):  {:>10.4} ms", split_time);
+
+    // Tree cost estimate (31-leaf tree)
+    // With subtraction trick: build smaller child, subtract for larger
+    // Level 0: 1 histogram @ 100k (contiguous - root)
+    // Level 1: 1 histogram @ 50k (scattered - smaller child)
+    // Level 2: 2 histograms @ 25k (scattered)
+    // Level 3: 4 histograms @ 12.5k (scattered)
+    // Level 4: 8 histograms @ 6.25k (scattered)
+    // Total: ~15-16 histogram builds + 15 subtractions + 30 split finds
+
+    // Use scattered times for child nodes (they have non-contiguous indices!)
+    let estimated_hist_cost = hist_times[0]  // root (contiguous)
+        + scattered_hist_times[0]            // level 1 (scattered)
+        + 2.0 * scattered_hist_times[1]      // level 2
+        + 4.0 * scattered_hist_times[2]      // level 3
+        + 8.0 * scattered_hist_times[3];     // level 4
+    let estimated_split_cost = split_time * 30.0;
+    let estimated_subtract_cost = subtract_time * 15.0;
+    let estimated_total = estimated_hist_cost + estimated_split_cost + estimated_subtract_cost;
+
+    println!("\n31-leaf tree cost estimate:");
+    println!("  Histogram builds:        {:>10.3} ms", estimated_hist_cost);
+    println!("  Split finding (30×):     {:>10.3} ms", estimated_split_cost);
+    println!("  Subtraction (15×):       {:>10.4} ms", estimated_subtract_cost);
+    println!("  ─────────────────────────────────────");
+    println!("  Estimated total:         {:>10.3} ms", estimated_total);
+    println!("  Actual tree grow:        {:>10.3} ms", avg_tree_grow);
+    println!(
+        "  Unaccounted:             {:>10.3} ms (row partitioning, allocations)",
+        avg_tree_grow - estimated_total
+    );
+
+    // =========================================================================
+    // PHASE 6: COMPARISON WITH LIGHTGBM
+    // =========================================================================
+    println!("\n───────────────────────────────────────────────────────────────────────────────");
+    println!("PHASE 6: COMPARISON WITH LIGHTGBM");
+    println!("───────────────────────────────────────────────────────────────────────────────\n");
+
+    // LightGBM benchmark reference (100k×50, 100 rounds)
+    let lgb_total = 258.0; // ms from benchmark
+    let lgb_per_round = lgb_total / 100.0;
+
+    let our_per_round = train_binned_time / num_rounds as f64;
+    let our_100_rounds = our_per_round * 100.0;
+
+    println!("100k×50 dataset, 100 rounds:");
+    println!("  LightGBM:                {:>10.1} ms ({:.2} ms/round)", lgb_total, lgb_per_round);
+    println!(
+        "  TreeBoost:               {:>10.1} ms ({:.2} ms/round)",
+        our_100_rounds, our_per_round
+    );
+    println!(
+        "  Gap:                     {:>10.1}x slower",
+        our_per_round / lgb_per_round
+    );
+
+    println!("\nPer-round comparison:");
+    println!("  LightGBM per round:      {:>10.2} ms", lgb_per_round);
+    println!("  TreeBoost per round:     {:>10.2} ms", our_per_round);
+    println!(
+        "  Difference:              {:>10.2} ms",
+        our_per_round - lgb_per_round
+    );
+
+    // =========================================================================
+    // PHASE 7: WHERE IS THE TIME GOING?
+    // =========================================================================
+    println!("\n───────────────────────────────────────────────────────────────────────────────");
+    println!("PHASE 7: TIME DISTRIBUTION SUMMARY");
+    println!("───────────────────────────────────────────────────────────────────────────────\n");
+
+    let binning_pct = parallel_binning_time / high_level_train_time * 100.0;
+    let training_pct = 100.0 - binning_pct;
+
+    let hist_pct = estimated_hist_cost / avg_tree_grow * 100.0;
+    let split_pct = estimated_split_cost / avg_tree_grow * 100.0;
+    let other_pct = 100.0 - hist_pct - split_pct;
+
+    println!("HIGH-LEVEL train() breakdown:");
+    println!("  ┌─ Binning:               {:>6.1}% ({:.1} ms)", binning_pct, parallel_binning_time);
+    println!("  └─ Training:             {:>6.1}% ({:.1} ms)", training_pct, high_level_train_time - parallel_binning_time);
+
+    println!("\nPer-round breakdown:");
+    println!("  ┌─ Tree grow:             {:>6.1}% ({:.2} ms)", avg_tree_grow / avg_total * 100.0, avg_tree_grow);
+    println!("  │   ├─ Histogram build:   {:>6.1}%", hist_pct);
+    println!("  │   ├─ Split finding:     {:>6.1}%", split_pct);
+    println!("  │   └─ Other (partition): {:>6.1}%", other_pct);
+    println!("  ├─ Gradient compute:     {:>6.1}% ({:.2} ms)", avg_gradient / avg_total * 100.0, avg_gradient);
+    println!("  └─ Prediction update:    {:>6.1}% ({:.2} ms)", avg_predict / avg_total * 100.0, avg_predict);
+
+    println!("\n───────────────────────────────────────────────────────────────────────────────");
+    println!("OPTIMIZATION TARGETS:");
+    println!("───────────────────────────────────────────────────────────────────────────────");
+    println!();
+    println!("1. HISTOGRAM BUILDING ({:.1} ms, {:.0}% of tree grow)", estimated_hist_cost, hist_pct);
+    println!("   - Current: Feature-parallel with Rayon");
+    println!("   - LightGBM: SIMD-optimized inner loop (AVX2)");
+    println!("   - Potential: 2-4x speedup with explicit SIMD");
+    println!();
+    println!("2. ROW PARTITIONING ({:.1} ms, {:.0}% of tree grow)", avg_tree_grow - estimated_total, other_pct);
+    println!("   - Current: In-place partitioning");
+    println!("   - LightGBM: Bin-based sorting, cache-aware");
+    println!("   - Potential: Review memory access patterns");
+    println!();
+    println!("3. GRADIENT COMPUTATION ({:.2} ms)", avg_gradient);
+    println!("   - Current: Fused with histogram in single pass");
+    println!("   - Already optimized via fused path!");
+    println!();
 }
