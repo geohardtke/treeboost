@@ -2,6 +2,7 @@
 
 use crate::dataset::BinnedDataset;
 use crate::tree::{Node, NodeType};
+use rayon::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// Decision tree
@@ -150,6 +151,8 @@ impl Tree {
     /// Similar to predict_batch_add but uses split_value for comparison
     /// instead of bin thresholds. Input is raw feature values, not binned data.
     ///
+    /// Uses parallel execution for large datasets (>= 10K rows).
+    ///
     /// # Arguments
     /// * `features` - Row-major feature matrix: features[row * num_features + feature]
     /// * `num_features` - Number of features per row
@@ -159,31 +162,47 @@ impl Tree {
         let num_rows = predictions.len();
         debug_assert_eq!(features.len(), num_rows * num_features);
 
-        for row_idx in 0..num_rows {
-            let row_offset = row_idx * num_features;
-            let mut node_idx = 0;
+        // Parallel threshold - overhead not worth it for small datasets
+        const PARALLEL_THRESHOLD: usize = 10_000;
 
-            loop {
-                let node = &self.nodes[node_idx];
-                match node.node_type {
-                    NodeType::Leaf { value } => {
-                        predictions[row_idx] += value;
-                        break;
-                    }
-                    NodeType::Internal {
-                        feature_idx,
-                        split_value,
-                        left_child,
-                        right_child,
-                        ..
-                    } => {
-                        let value = features[row_offset + feature_idx];
-                        node_idx = if value <= split_value {
-                            left_child
-                        } else {
-                            right_child
-                        };
-                    }
+        if num_rows >= PARALLEL_THRESHOLD {
+            // Parallel: each row is independent
+            predictions.par_iter_mut().enumerate().for_each(|(row_idx, pred)| {
+                *pred += self.predict_row_raw_inner(features, num_features, row_idx);
+            });
+        } else {
+            // Sequential for small datasets
+            for row_idx in 0..num_rows {
+                predictions[row_idx] += self.predict_row_raw_inner(features, num_features, row_idx);
+            }
+        }
+    }
+
+    /// Inner prediction logic for a single row using raw features
+    #[inline]
+    fn predict_row_raw_inner(&self, features: &[f64], num_features: usize, row_idx: usize) -> f32 {
+        let row_offset = row_idx * num_features;
+        let mut node_idx = 0;
+
+        loop {
+            let node = &self.nodes[node_idx];
+            match node.node_type {
+                NodeType::Leaf { value } => {
+                    return value;
+                }
+                NodeType::Internal {
+                    feature_idx,
+                    split_value,
+                    left_child,
+                    right_child,
+                    ..
+                } => {
+                    let value = features[row_offset + feature_idx];
+                    node_idx = if value <= split_value {
+                        left_child
+                    } else {
+                        right_child
+                    };
                 }
             }
         }
@@ -194,6 +213,8 @@ impl Tree {
     /// This is the tree-wise prediction approach: traverse one tree for ALL rows,
     /// then move to the next tree. More cache-friendly than row-wise traversal.
     ///
+    /// Uses parallel execution for large datasets (>= 10K rows).
+    ///
     /// # Arguments
     /// * `dataset` - The binned dataset
     /// * `predictions` - Mutable slice to accumulate predictions into
@@ -202,30 +223,46 @@ impl Tree {
         let num_rows = predictions.len();
         debug_assert_eq!(num_rows, dataset.num_rows());
 
-        for row_idx in 0..num_rows {
-            let mut node_idx = 0;
+        // Parallel threshold - overhead not worth it for small datasets
+        const PARALLEL_THRESHOLD: usize = 10_000;
 
-            loop {
-                let node = &self.nodes[node_idx];
-                match node.node_type {
-                    NodeType::Leaf { value } => {
-                        predictions[row_idx] += value;
-                        break;
-                    }
-                    NodeType::Internal {
-                        feature_idx,
-                        bin_threshold,
-                        left_child,
-                        right_child,
-                        ..
-                    } => {
-                        let bin = dataset.get_bin(row_idx, feature_idx);
-                        node_idx = if bin <= bin_threshold {
-                            left_child
-                        } else {
-                            right_child
-                        };
-                    }
+        if num_rows >= PARALLEL_THRESHOLD {
+            // Parallel: each row is independent
+            predictions.par_iter_mut().enumerate().for_each(|(row_idx, pred)| {
+                *pred += self.predict_row_inner(dataset, row_idx);
+            });
+        } else {
+            // Sequential for small datasets
+            for row_idx in 0..num_rows {
+                predictions[row_idx] += self.predict_row_inner(dataset, row_idx);
+            }
+        }
+    }
+
+    /// Inner prediction logic for a single row (used by both parallel and sequential paths)
+    #[inline]
+    fn predict_row_inner(&self, dataset: &BinnedDataset, row_idx: usize) -> f32 {
+        let mut node_idx = 0;
+
+        loop {
+            let node = &self.nodes[node_idx];
+            match node.node_type {
+                NodeType::Leaf { value } => {
+                    return value;
+                }
+                NodeType::Internal {
+                    feature_idx,
+                    bin_threshold,
+                    left_child,
+                    right_child,
+                    ..
+                } => {
+                    let bin = dataset.get_bin(row_idx, feature_idx);
+                    node_idx = if bin <= bin_threshold {
+                        left_child
+                    } else {
+                        right_child
+                    };
                 }
             }
         }
