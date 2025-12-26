@@ -38,7 +38,7 @@ pub struct WgpuBackend {
     device: Arc<GpuDevice>,
     kernel: HistogramKernel,
     /// CPU fallback for small row counts where GPU overhead dominates
-    cpu_fallback: ScalarBackend,
+    _cpu_fallback: ScalarBackend,
 }
 
 impl WgpuBackend {
@@ -59,7 +59,7 @@ impl WgpuBackend {
         Some(Self {
             device,
             kernel,
-            cpu_fallback: ScalarBackend::new(),
+            _cpu_fallback: ScalarBackend::new(),
         })
     }
 

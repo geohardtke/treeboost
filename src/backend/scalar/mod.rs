@@ -27,7 +27,7 @@ use crate::histogram::Histogram;
 pub struct ScalarBackend {
     /// Number of threads for parallel processing.
     /// 0 means use Rayon's default (typically number of CPU cores).
-    num_threads: usize,
+    _num_threads: usize,
 }
 
 impl ScalarBackend {
@@ -38,7 +38,7 @@ impl ScalarBackend {
 
     /// Create a scalar backend with a specific thread count.
     pub fn with_threads(num_threads: usize) -> Self {
-        Self { num_threads }
+        Self { _num_threads: num_threads }
     }
 }
 

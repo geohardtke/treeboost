@@ -157,7 +157,7 @@ impl SplitCandidate {
 /// State for a split being processed in a batch
 struct BatchedSplitState {
     /// Original candidate info
-    node_idx: usize,
+    _node_idx: usize,
     split_info: SplitInfo,
     parent_histograms: NodeHistograms,
     ancestor_features: Vec<usize>,
@@ -629,7 +629,7 @@ impl TreeGrower {
 
                 // Store state for batched histogram building
                 batch_states.push(BatchedSplitState {
-                    node_idx: candidate.node_idx,
+                    _node_idx: candidate.node_idx,
                     split_info,
                     parent_histograms,
                     ancestor_features: candidate.ancestor_features,
@@ -971,7 +971,7 @@ impl TreeGrower {
                     };
 
                 batch_states.push(BatchedSplitState {
-                    node_idx: candidate.node_idx,
+                    _node_idx: candidate.node_idx,
                     split_info,
                     parent_histograms,
                     ancestor_features: candidate.ancestor_features,
