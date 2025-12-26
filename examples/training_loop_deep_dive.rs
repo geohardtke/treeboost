@@ -481,7 +481,7 @@ fn main() {
     section_header("SECTION 5: DATA TRANSFER ANALYSIS");
 
     let bins_size = num_rows * num_features;
-    let grad_hess_size = num_rows * 8; // 2 x f32
+    let grad_hess_size = num_rows * 4; // packed i16 pair in u32
     let hist_size = num_features * 256 * 12; // 3 x f32 per bin
 
     println!("\nData sizes:");

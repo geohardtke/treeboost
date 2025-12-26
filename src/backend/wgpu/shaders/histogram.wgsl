@@ -3,12 +3,19 @@
 // Computes gradient/hessian histograms for GBDT training.
 // One workgroup per feature, 256 threads per workgroup.
 //
-// Optimization: Uses workgroup shared memory to reduce global atomic contention.
-// Each workgroup accumulates to shared memory first, then writes once to global.
+// Optimization: Uses fixed-point arithmetic with native atomicAdd.
+// This eliminates expensive CAS loops required for f32 atomics.
+//
+// Fixed-point format:
+// - Gradients/hessians are packed as i16 pairs in u32 (2x bandwidth reduction)
+// - Each u32 contains: low 16 bits = gradient, high 16 bits = hessian
+// - Scale factor: 2^10 = 1024 (allows values up to ±31.99 with 0.001 precision)
+// - Shader unpacks to i32 and uses native atomicAdd
+// - Results are de-scaled on CPU after download
 //
 // Data layout:
 // - bins: row-major [row * num_features + feature] -> u32 (packed as u8)
-// - grad_hess: [row * 2], [row * 2 + 1] -> gradient, hessian
+// - grad_hess: [row] -> u32 (packed i16 gradient in low bits, i16 hessian in high bits)
 // - histograms: [feature * 256 + bin] -> BinEntry (single batch)
 // - histograms (batched): [batch * num_features * 256 + feature * 256 + bin]
 
@@ -17,7 +24,7 @@ struct Params {
     num_rows: u32,
     num_features: u32,
     num_indices: u32,  // Length of row_indices (0 = use all rows) - for single batch mode
-    num_batches: u32,  // Number of batches (0 or 1 = single batch mode)
+    num_batches: u32,  // Number of batches (0 or 1 = single batch mode, >1 = batched mode)
 }
 
 // Batch descriptor: start offset and count in the concatenated row_indices array
@@ -28,26 +35,46 @@ struct BatchInfo {
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> bins: array<u32>;  // Packed u8 bins
-@group(0) @binding(2) var<storage, read> grad_hess: array<f32>;  // Interleaved [g0,h0,g1,h1,...]
+@group(0) @binding(2) var<storage, read> grad_hess: array<u32>;  // Packed i16 pairs: low=grad, high=hess
 @group(0) @binding(3) var<storage, read> row_indices: array<u32>;  // Row indices (concatenated for batched mode)
 
-// Output histogram bins: [sum_grad (as u32 bits), sum_hess (as u32 bits), count]
-@group(0) @binding(4) var<storage, read_write> hist_grad_bits: array<atomic<u32>>;
-@group(0) @binding(5) var<storage, read_write> hist_hess_bits: array<atomic<u32>>;
+// Output histogram bins: fixed-point i32 for grad/hess, u32 for count
+@group(0) @binding(4) var<storage, read_write> hist_grad: array<atomic<i32>>;
+@group(0) @binding(5) var<storage, read_write> hist_hess: array<atomic<i32>>;
 @group(0) @binding(6) var<storage, read_write> hist_counts: array<atomic<u32>>;
 
 // Batch info for batched mode: array of (start, count) pairs
 @group(0) @binding(11) var<storage, read> batch_info: array<BatchInfo>;
 
 // Workgroup shared memory for local histogram accumulation
-// 256 bins × 3 values = 768 atomic u32s = 3KB
-var<workgroup> local_grad_bits: array<atomic<u32>, 256>;
-var<workgroup> local_hess_bits: array<atomic<u32>, 256>;
+// 256 bins × 3 values = 768 atomic i32/u32 = 3KB
+var<workgroup> local_grad: array<atomic<i32>, 256>;
+var<workgroup> local_hess: array<atomic<i32>, 256>;
 var<workgroup> local_counts: array<atomic<u32>, 256>;
 
 // Extract u8 bin value from packed u32
 fn get_bin(packed: u32, byte_idx: u32) -> u32 {
     return (packed >> (byte_idx * 8u)) & 0xFFu;
+}
+
+// Unpack i16 gradient from low 16 bits of packed u32, with sign extension to i32
+fn unpack_grad(packed: u32) -> i32 {
+    let raw = packed & 0xFFFFu;
+    // Sign extend: if bit 15 is set, extend to full i32
+    if (raw & 0x8000u) != 0u {
+        return i32(raw | 0xFFFF0000u);
+    }
+    return i32(raw);
+}
+
+// Unpack i16 hessian from high 16 bits of packed u32, with sign extension to i32
+fn unpack_hess(packed: u32) -> i32 {
+    let raw = (packed >> 16u) & 0xFFFFu;
+    // Sign extend: if bit 15 is set, extend to full i32
+    if (raw & 0x8000u) != 0u {
+        return i32(raw | 0xFFFF0000u);
+    }
+    return i32(raw);
 }
 
 @compute @workgroup_size(256, 1, 1)
@@ -61,8 +88,8 @@ fn histogram_dense(
 
     // Initialize shared memory histogram to zero
     // Each thread initializes one bin
-    atomicStore(&local_grad_bits[thread_id], 0u);
-    atomicStore(&local_hess_bits[thread_id], 0u);
+    atomicStore(&local_grad[thread_id], 0i);
+    atomicStore(&local_hess[thread_id], 0i);
     atomicStore(&local_counts[thread_id], 0u);
 
     workgroupBarrier();
@@ -71,7 +98,7 @@ fn histogram_dense(
     let total_rows = select(params.num_rows, params.num_indices, params.num_indices > 0u);
 
     // Each thread processes a subset of rows
-    // Accumulate to workgroup shared memory (much faster than global atomics)
+    // Accumulate to workgroup shared memory using native atomicAdd (fast!)
     for (var i = thread_id; i < total_rows; i += num_threads) {
         // Get actual row index
         let row = select(i, row_indices[i], params.num_indices > 0u);
@@ -82,42 +109,15 @@ fn histogram_dense(
         let byte_idx = bin_offset % 4u;
         let bin = get_bin(bins[packed_idx], byte_idx);
 
-        // Get gradient and hessian (interleaved layout)
-        let grad = grad_hess[row * 2u];
-        let hess = grad_hess[row * 2u + 1u];
+        // Get gradient and hessian (packed i16 in u32)
+        let packed_gh = grad_hess[row];
+        let grad = unpack_grad(packed_gh);
+        let hess = unpack_hess(packed_gh);
 
-        // Accumulate to shared memory using workgroup atomics
+        // Native atomicAdd for i32 - no CAS loops!
+        atomicAdd(&local_grad[bin], grad);
+        atomicAdd(&local_hess[bin], hess);
         atomicAdd(&local_counts[bin], 1u);
-
-        // CAS loop for gradient (to shared memory)
-        {
-            var old_bits = atomicLoad(&local_grad_bits[bin]);
-            loop {
-                let old_val = bitcast<f32>(old_bits);
-                let new_val = old_val + grad;
-                let new_bits = bitcast<u32>(new_val);
-                let result = atomicCompareExchangeWeak(&local_grad_bits[bin], old_bits, new_bits);
-                if result.exchanged {
-                    break;
-                }
-                old_bits = result.old_value;
-            }
-        }
-
-        // CAS loop for hessian (to shared memory)
-        {
-            var old_bits = atomicLoad(&local_hess_bits[bin]);
-            loop {
-                let old_val = bitcast<f32>(old_bits);
-                let new_val = old_val + hess;
-                let new_bits = bitcast<u32>(new_val);
-                let result = atomicCompareExchangeWeak(&local_hess_bits[bin], old_bits, new_bits);
-                if result.exchanged {
-                    break;
-                }
-                old_bits = result.old_value;
-            }
-        }
     }
 
     // Barrier: wait for all threads to finish accumulating
@@ -129,39 +129,10 @@ fn histogram_dense(
     let local_count = atomicLoad(&local_counts[thread_id]);
 
     if local_count > 0u {
+        // Native atomicAdd for global memory too
+        atomicAdd(&hist_grad[global_offset], atomicLoad(&local_grad[thread_id]));
+        atomicAdd(&hist_hess[global_offset], atomicLoad(&local_hess[thread_id]));
         atomicAdd(&hist_counts[global_offset], local_count);
-
-        // CAS loop for gradient (to global memory)
-        let local_grad = bitcast<f32>(atomicLoad(&local_grad_bits[thread_id]));
-        {
-            var old_bits = atomicLoad(&hist_grad_bits[global_offset]);
-            loop {
-                let old_val = bitcast<f32>(old_bits);
-                let new_val = old_val + local_grad;
-                let new_bits = bitcast<u32>(new_val);
-                let result = atomicCompareExchangeWeak(&hist_grad_bits[global_offset], old_bits, new_bits);
-                if result.exchanged {
-                    break;
-                }
-                old_bits = result.old_value;
-            }
-        }
-
-        // CAS loop for hessian (to global memory)
-        let local_hess = bitcast<f32>(atomicLoad(&local_hess_bits[thread_id]));
-        {
-            var old_bits = atomicLoad(&hist_hess_bits[global_offset]);
-            loop {
-                let old_val = bitcast<f32>(old_bits);
-                let new_val = old_val + local_hess;
-                let new_bits = bitcast<u32>(new_val);
-                let result = atomicCompareExchangeWeak(&hist_hess_bits[global_offset], old_bits, new_bits);
-                if result.exchanged {
-                    break;
-                }
-                old_bits = result.old_value;
-            }
-        }
     }
 }
 
@@ -174,8 +145,8 @@ fn zero_histograms(
     let total_bins = params.num_features * 256u;
 
     if idx < total_bins {
-        atomicStore(&hist_grad_bits[idx], 0u);
-        atomicStore(&hist_hess_bits[idx], 0u);
+        atomicStore(&hist_grad[idx], 0i);
+        atomicStore(&hist_hess[idx], 0i);
         atomicStore(&hist_counts[idx], 0u);
     }
 }
@@ -198,7 +169,7 @@ fn zero_histograms(
 @group(0) @binding(7) var<storage, read> sparse_indices: array<u32>;   // Row indices
 @group(0) @binding(8) var<storage, read> sparse_values: array<u32>;    // Bin values (packed u8)
 @group(0) @binding(9) var<storage, read> sparse_info: array<u32>;      // Per-feature: [start, count, default_bin, _padding]
-@group(0) @binding(10) var<storage, read> total_sums: array<f32>;      // [total_grad, total_hess, total_count] per feature
+@group(0) @binding(10) var<storage, read> total_sums: array<i32>;      // [total_grad, total_hess, total_count] per feature (fixed-point)
 
 // Sparse histogram: processes only non-default entries, subtracts from totals
 @compute @workgroup_size(256, 1, 1)
@@ -216,14 +187,14 @@ fn histogram_sparse(
     let sparse_count = sparse_info[info_offset + 1u];
     let default_bin = sparse_info[info_offset + 2u];
 
-    // Get total sums for this feature (pre-computed on CPU)
+    // Get total sums for this feature (pre-computed on CPU, fixed-point)
     let total_grad = total_sums[feature * 3u];
     let total_hess = total_sums[feature * 3u + 1u];
     let total_count = bitcast<u32>(total_sums[feature * 3u + 2u]);
 
     // Initialize shared memory histogram to zero
-    atomicStore(&local_grad_bits[thread_id], 0u);
-    atomicStore(&local_hess_bits[thread_id], 0u);
+    atomicStore(&local_grad[thread_id], 0i);
+    atomicStore(&local_hess[thread_id], 0i);
     atomicStore(&local_counts[thread_id], 0u);
 
     workgroupBarrier();
@@ -238,105 +209,50 @@ fn histogram_sparse(
         let byte_idx = entry_idx % 4u;
         let bin = get_bin(sparse_values[packed_idx], byte_idx);
 
-        // Get gradient and hessian
-        let grad = grad_hess[row * 2u];
-        let hess = grad_hess[row * 2u + 1u];
+        // Get gradient and hessian (packed i16 in u32)
+        let packed_gh = grad_hess[row];
+        let grad = unpack_grad(packed_gh);
+        let hess = unpack_hess(packed_gh);
 
-        // Accumulate to shared memory
+        // Native atomicAdd
+        atomicAdd(&local_grad[bin], grad);
+        atomicAdd(&local_hess[bin], hess);
         atomicAdd(&local_counts[bin], 1u);
-
-        // CAS loop for gradient
-        {
-            var old_bits = atomicLoad(&local_grad_bits[bin]);
-            loop {
-                let old_val = bitcast<f32>(old_bits);
-                let new_val = old_val + grad;
-                let new_bits = bitcast<u32>(new_val);
-                let result = atomicCompareExchangeWeak(&local_grad_bits[bin], old_bits, new_bits);
-                if result.exchanged {
-                    break;
-                }
-                old_bits = result.old_value;
-            }
-        }
-
-        // CAS loop for hessian
-        {
-            var old_bits = atomicLoad(&local_hess_bits[bin]);
-            loop {
-                let old_val = bitcast<f32>(old_bits);
-                let new_val = old_val + hess;
-                let new_bits = bitcast<u32>(new_val);
-                let result = atomicCompareExchangeWeak(&local_hess_bits[bin], old_bits, new_bits);
-                if result.exchanged {
-                    break;
-                }
-                old_bits = result.old_value;
-            }
-        }
     }
 
     workgroupBarrier();
 
     // Write results to global memory with default-bin subtraction
     let global_offset = feature * 256u + thread_id;
-    var local_count = atomicLoad(&local_counts[thread_id]);
-    var local_grad = bitcast<f32>(atomicLoad(&local_grad_bits[thread_id]));
-    var local_hess = bitcast<f32>(atomicLoad(&local_hess_bits[thread_id]));
+    var local_count_val = atomicLoad(&local_counts[thread_id]);
+    var local_grad_val = atomicLoad(&local_grad[thread_id]);
+    var local_hess_val = atomicLoad(&local_hess[thread_id]);
 
     // Special handling for default bin: subtract accumulated values from totals
     if thread_id == default_bin {
         // Compute sum of all non-default entries
-        var sum_grad = 0.0f;
-        var sum_hess = 0.0f;
+        var sum_grad = 0i;
+        var sum_hess = 0i;
         var sum_count = 0u;
 
         for (var b = 0u; b < 256u; b++) {
             if b != default_bin {
-                sum_grad += bitcast<f32>(atomicLoad(&local_grad_bits[b]));
-                sum_hess += bitcast<f32>(atomicLoad(&local_hess_bits[b]));
+                sum_grad += atomicLoad(&local_grad[b]);
+                sum_hess += atomicLoad(&local_hess[b]);
                 sum_count += atomicLoad(&local_counts[b]);
             }
         }
 
         // Default bin = totals - non-default sum
-        local_grad = total_grad - sum_grad;
-        local_hess = total_hess - sum_hess;
-        local_count = total_count - sum_count;
+        local_grad_val = total_grad - sum_grad;
+        local_hess_val = total_hess - sum_hess;
+        local_count_val = total_count - sum_count;
     }
 
-    if local_count > 0u {
-        atomicAdd(&hist_counts[global_offset], local_count);
-
-        // CAS loop for gradient
-        {
-            var old_bits = atomicLoad(&hist_grad_bits[global_offset]);
-            loop {
-                let old_val = bitcast<f32>(old_bits);
-                let new_val = old_val + local_grad;
-                let new_bits = bitcast<u32>(new_val);
-                let result = atomicCompareExchangeWeak(&hist_grad_bits[global_offset], old_bits, new_bits);
-                if result.exchanged {
-                    break;
-                }
-                old_bits = result.old_value;
-            }
-        }
-
-        // CAS loop for hessian
-        {
-            var old_bits = atomicLoad(&hist_hess_bits[global_offset]);
-            loop {
-                let old_val = bitcast<f32>(old_bits);
-                let new_val = old_val + local_hess;
-                let new_bits = bitcast<u32>(new_val);
-                let result = atomicCompareExchangeWeak(&hist_hess_bits[global_offset], old_bits, new_bits);
-                if result.exchanged {
-                    break;
-                }
-                old_bits = result.old_value;
-            }
-        }
+    if local_count_val > 0u {
+        atomicAdd(&hist_grad[global_offset], local_grad_val);
+        atomicAdd(&hist_hess[global_offset], local_hess_val);
+        atomicAdd(&hist_counts[global_offset], local_count_val);
     }
 }
 
@@ -365,8 +281,8 @@ fn histogram_batched(
     let batch_count = batch_info[batch].count;
 
     // Initialize shared memory histogram to zero
-    atomicStore(&local_grad_bits[thread_id], 0u);
-    atomicStore(&local_hess_bits[thread_id], 0u);
+    atomicStore(&local_grad[thread_id], 0i);
+    atomicStore(&local_hess[thread_id], 0i);
     atomicStore(&local_counts[thread_id], 0u);
 
     workgroupBarrier();
@@ -382,42 +298,15 @@ fn histogram_batched(
         let byte_idx = bin_offset % 4u;
         let bin = get_bin(bins[packed_idx], byte_idx);
 
-        // Get gradient and hessian (interleaved layout)
-        let grad = grad_hess[row * 2u];
-        let hess = grad_hess[row * 2u + 1u];
+        // Get gradient and hessian (packed i16 in u32)
+        let packed_gh = grad_hess[row];
+        let grad = unpack_grad(packed_gh);
+        let hess = unpack_hess(packed_gh);
 
-        // Accumulate to shared memory using workgroup atomics
+        // Native atomicAdd
+        atomicAdd(&local_grad[bin], grad);
+        atomicAdd(&local_hess[bin], hess);
         atomicAdd(&local_counts[bin], 1u);
-
-        // CAS loop for gradient (to shared memory)
-        {
-            var old_bits = atomicLoad(&local_grad_bits[bin]);
-            loop {
-                let old_val = bitcast<f32>(old_bits);
-                let new_val = old_val + grad;
-                let new_bits = bitcast<u32>(new_val);
-                let result = atomicCompareExchangeWeak(&local_grad_bits[bin], old_bits, new_bits);
-                if result.exchanged {
-                    break;
-                }
-                old_bits = result.old_value;
-            }
-        }
-
-        // CAS loop for hessian (to shared memory)
-        {
-            var old_bits = atomicLoad(&local_hess_bits[bin]);
-            loop {
-                let old_val = bitcast<f32>(old_bits);
-                let new_val = old_val + hess;
-                let new_bits = bitcast<u32>(new_val);
-                let result = atomicCompareExchangeWeak(&local_hess_bits[bin], old_bits, new_bits);
-                if result.exchanged {
-                    break;
-                }
-                old_bits = result.old_value;
-            }
-        }
     }
 
     // Barrier: wait for all threads to finish accumulating
@@ -431,13 +320,9 @@ fn histogram_batched(
 
     if local_count > 0u {
         // Direct store (no atomics needed - each workgroup writes to unique location)
+        atomicStore(&hist_grad[global_offset], atomicLoad(&local_grad[thread_id]));
+        atomicStore(&hist_hess[global_offset], atomicLoad(&local_hess[thread_id]));
         atomicStore(&hist_counts[global_offset], local_count);
-
-        let local_grad = atomicLoad(&local_grad_bits[thread_id]);
-        atomicStore(&hist_grad_bits[global_offset], local_grad);
-
-        let local_hess = atomicLoad(&local_hess_bits[thread_id]);
-        atomicStore(&hist_hess_bits[global_offset], local_hess);
     }
 }
 
@@ -450,8 +335,8 @@ fn zero_histograms_batched(
     let total_bins = params.num_batches * params.num_features * 256u;
 
     if idx < total_bins {
-        atomicStore(&hist_grad_bits[idx], 0u);
-        atomicStore(&hist_hess_bits[idx], 0u);
+        atomicStore(&hist_grad[idx], 0i);
+        atomicStore(&hist_hess[idx], 0i);
         atomicStore(&hist_counts[idx], 0u);
     }
 }
