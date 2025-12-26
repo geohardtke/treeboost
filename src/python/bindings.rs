@@ -45,11 +45,14 @@ pub struct PyGBDTConfig {
 #[pymethods]
 impl PyGBDTConfig {
     /// Create a new configuration with default values
+    ///
+    /// Note: Python bindings enable GPU subgroups by default (unlike Rust).
     #[new]
     fn new() -> Self {
-        Self {
-            inner: GBDTConfig::default(),
-        }
+        let mut config = GBDTConfig::default();
+        // Enable subgroups by default for Python (may help on some GPUs)
+        config.use_gpu_subgroups = true;
+        Self { inner: config }
     }
 
     // Ensemble parameters
@@ -302,6 +305,21 @@ impl PyGBDTConfig {
     }
 
     // Backend selection
+
+    /// Enable GPU subgroup operations (default: True for Python)
+    ///
+    /// Subgroups can reduce atomic contention in GPU histogram building.
+    /// Benchmarks show minimal benefit on modern NVIDIA GPUs (~1.0x),
+    /// but may help on older AMD or Intel GPUs.
+    #[getter]
+    fn use_gpu_subgroups(&self) -> bool {
+        self.inner.use_gpu_subgroups
+    }
+
+    #[setter]
+    fn set_use_gpu_subgroups(&mut self, value: bool) {
+        self.inner.use_gpu_subgroups = value;
+    }
 
     /// Force GPU backend for histogram building (requires gpu feature)
     ///

@@ -110,6 +110,14 @@ pub struct GBDTConfig {
     #[rkyv(with = rkyv::with::Skip)]
     pub backend_type: BackendType,
 
+    /// Enable GPU subgroup operations for histogram building (default: false)
+    ///
+    /// Subgroups can reduce atomic contention when multiple threads write to the same
+    /// histogram bin. However, benchmarks show minimal benefit on modern NVIDIA GPUs
+    /// (~1.0x speedup). May help on older AMD or Intel GPUs with slower atomics.
+    #[rkyv(with = rkyv::with::Skip)]
+    pub use_gpu_subgroups: bool,
+
     // Monotonic constraints
     /// Monotonic constraints per feature (empty = no constraints)
     pub monotonic_constraints: Vec<MonotonicConstraint>,
@@ -170,6 +178,7 @@ impl Default for GBDTConfig {
 
             // Backend selection (Auto = GPU for large datasets, CPU otherwise)
             backend_type: BackendType::Auto,
+            use_gpu_subgroups: false, // Disabled by default (minimal benefit on modern NVIDIA)
 
             // Monotonic constraints
             monotonic_constraints: Vec::new(),
@@ -342,6 +351,17 @@ impl GBDTConfig {
     /// ```
     pub fn with_backend(mut self, backend_type: BackendType) -> Self {
         self.backend_type = backend_type;
+        self
+    }
+
+    /// Enable or disable GPU subgroup operations
+    ///
+    /// Subgroups can reduce atomic contention but show minimal benefit on modern
+    /// NVIDIA GPUs. May help on older AMD or Intel GPUs.
+    ///
+    /// Default: false (disabled)
+    pub fn with_gpu_subgroups(mut self, enabled: bool) -> Self {
+        self.use_gpu_subgroups = enabled;
         self
     }
 

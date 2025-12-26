@@ -3,6 +3,7 @@
 //! Handles async device creation, buffer allocation, and command submission.
 
 use std::sync::Arc;
+use std::time::Duration;
 use wgpu::{
     Adapter, Buffer, BufferDescriptor, BufferUsages, CommandEncoder, ComputePipeline, Device,
     DeviceDescriptor, Instance, Limits, PowerPreference, Queue, RequestAdapterOptions,
@@ -14,6 +15,12 @@ pub struct GpuDevice {
     pub queue: Arc<Queue>,
     pub adapter: Adapter,
     pub limits: Limits,
+    /// Whether subgroup operations are supported
+    pub subgroups_supported: bool,
+    /// Minimum subgroup size (0 if not supported)
+    pub min_subgroup_size: u32,
+    /// Maximum subgroup size (0 if not supported)
+    pub max_subgroup_size: u32,
 }
 
 impl GpuDevice {
@@ -33,39 +40,57 @@ impl GpuDevice {
                 compatible_surface: None,
                 force_fallback_adapter: false,
             })
-            .await?;
+            .await
+            .ok()?;
 
-        // Adapter info for debugging (uncomment log calls when log crate is available)
+        // Adapter info for debugging
         let _info = adapter.get_info();
-        // log::info!(
-        //     "WGPU adapter: {} ({:?}, {:?})",
-        //     info.name,
-        //     info.backend,
-        //     info.device_type
-        // );
 
         // Get device limits
         let limits = adapter.limits();
 
-        // Request device with compute features
-        let (device, queue) = adapter
-            .request_device(
-                &DeviceDescriptor {
-                    label: Some("TreeBoost GPU Device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: Limits::default(),
-                    memory_hints: wgpu::MemoryHints::Performance,
-                },
-                None,
-            )
+        // Check for subgroup support
+        let adapter_features = adapter.features();
+        let subgroups_supported = adapter_features.contains(wgpu::Features::SUBGROUP);
+
+        // Build required features (include SUBGROUP if available)
+        let required_features = if subgroups_supported {
+            wgpu::Features::SUBGROUP
+        } else {
+            wgpu::Features::empty()
+        };
+
+        // Request device with compute features (wgpu 27 API)
+        let (device, queue) = match adapter
+            .request_device(&DeviceDescriptor {
+                label: Some("TreeBoost GPU Device"),
+                required_features,
+                required_limits: Limits::default(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+                experimental_features: wgpu::ExperimentalFeatures::default(),
+            })
             .await
-            .ok()?;
+        {
+            Ok(result) => result,
+            Err(_) => return None,
+        };
+
+        // Get subgroup size limits from adapter limits
+        let (min_subgroup_size, max_subgroup_size) = if subgroups_supported {
+            (limits.min_subgroup_size, limits.max_subgroup_size)
+        } else {
+            (0, 0)
+        };
 
         Some(Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
             adapter,
             limits,
+            subgroups_supported,
+            min_subgroup_size,
+            max_subgroup_size,
         })
     }
 
@@ -129,8 +154,11 @@ impl GpuDevice {
     /// Submit commands and wait for completion.
     pub fn submit_and_wait(&self, encoder: CommandEncoder) {
         let submission = self.queue.submit(std::iter::once(encoder.finish()));
-        self.device
-            .poll(wgpu::Maintain::WaitForSubmissionIndex(submission));
+        // wgpu 27: PollType::Wait with submission_index
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(Duration::from_secs(60)),
+        });
     }
 
     /// Submit commands asynchronously (non-blocking).
@@ -144,20 +172,28 @@ impl GpuDevice {
 
     /// Wait for a specific submission to complete.
     pub fn wait_for_submission(&self, submission: wgpu::SubmissionIndex) {
-        self.device
-            .poll(wgpu::Maintain::WaitForSubmissionIndex(submission));
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(Duration::from_secs(60)),
+        });
     }
 
     /// Poll the device without blocking (for checking completion).
     pub fn poll(&self) -> bool {
-        self.device.poll(wgpu::Maintain::Poll).is_queue_empty()
+        self.device
+            .poll(wgpu::PollType::Poll)
+            .map(|status| status.is_queue_empty())
+            .unwrap_or(false)
     }
 
     /// Read buffer data back to CPU (synchronous/blocking).
     pub fn read_buffer<T: bytemuck::Pod>(&self, staging: &Buffer, output: &mut [T]) {
         let slice = staging.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(wgpu::Maintain::Wait);
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(Duration::from_secs(60)),
+        });
 
         {
             let data = slice.get_mapped_range();
@@ -189,6 +225,21 @@ impl GpuDevice {
                 compilation_options: Default::default(),
                 cache: None,
             })
+    }
+
+    /// Try to create a compute pipeline, returning None if shader compilation fails.
+    /// This is used for optional features like subgroups that may not be supported.
+    pub fn try_create_compute_pipeline(
+        &self,
+        label: &str,
+        shader_source: &str,
+        entry_point: &str,
+    ) -> Option<ComputePipeline> {
+        // Use catch_unwind to handle shader compilation errors gracefully
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.create_compute_pipeline(label, shader_source, entry_point)
+        }))
+        .ok()
     }
 
     /// Get maximum workgroup size (typically 256 or 1024).

@@ -73,6 +73,13 @@ pub struct BackendConfig {
     /// into a single GPU dispatch to amortize dispatch overhead.
     /// Default: 32 (optimal for trees with max_depth 5-6)
     pub gpu_batch_size: usize,
+
+    /// Enable GPU subgroup operations for histogram building.
+    ///
+    /// Subgroups can reduce atomic contention but show minimal benefit on
+    /// modern NVIDIA GPUs (~1.0x speedup). May help on older AMD or Intel.
+    /// Default: false
+    pub use_gpu_subgroups: bool,
 }
 
 impl Default for BackendConfig {
@@ -82,6 +89,7 @@ impl Default for BackendConfig {
             fallback_to_scalar: true,
             tensor_tile_min_rows: 10_000,
             gpu_batch_size: 32,
+            use_gpu_subgroups: false,
         }
     }
 }
@@ -94,6 +102,7 @@ impl BackendConfig {
             fallback_to_scalar: true,
             tensor_tile_min_rows: usize::MAX,
             gpu_batch_size: 32,
+            use_gpu_subgroups: false,
         }
     }
 
@@ -104,12 +113,19 @@ impl BackendConfig {
             fallback_to_scalar: true,
             tensor_tile_min_rows: 10_000,
             gpu_batch_size: 32,
+            use_gpu_subgroups: false,
         }
     }
 
     /// Set the GPU batch size for histogram building.
     pub fn with_gpu_batch_size(mut self, batch_size: usize) -> Self {
         self.gpu_batch_size = batch_size;
+        self
+    }
+
+    /// Enable or disable GPU subgroup operations.
+    pub fn with_gpu_subgroups(mut self, enabled: bool) -> Self {
+        self.use_gpu_subgroups = enabled;
         self
     }
 }

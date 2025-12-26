@@ -169,6 +169,16 @@ pub struct HistogramKernel {
     bind_group_layout_batched: BindGroupLayout,
     /// Buffer pool for reusing allocations (Mutex for thread safety)
     buffer_pool: Mutex<BufferPool>,
+    /// Whether subgroup operations are available on hardware
+    subgroups_supported: bool,
+    /// Whether to use subgroup operations (default: false)
+    /// Set via `set_use_subgroups()`. Only effective if `subgroups_supported` is true.
+    use_subgroups: std::sync::atomic::AtomicBool,
+    /// Subgroup-optimized pipelines (None if not supported)
+    pipeline_dense_subgroups: Option<ComputePipeline>,
+    pipeline_batched_subgroups: Option<ComputePipeline>,
+    bind_group_layout_dense_subgroups: Option<BindGroupLayout>,
+    bind_group_layout_batched_subgroups: Option<BindGroupLayout>,
 }
 
 impl HistogramKernel {
@@ -208,6 +218,46 @@ impl HistogramKernel {
         let bind_group_layout_zero = pipeline_zero.get_bind_group_layout(0);
         let bind_group_layout_batched = pipeline_batched.get_bind_group_layout(0);
 
+        // Check for subgroup support and create optimized pipelines if available
+        // Note: Even if the device reports SUBGROUP support, the WGSL compiler may not
+        // support the `enable subgroups;` extension yet (depends on wgpu/naga version).
+        // We try to compile and fall back gracefully if it fails.
+        let subgroups_supported = device.subgroups_supported;
+        let (pipeline_dense_subgroups, pipeline_batched_subgroups, bind_group_layout_dense_subgroups, bind_group_layout_batched_subgroups) =
+            if subgroups_supported {
+                // Try to create subgroup pipelines - may fail if WGSL extension not supported
+                let subgroup_shader = include_str!("shaders/histogram_subgroups.wgsl");
+
+                // Use try_create_compute_pipeline which returns Option instead of panicking
+                match device.try_create_compute_pipeline(
+                    "histogram_dense_subgroups_pipeline",
+                    subgroup_shader,
+                    "histogram_dense_subgroups",
+                ) {
+                    Some(dense_sg) => {
+                        // Dense succeeded, try batched
+                        match device.try_create_compute_pipeline(
+                            "histogram_batched_subgroups_pipeline",
+                            subgroup_shader,
+                            "histogram_batched_subgroups",
+                        ) {
+                            Some(batched_sg) => {
+                                let layout_dense_sg = dense_sg.get_bind_group_layout(0);
+                                let layout_batched_sg = batched_sg.get_bind_group_layout(0);
+                                (Some(dense_sg), Some(batched_sg), Some(layout_dense_sg), Some(layout_batched_sg))
+                            }
+                            None => (None, None, None, None),
+                        }
+                    }
+                    None => (None, None, None, None),
+                }
+            } else {
+                (None, None, None, None)
+            };
+
+        // Update subgroups_supported based on whether we actually got working pipelines
+        let subgroups_supported = pipeline_dense_subgroups.is_some();
+
         Self {
             device,
             pipeline_dense,
@@ -218,7 +268,204 @@ impl HistogramKernel {
             pipeline_zero_batched,
             bind_group_layout_batched,
             buffer_pool: Mutex::new(BufferPool::new()),
+            subgroups_supported,
+            use_subgroups: std::sync::atomic::AtomicBool::new(false), // Disabled by default
+            pipeline_dense_subgroups,
+            pipeline_batched_subgroups,
+            bind_group_layout_dense_subgroups,
+            bind_group_layout_batched_subgroups,
         }
+    }
+
+    /// Returns true if subgroup operations are supported by the hardware.
+    pub fn subgroups_available(&self) -> bool {
+        self.subgroups_supported
+    }
+
+    /// Returns true if subgroup operations are enabled and will be used.
+    pub fn has_subgroups(&self) -> bool {
+        self.subgroups_supported && self.use_subgroups.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Enable or disable subgroup operations.
+    ///
+    /// Subgroups are disabled by default. Enable them if you want to test
+    /// whether they provide benefit on your hardware.
+    ///
+    /// Note: Has no effect if hardware doesn't support subgroups.
+    pub fn set_use_subgroups(&self, enabled: bool) {
+        self.use_subgroups.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Build histograms using the base shader (no subgroups).
+    ///
+    /// This is primarily for benchmarking to compare subgroup vs non-subgroup performance.
+    /// The implementation duplicates `build_histograms` but forces the base pipeline.
+    pub fn build_histograms_base_shader(
+        &self,
+        bins_row_major: &[u8],
+        grad_hess: &[(f32, f32)],
+        row_indices: &[usize],
+        num_rows: usize,
+        num_features: usize,
+    ) -> Vec<Histogram> {
+        // This is a copy of build_histograms but forces the base pipeline
+        // (Could be refactored to share code, but keeping separate for clarity)
+        let dev = &self.device;
+
+        let grad_hess_packed: Vec<u32> = grad_hess
+            .iter()
+            .map(|(g, h)| {
+                let grad_i16 = ((*g * FIXED_POINT_SCALE).clamp(-32767.0, 32767.0)) as i16;
+                let hess_i16 = ((*h * FIXED_POINT_SCALE).clamp(-32767.0, 32767.0)) as i16;
+                (grad_i16 as u16 as u32) | ((hess_i16 as u16 as u32) << 16)
+            })
+            .collect();
+
+        let indices_u32: Vec<u32> = row_indices.iter().map(|&i| i as u32).collect();
+
+        let bins_aligned = bins_row_major.len() % 4 == 0;
+        let bins_packed_owned: Vec<u32>;
+        let bins_packed: &[u32] = if bins_aligned {
+            bytemuck::cast_slice(bins_row_major)
+        } else {
+            bins_packed_owned = pack_bins_u32(bins_row_major);
+            &bins_packed_owned
+        };
+
+        let bins_size = (bins_packed.len() * 4) as u64;
+        let grad_hess_size = (grad_hess_packed.len() * 4) as u64;
+        let indices_size = if indices_u32.is_empty() { 4u64 } else { (indices_u32.len() * 4) as u64 };
+        let hist_size = (num_features * 256 * 4) as u64;
+
+        let params = HistogramParams {
+            num_rows: num_rows as u32,
+            num_features: num_features as u32,
+            num_indices: indices_u32.len() as u32,
+            num_batches: 0,
+        };
+
+        let mut pool = self.buffer_pool.lock().unwrap();
+
+        if pool.params.is_none() {
+            pool.params = Some(dev.create_uniform_buffer("params_buffer", std::mem::size_of::<HistogramParams>() as u64));
+        }
+
+        if Self::ensure_storage_buffer(dev, &mut pool.bins, "bins_buffer", bins_size, false) {
+            pool.bins_cache_key = None;
+        }
+        Self::ensure_storage_buffer(dev, &mut pool.grad_hess, "grad_hess_buffer", grad_hess_size, false);
+        Self::ensure_storage_buffer(dev, &mut pool.indices, "indices_buffer", indices_size, false);
+        Self::ensure_storage_buffer(dev, &mut pool.hist_grad, "hist_grad", hist_size, true);
+        Self::ensure_storage_buffer(dev, &mut pool.hist_hess, "hist_hess", hist_size, true);
+        Self::ensure_storage_buffer(dev, &mut pool.hist_count, "hist_count", hist_size, true);
+        Self::ensure_staging_buffer(dev, &mut pool.staging_grad, "staging_grad", hist_size);
+        Self::ensure_staging_buffer(dev, &mut pool.staging_hess, "staging_hess", hist_size);
+        Self::ensure_staging_buffer(dev, &mut pool.staging_count, "staging_count", hist_size);
+
+        dev.write_buffer(pool.params.as_ref().unwrap(), &[params]);
+
+        let bins_key = CacheKey::from_slice(bins_row_major);
+        if pool.bins_cache_key != Some(bins_key) {
+            dev.write_buffer(&pool.bins.as_ref().unwrap().buffer, bins_packed);
+            pool.bins_cache_key = Some(bins_key);
+        }
+
+        dev.write_buffer(&pool.grad_hess.as_ref().unwrap().buffer, &grad_hess_packed);
+
+        if !indices_u32.is_empty() {
+            dev.write_buffer(&pool.indices.as_ref().unwrap().buffer, &indices_u32);
+        }
+
+        let bind_group_zero = dev.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("zero_bind_group"),
+            layout: &self.bind_group_layout_zero,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: pool.params.as_ref().unwrap().as_entire_binding() },
+                BindGroupEntry { binding: 4, resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry { binding: 5, resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry { binding: 6, resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding() },
+            ],
+        });
+
+        // FORCE base layout (not subgroup layout)
+        let bind_group_dense = dev.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("histogram_bind_group_base"),
+            layout: &self.bind_group_layout_dense,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: pool.params.as_ref().unwrap().as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: pool.bins.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry { binding: 2, resource: pool.grad_hess.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry { binding: 3, resource: pool.indices.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry { binding: 4, resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry { binding: 5, resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry { binding: 6, resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding() },
+            ],
+        });
+
+        let mut encoder = dev.create_encoder("histogram_encoder_base");
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("zero_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline_zero);
+            pass.set_bind_group(0, &bind_group_zero, &[]);
+            let total_bins = (num_features * 256) as u32;
+            let workgroups = (total_bins + 255) / 256;
+            pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+
+        // FORCE base pipeline (not subgroup pipeline)
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("histogram_pass_base"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline_dense);
+            pass.set_bind_group(0, &bind_group_dense, &[]);
+            pass.dispatch_workgroups(num_features as u32, 1, 1);
+        }
+
+        encoder.copy_buffer_to_buffer(&pool.hist_grad.as_ref().unwrap().buffer, 0, &pool.staging_grad.as_ref().unwrap().buffer, 0, hist_size);
+        encoder.copy_buffer_to_buffer(&pool.hist_hess.as_ref().unwrap().buffer, 0, &pool.staging_hess.as_ref().unwrap().buffer, 0, hist_size);
+        encoder.copy_buffer_to_buffer(&pool.hist_count.as_ref().unwrap().buffer, 0, &pool.staging_count.as_ref().unwrap().buffer, 0, hist_size);
+
+        dev.submit_and_wait(encoder);
+
+        let mut grad_data = vec![0i32; num_features * 256];
+        let mut hess_data = vec![0i32; num_features * 256];
+        let mut count_data = vec![0u32; num_features * 256];
+
+        dev.read_buffer(&pool.staging_grad.as_ref().unwrap().buffer, &mut grad_data);
+        dev.read_buffer(&pool.staging_hess.as_ref().unwrap().buffer, &mut hess_data);
+        dev.read_buffer(&pool.staging_count.as_ref().unwrap().buffer, &mut count_data);
+
+        drop(pool);
+
+        let mut histograms = Vec::with_capacity(num_features);
+        for f in 0..num_features {
+            let mut hist = Histogram::new();
+            let offset = f * 256;
+
+            for bin in 0..256 {
+                let idx = offset + bin;
+                let sum_grad = grad_data[idx] as f32 * FIXED_POINT_SCALE_INV;
+                let sum_hess = hess_data[idx] as f32 * FIXED_POINT_SCALE_INV;
+                let count = count_data[idx];
+
+                if count > 0 {
+                    hist.accumulate(bin as u8, sum_grad, sum_hess);
+                    let entry = hist.get_mut(bin as u8);
+                    entry.count = count;
+                }
+            }
+
+            histograms.push(hist);
+        }
+
+        histograms
     }
 
     /// Execute histogram building on GPU.
@@ -361,9 +608,16 @@ impl HistogramKernel {
             ],
         });
 
+        // Select the appropriate layout based on whether we're using subgroups
+        let dense_layout = if self.has_subgroups() {
+            self.bind_group_layout_dense_subgroups.as_ref().unwrap()
+        } else {
+            &self.bind_group_layout_dense
+        };
+
         let bind_group_dense = dev.device.create_bind_group(&BindGroupDescriptor {
             label: Some("histogram_bind_group"),
-            layout: &self.bind_group_layout_dense,
+            layout: dense_layout,
             entries: &[
                 BindGroupEntry {
                     binding: 0,
@@ -412,13 +666,17 @@ impl HistogramKernel {
             pass.dispatch_workgroups(workgroups, 1, 1);
         }
 
-        // Run histogram kernel
+        // Run histogram kernel (use subgroup-optimized version if available)
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("histogram_pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline_dense);
+            if self.has_subgroups() {
+                pass.set_pipeline(self.pipeline_dense_subgroups.as_ref().unwrap());
+            } else {
+                pass.set_pipeline(&self.pipeline_dense);
+            }
             pass.set_bind_group(0, &bind_group_dense, &[]);
             pass.dispatch_workgroups(num_features as u32, 1, 1);
         }
@@ -619,9 +877,16 @@ impl HistogramKernel {
             ],
         });
 
+        // Select the appropriate layout based on whether we're using subgroups
+        let dense_layout = if self.has_subgroups() {
+            self.bind_group_layout_dense_subgroups.as_ref().unwrap()
+        } else {
+            &self.bind_group_layout_dense
+        };
+
         let bind_group_dense = dev.device.create_bind_group(&BindGroupDescriptor {
             label: Some("histogram_bind_group"),
-            layout: &self.bind_group_layout_dense,
+            layout: dense_layout,
             entries: &[
                 BindGroupEntry { binding: 0, resource: pool.params.as_ref().unwrap().as_entire_binding() },
                 BindGroupEntry { binding: 1, resource: pool.bins.as_ref().unwrap().buffer.as_entire_binding() },
@@ -651,13 +916,17 @@ impl HistogramKernel {
             pass.dispatch_workgroups(workgroups, 1, 1);
         }
 
-        // Histogram kernel
+        // Histogram kernel (use subgroup-optimized version if available)
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("histogram_pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline_dense);
+            if self.has_subgroups() {
+                pass.set_pipeline(self.pipeline_dense_subgroups.as_ref().unwrap());
+            } else {
+                pass.set_pipeline(&self.pipeline_dense);
+            }
             pass.set_bind_group(0, &bind_group_dense, &[]);
             pass.dispatch_workgroups(num_features as u32, 1, 1);
         }
@@ -888,10 +1157,17 @@ impl HistogramKernel {
         dev.write_buffer(&pool.indices.as_ref().unwrap().buffer, &all_indices);
         dev.write_buffer(&pool.batch_info.as_ref().unwrap().buffer, &batch_info_data);
 
+        // Select the appropriate layout based on whether we're using subgroups
+        let batched_layout = if self.pipeline_batched_subgroups.is_some() {
+            self.bind_group_layout_batched_subgroups.as_ref().unwrap()
+        } else {
+            &self.bind_group_layout_batched
+        };
+
         // Create bind groups for batched kernel
         let bind_group_batched = dev.device.create_bind_group(&BindGroupDescriptor {
             label: Some("batched_bind_group"),
-            layout: &self.bind_group_layout_batched,
+            layout: batched_layout,
             entries: &[
                 BindGroupEntry {
                     binding: 0,
@@ -969,14 +1245,18 @@ impl HistogramKernel {
             pass.dispatch_workgroups(workgroups, 1, 1);
         }
 
-        // Run batched histogram kernel
+        // Run batched histogram kernel (use subgroup-optimized version if available)
         // Dispatch: (num_features, num_batches, 1)
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("histogram_batched_pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline_batched);
+            if let Some(ref sg_pipeline) = self.pipeline_batched_subgroups {
+                pass.set_pipeline(sg_pipeline);
+            } else {
+                pass.set_pipeline(&self.pipeline_batched);
+            }
             pass.set_bind_group(0, &bind_group_batched, &[]);
             pass.dispatch_workgroups(num_features as u32, num_batches as u32, 1);
         }

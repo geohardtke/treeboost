@@ -80,6 +80,7 @@ impl BackendSelector {
         #[cfg(feature = "gpu")]
         {
             if let Some(backend) = wgpu::WgpuBackend::new() {
+                backend.set_use_subgroups(self.config.use_gpu_subgroups);
                 return Box::new(backend);
             }
         }
@@ -94,6 +95,7 @@ impl BackendSelector {
         #[cfg(feature = "gpu")]
         {
             if let Some(backend) = wgpu::WgpuBackend::new() {
+                backend.set_use_subgroups(self.config.use_gpu_subgroups);
                 return Box::new(backend);
             }
         }

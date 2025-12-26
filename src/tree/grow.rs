@@ -205,6 +205,8 @@ pub struct TreeGrower {
     backend_type: BackendType,
     /// GPU batch size for histogram dispatch (0 = no batching)
     gpu_batch_size: usize,
+    /// Enable GPU subgroup operations (default: false)
+    use_gpu_subgroups: bool,
     /// Cached backend instance (lazily initialized, reused across trees)
     cached_backend: RefCell<Option<Box<dyn HistogramBackend>>>,
 }
@@ -225,6 +227,7 @@ impl Default for TreeGrower {
             interaction_constraints: InteractionConstraints::new(),
             backend_type: BackendType::Auto,
             gpu_batch_size: 32, // Default batch size for GPU histogram dispatch
+            use_gpu_subgroups: false,
             cached_backend: RefCell::new(None),
         }
     }
@@ -244,6 +247,7 @@ impl std::fmt::Debug for TreeGrower {
             .field("colsample", &self.colsample)
             .field("backend_type", &self.backend_type)
             .field("gpu_batch_size", &self.gpu_batch_size)
+            .field("use_gpu_subgroups", &self.use_gpu_subgroups)
             .finish()
     }
 }
@@ -264,6 +268,7 @@ impl Clone for TreeGrower {
             interaction_constraints: self.interaction_constraints.clone(),
             backend_type: self.backend_type.clone(),
             gpu_batch_size: self.gpu_batch_size,
+            use_gpu_subgroups: self.use_gpu_subgroups,
             // Reset cached backend - clone gets its own lazily initialized backend
             cached_backend: RefCell::new(None),
         }
@@ -360,12 +365,24 @@ impl TreeGrower {
         self
     }
 
+    /// Enable or disable GPU subgroup operations for histogram building
+    ///
+    /// Subgroups can reduce atomic contention but show minimal benefit on
+    /// modern NVIDIA GPUs (~1.0x speedup). May help on older AMD or Intel.
+    ///
+    /// - Default: false (disabled)
+    pub fn with_gpu_subgroups(mut self, enabled: bool) -> Self {
+        self.use_gpu_subgroups = enabled;
+        self
+    }
+
     /// Initialize backend (called once at start of tree growing)
     fn ensure_backend(&self, num_rows: usize) {
         let mut cached = self.cached_backend.borrow_mut();
         if cached.is_none() {
             let config = BackendConfig {
                 preferred: self.backend_type.clone(),
+                use_gpu_subgroups: self.use_gpu_subgroups,
                 ..Default::default()
             };
             *cached = Some(BackendSelector::with_config(config).select(num_rows));

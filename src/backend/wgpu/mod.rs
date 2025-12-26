@@ -73,6 +73,74 @@ impl WgpuBackend {
         self.device.backend()
     }
 
+    /// Returns true if subgroup operations are supported by the hardware.
+    pub fn subgroups_available(&self) -> bool {
+        self.kernel.subgroups_available()
+    }
+
+    /// Returns true if subgroup operations are enabled and will be used.
+    ///
+    /// When subgroups are active, the GPU shader uses `subgroupAdd` and
+    /// `subgroupBroadcastFirst` to reduce atomic contention when multiple
+    /// threads in a subgroup write to the same histogram bin.
+    ///
+    /// Note: Subgroups are disabled by default. Use `set_use_subgroups(true)` to enable.
+    pub fn has_subgroups(&self) -> bool {
+        self.kernel.has_subgroups()
+    }
+
+    /// Enable or disable subgroup operations.
+    ///
+    /// Subgroups are **disabled by default** because benchmarks show minimal
+    /// benefit on modern NVIDIA GPUs (~1.0x speedup). They may help on older
+    /// AMD or Intel GPUs with slower atomics.
+    ///
+    /// Has no effect if hardware doesn't support subgroups.
+    pub fn set_use_subgroups(&self, enabled: bool) {
+        self.kernel.set_use_subgroups(enabled);
+    }
+
+    /// Returns the subgroup size range, or (0, 0) if subgroups are not supported.
+    pub fn subgroup_size(&self) -> (u32, u32) {
+        (self.device.min_subgroup_size, self.device.max_subgroup_size)
+    }
+
+    /// Build histograms using the base shader (no subgroups).
+    ///
+    /// This is primarily for benchmarking to compare subgroup vs non-subgroup performance.
+    pub fn build_histograms_base_shader(
+        &self,
+        bins: &dyn BinStorage,
+        grad_hess: &[(f32, f32)],
+        row_indices: &[usize],
+    ) -> Vec<Histogram> {
+        let num_rows = bins.num_rows();
+        let num_features = bins.num_features();
+
+        let bins_row_major: std::borrow::Cow<[u8]> = match bins.as_row_major() {
+            Some(data) => std::borrow::Cow::Borrowed(data),
+            None => {
+                let mut row_major = vec![0u8; num_rows * num_features];
+                for f in 0..num_features {
+                    if let Some(col) = bins.feature_column(f) {
+                        for r in 0..num_rows {
+                            row_major[r * num_features + f] = col[r];
+                        }
+                    }
+                }
+                std::borrow::Cow::Owned(row_major)
+            }
+        };
+
+        self.kernel.build_histograms_base_shader(
+            &bins_row_major,
+            grad_hess,
+            row_indices,
+            num_rows,
+            num_features,
+        )
+    }
+
     /// Build histograms with detailed profiling.
     ///
     /// Returns histograms and detailed timing for each GPU operation.
