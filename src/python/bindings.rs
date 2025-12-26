@@ -30,6 +30,7 @@ use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
 
+use crate::backend::BackendType;
 use crate::booster::{GBDTConfig, GBDTModel, LossType};
 use crate::serialize;
 use crate::tree::MonotonicConstraint;
@@ -300,6 +301,47 @@ impl PyGBDTConfig {
         self.inner.parallel_gradient = value;
     }
 
+    // Backend selection
+
+    /// Force GPU backend for histogram building (requires gpu feature)
+    ///
+    /// GPU provides 3-12x speedup for datasets with 5K+ rows.
+    /// Falls back to CPU if GPU is unavailable.
+    fn use_gpu(&mut self) {
+        self.inner.backend_type = BackendType::Wgpu;
+    }
+
+    /// Force CPU backend for histogram building
+    ///
+    /// Uses AVX2/NEON optimized scalar implementation.
+    /// Best for small datasets (<5K rows) or reproducibility.
+    fn use_cpu(&mut self) {
+        self.inner.backend_type = BackendType::Scalar;
+    }
+
+    /// Use automatic backend selection (default)
+    ///
+    /// Automatically selects GPU for large datasets (>=10K rows)
+    /// and CPU for smaller datasets where GPU overhead isn't worth it.
+    fn use_auto(&mut self) {
+        self.inner.backend_type = BackendType::Auto;
+    }
+
+    /// Get current backend type as string
+    #[getter]
+    fn backend(&self) -> &'static str {
+        match self.inner.backend_type {
+            BackendType::Auto => "auto",
+            BackendType::Scalar => "cpu",
+            BackendType::Wgpu => "gpu",
+            BackendType::Avx512 => "avx512",
+            BackendType::Sve2 => "sve2",
+            BackendType::Cuda => "cuda",
+            BackendType::Rocm => "rocm",
+            BackendType::Metal => "metal",
+        }
+    }
+
     // Monotonic constraints
 
     /// Set monotonic constraints for features
@@ -348,11 +390,12 @@ impl PyGBDTConfig {
 
     fn __repr__(&self) -> String {
         format!(
-            "GBDTConfig(num_rounds={}, learning_rate={}, max_depth={}, max_leaves={})",
+            "GBDTConfig(num_rounds={}, learning_rate={}, max_depth={}, max_leaves={}, backend='{}')",
             self.inner.num_rounds,
             self.inner.learning_rate,
             self.inner.max_depth,
-            self.inner.max_leaves
+            self.inner.max_leaves,
+            self.backend()
         )
     }
 }
