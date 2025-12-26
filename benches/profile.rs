@@ -164,7 +164,7 @@ fn benchmark_prediction_components(c: &mut Criterion) {
         .with_max_depth(6)
         .with_learning_rate(0.1)
         .with_min_samples_leaf(5);
-    let model = GBDTModel::train(&train_data, config).unwrap();
+    let model = GBDTModel::train_binned(&train_data, config).unwrap();
 
     // Test data
     let (test_features, test_targets) = generate_data(test_rows, num_features, 123);
@@ -467,8 +467,8 @@ fn benchmark_training_components(c: &mut Criterion) {
 
     let num_features = 10;
 
-    // Benchmark binning separately (to match Python benchmark behavior)
-    group.bench_function("binning_8k_20features", |b| {
+    // Benchmark binning separately - SEQUENTIAL (old Python bindings behavior)
+    group.bench_function("binning_8k_20features_sequential", |b| {
         let num_rows = 8000;
         let num_features = 20;
         let (features, _targets) = generate_data(num_rows, num_features, 42);
@@ -488,6 +488,133 @@ fn benchmark_training_components(c: &mut Criterion) {
         });
     });
 
+    // Benchmark binning separately - PARALLEL (new Rust high-level API behavior)
+    group.bench_function("binning_8k_20features_parallel", |b| {
+        use rayon::prelude::*;
+        let num_rows = 8000;
+        let num_features = 20;
+        let (features, _targets) = generate_data(num_rows, num_features, 42);
+        let binner = QuantileBinner::new(255);
+
+        b.iter(|| {
+            let binned_results: Vec<Vec<u8>> = (0..num_features)
+                .into_par_iter()
+                .map(|f| {
+                    let col: Vec<f64> = (0..num_rows)
+                        .map(|r| features[r * num_features + f])
+                        .collect();
+                    let boundaries = binner.compute_boundaries(&col);
+                    binner.bin_column(&col, &boundaries)
+                })
+                .collect();
+            let mut binned_data = Vec::with_capacity(num_rows * num_features);
+            for col in binned_results {
+                binned_data.extend(col);
+            }
+            black_box(binned_data)
+        });
+    });
+
+    // Benchmark parallel binning on larger datasets
+    group.bench_function("binning_500k_20features_parallel", |b| {
+        use rayon::prelude::*;
+        let num_rows = 500_000;
+        let num_features = 20;
+        let (features, _targets) = generate_data(num_rows, num_features, 42);
+        let binner = QuantileBinner::new(255);
+
+        b.iter(|| {
+            let binned_results: Vec<Vec<u8>> = (0..num_features)
+                .into_par_iter()
+                .map(|f| {
+                    let col: Vec<f64> = (0..num_rows)
+                        .map(|r| features[r * num_features + f])
+                        .collect();
+                    let boundaries = binner.compute_boundaries(&col);
+                    binner.bin_column(&col, &boundaries)
+                })
+                .collect();
+            let mut binned_data = Vec::with_capacity(num_rows * num_features);
+            for col in binned_results {
+                binned_data.extend(col);
+            }
+            black_box(binned_data)
+        });
+    });
+
+    group.bench_function("binning_8k_100features_parallel", |b| {
+        use rayon::prelude::*;
+        let num_rows = 8000;
+        let num_features = 100;
+        let (features, _targets) = generate_data(num_rows, num_features, 42);
+        let binner = QuantileBinner::new(255);
+
+        b.iter(|| {
+            let binned_results: Vec<Vec<u8>> = (0..num_features)
+                .into_par_iter()
+                .map(|f| {
+                    let col: Vec<f64> = (0..num_rows)
+                        .map(|r| features[r * num_features + f])
+                        .collect();
+                    let boundaries = binner.compute_boundaries(&col);
+                    binner.bin_column(&col, &boundaries)
+                })
+                .collect();
+            let mut binned_data = Vec::with_capacity(num_rows * num_features);
+            for col in binned_results {
+                binned_data.extend(col);
+            }
+            black_box(binned_data)
+        });
+    });
+
+    group.bench_function("binning_500k_100features_parallel", |b| {
+        use rayon::prelude::*;
+        let num_rows = 500_000;
+        let num_features = 100;
+        let (features, _targets) = generate_data(num_rows, num_features, 42);
+        let binner = QuantileBinner::new(255);
+
+        b.iter(|| {
+            let binned_results: Vec<Vec<u8>> = (0..num_features)
+                .into_par_iter()
+                .map(|f| {
+                    let col: Vec<f64> = (0..num_rows)
+                        .map(|r| features[r * num_features + f])
+                        .collect();
+                    let boundaries = binner.compute_boundaries(&col);
+                    binner.bin_column(&col, &boundaries)
+                })
+                .collect();
+            let mut binned_data = Vec::with_capacity(num_rows * num_features);
+            for col in binned_results {
+                binned_data.extend(col);
+            }
+            black_box(binned_data)
+        });
+    });
+
+    // High-level train() with binning included (like Python benchmark)
+    group.bench_function("train_8k_20features_100rounds_with_binning", |b| {
+        let num_rows = 8000;
+        let num_features = 20;
+        let (features, targets) = generate_data(num_rows, num_features, 42);
+        let features_f32: Vec<f32> = features.iter().map(|&x| x as f32).collect();
+        let targets_f32: Vec<f32> = targets.iter().map(|&x| x as f32).collect();
+        let config = GBDTConfig::new()
+            .with_num_rounds(100)
+            .with_max_depth(6)
+            .with_max_leaves(31)
+            .with_learning_rate(0.1);
+
+        b.iter(|| {
+            black_box(
+                GBDTModel::train(&features_f32, num_features, &targets_f32, config.clone(), None)
+                    .unwrap(),
+            )
+        });
+    });
+
     // Training with pre-binned data (matches Python: binning done once before training loop)
     group.bench_function("train_8k_20features_100rounds_prebinned", |b| {
         let num_rows = 8000;
@@ -500,7 +627,7 @@ fn benchmark_training_components(c: &mut Criterion) {
             .with_max_leaves(31)
             .with_learning_rate(0.1);
 
-        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+        b.iter(|| black_box(GBDTModel::train_binned(&dataset, config.clone()).unwrap()));
     });
 
     // Training with random noise targets (matches Python test_timing.py exactly)
@@ -522,7 +649,7 @@ fn benchmark_training_components(c: &mut Criterion) {
             .with_max_leaves(31)
             .with_learning_rate(0.1);
 
-        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+        b.iter(|| black_box(GBDTModel::train_binned(&dataset, config.clone()).unwrap()));
     });
 
     // Small dataset training
@@ -534,7 +661,7 @@ fn benchmark_training_components(c: &mut Criterion) {
             .with_max_depth(6)
             .with_learning_rate(0.1);
 
-        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+        b.iter(|| black_box(GBDTModel::train_binned(&dataset, config.clone()).unwrap()));
     });
 
     // Medium dataset training
@@ -546,7 +673,7 @@ fn benchmark_training_components(c: &mut Criterion) {
             .with_max_depth(6)
             .with_learning_rate(0.1);
 
-        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+        b.iter(|| black_box(GBDTModel::train_binned(&dataset, config.clone()).unwrap()));
     });
 
     // More boosting rounds
@@ -558,7 +685,7 @@ fn benchmark_training_components(c: &mut Criterion) {
             .with_max_depth(6)
             .with_learning_rate(0.1);
 
-        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+        b.iter(|| black_box(GBDTModel::train_binned(&dataset, config.clone()).unwrap()));
     });
 
     // Deeper trees
@@ -570,7 +697,7 @@ fn benchmark_training_components(c: &mut Criterion) {
             .with_max_depth(8)
             .with_learning_rate(0.1);
 
-        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+        b.iter(|| black_box(GBDTModel::train_binned(&dataset, config.clone()).unwrap()));
     });
 
     // More features
@@ -583,7 +710,7 @@ fn benchmark_training_components(c: &mut Criterion) {
             .with_max_depth(6)
             .with_learning_rate(0.1);
 
-        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+        b.iter(|| black_box(GBDTModel::train_binned(&dataset, config.clone()).unwrap()));
     });
 
     // With entropy regularization
@@ -596,7 +723,7 @@ fn benchmark_training_components(c: &mut Criterion) {
             .with_learning_rate(0.1)
             .with_entropy_weight(0.1);
 
-        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+        b.iter(|| black_box(GBDTModel::train_binned(&dataset, config.clone()).unwrap()));
     });
 
     // With Pseudo-Huber loss
@@ -609,7 +736,7 @@ fn benchmark_training_components(c: &mut Criterion) {
             .with_learning_rate(0.1)
             .with_pseudo_huber_loss(1.0);
 
-        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+        b.iter(|| black_box(GBDTModel::train_binned(&dataset, config.clone()).unwrap()));
     });
 
     // Large dataset
@@ -621,7 +748,7 @@ fn benchmark_training_components(c: &mut Criterion) {
             .with_max_depth(6)
             .with_learning_rate(0.1);
 
-        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+        b.iter(|| black_box(GBDTModel::train_binned(&dataset, config.clone()).unwrap()));
     });
 
     // Large dataset with GOSS
@@ -634,7 +761,7 @@ fn benchmark_training_components(c: &mut Criterion) {
             .with_learning_rate(0.1)
             .with_goss(true);
 
-        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+        b.iter(|| black_box(GBDTModel::train_binned(&dataset, config.clone()).unwrap()));
     });
 
     // Sparse data training (90% zeros - text/recommender systems)
@@ -646,7 +773,7 @@ fn benchmark_training_components(c: &mut Criterion) {
             .with_max_depth(6)
             .with_learning_rate(0.1);
 
-        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+        b.iter(|| black_box(GBDTModel::train_binned(&dataset, config.clone()).unwrap()));
     });
 
     // Very sparse data (95% zeros)
@@ -658,7 +785,7 @@ fn benchmark_training_components(c: &mut Criterion) {
             .with_max_depth(6)
             .with_learning_rate(0.1);
 
-        b.iter(|| black_box(GBDTModel::train(&dataset, config.clone()).unwrap()));
+        b.iter(|| black_box(GBDTModel::train_binned(&dataset, config.clone()).unwrap()));
     });
 
     group.finish();
@@ -1026,6 +1153,173 @@ fn benchmark_4bit_unpacking(c: &mut Criterion) {
     group.finish();
 }
 
+fn benchmark_histogram_kernels(c: &mut Criterion) {
+    use treeboost::kernel;
+
+    let mut group = c.benchmark_group("histogram_kernels");
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+
+    // Test with different dataset sizes
+    for num_rows in [10_000, 50_000, 100_000] {
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // Generate test data
+        let feature_bins: Vec<u8> = (0..num_rows).map(|_| rng.gen()).collect();
+        let gradients: Vec<f32> = (0..num_rows).map(|_| rng.gen()).collect();
+        let hessians: Vec<f32> = (0..num_rows).map(|_| rng.gen()).collect();
+
+        // Current approach: 8x unrolled scalar scatter
+        group.bench_function(format!("scalar_8x_unroll_{}k", num_rows / 1000), |b| {
+            let mut hist_grads = [0.0f32; 256];
+            let mut hist_hess = [0.0f32; 256];
+            let mut hist_counts = [0u32; 256];
+
+            b.iter(|| {
+                // Reset
+                hist_grads.fill(0.0);
+                hist_hess.fill(0.0);
+                hist_counts.fill(0);
+
+                unsafe {
+                    kernel::histogram_accumulate_contiguous(
+                        feature_bins.as_ptr(),
+                        num_rows,
+                        gradients.as_ptr(),
+                        hessians.as_ptr(),
+                        hist_grads.as_mut_ptr(),
+                        hist_hess.as_mut_ptr(),
+                        hist_counts.as_mut_ptr(),
+                    );
+                }
+                black_box((&hist_grads, &hist_hess, &hist_counts));
+            });
+        });
+
+        // New approach: multi-histogram SIMD
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            group.bench_function(format!("multi_hist_simd_{}k", num_rows / 1000), |b| {
+                let mut hist_grads = [0.0f32; 256];
+                let mut hist_hess = [0.0f32; 256];
+                let mut hist_counts = [0u32; 256];
+
+                b.iter(|| {
+                    hist_grads.fill(0.0);
+                    hist_hess.fill(0.0);
+                    hist_counts.fill(0);
+
+                    unsafe {
+                        kernel::x86::histogram_accumulate_multi_avx2(
+                            feature_bins.as_ptr(),
+                            num_rows,
+                            gradients.as_ptr(),
+                            hessians.as_ptr(),
+                            hist_grads.as_mut_ptr(),
+                            hist_hess.as_mut_ptr(),
+                            hist_counts.as_mut_ptr(),
+                        );
+                    }
+                    black_box((&hist_grads, &hist_hess, &hist_counts));
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
+fn benchmark_simd_merge(c: &mut Criterion) {
+    use treeboost::kernel;
+
+    let mut group = c.benchmark_group("simd_merge");
+    group.measurement_time(Duration::from_secs(3));
+    group.sample_size(100);
+
+    // Create test data - simulating histogram merge
+    let mut rng = StdRng::seed_from_u64(42);
+    let grads_a: [f32; 256] = std::array::from_fn(|_| rng.gen());
+    let grads_b: [f32; 256] = std::array::from_fn(|_| rng.gen());
+    let hess_a: [f32; 256] = std::array::from_fn(|_| rng.gen());
+    let hess_b: [f32; 256] = std::array::from_fn(|_| rng.gen());
+    let counts_a: [u32; 256] = std::array::from_fn(|i| (i + 1) as u32);
+    let counts_b: [u32; 256] = std::array::from_fn(|i| (256 - i) as u32);
+
+    // Single histogram merge (3 arrays)
+    group.bench_function("merge_single_histogram", |b| {
+        let mut dest_grads = grads_a;
+        let mut dest_hess = hess_a;
+        let mut dest_counts = counts_a;
+        b.iter(|| {
+            // Reset
+            dest_grads = grads_a;
+            dest_hess = hess_a;
+            dest_counts = counts_a;
+            // Merge
+            kernel::merge_histogram_grads(&mut dest_grads, &grads_b);
+            kernel::merge_histogram_hess(&mut dest_hess, &hess_b);
+            kernel::merge_histogram_counts(&mut dest_counts, &counts_b);
+            black_box((&dest_grads, &dest_hess, &dest_counts));
+        });
+    });
+
+    // Single histogram subtract (for histogram subtraction trick)
+    group.bench_function("subtract_single_histogram", |b| {
+        let mut dest_grads = grads_a;
+        let mut dest_hess = hess_a;
+        let mut dest_counts = counts_a;
+        b.iter(|| {
+            dest_grads = grads_a;
+            dest_hess = hess_a;
+            dest_counts = counts_a;
+            kernel::subtract_histogram_grads(&mut dest_grads, &grads_b);
+            kernel::subtract_histogram_hess(&mut dest_hess, &hess_b);
+            kernel::subtract_histogram_counts(&mut dest_counts, &counts_b);
+            black_box((&dest_grads, &dest_hess, &dest_counts));
+        });
+    });
+
+    // Multiple histogram merge (simulating feature parallel)
+    let num_features = 20;
+    let feature_grads_a: Vec<[f32; 256]> = (0..num_features)
+        .map(|_| std::array::from_fn(|_| rng.gen()))
+        .collect();
+    let feature_grads_b: Vec<[f32; 256]> = (0..num_features)
+        .map(|_| std::array::from_fn(|_| rng.gen()))
+        .collect();
+    let feature_hess_a: Vec<[f32; 256]> = (0..num_features)
+        .map(|_| std::array::from_fn(|_| rng.gen()))
+        .collect();
+    let feature_hess_b: Vec<[f32; 256]> = (0..num_features)
+        .map(|_| std::array::from_fn(|_| rng.gen()))
+        .collect();
+    let feature_counts_a: Vec<[u32; 256]> = (0..num_features)
+        .map(|_| std::array::from_fn(|i| (i + 1) as u32))
+        .collect();
+    let feature_counts_b: Vec<[u32; 256]> = (0..num_features)
+        .map(|_| std::array::from_fn(|i| (256 - i) as u32))
+        .collect();
+
+    group.bench_function("merge_20_feature_histograms", |b| {
+        let mut dest_grads = feature_grads_a.clone();
+        let mut dest_hess = feature_hess_a.clone();
+        let mut dest_counts = feature_counts_a.clone();
+        b.iter(|| {
+            dest_grads.clone_from(&feature_grads_a);
+            dest_hess.clone_from(&feature_hess_a);
+            dest_counts.clone_from(&feature_counts_a);
+            for f in 0..num_features {
+                kernel::merge_histogram_grads(&mut dest_grads[f], &feature_grads_b[f]);
+                kernel::merge_histogram_hess(&mut dest_hess[f], &feature_hess_b[f]);
+                kernel::merge_histogram_counts(&mut dest_counts[f], &feature_counts_b[f]);
+            }
+            black_box((&dest_grads, &dest_hess, &dest_counts));
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     benchmark_prediction_components,
@@ -1033,6 +1327,8 @@ criterion_group!(
     benchmark_training_components,
     benchmark_efb,
     benchmark_split_finding,
-    benchmark_4bit_unpacking
+    benchmark_4bit_unpacking,
+    benchmark_histogram_kernels,
+    benchmark_simd_merge
 );
 criterion_main!(benches);

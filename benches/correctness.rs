@@ -247,7 +247,7 @@ fn main() {
         .with_min_samples_leaf(5);
 
     let start = Instant::now();
-    let treeboost_model = GBDTModel::train(&treeboost_train, treeboost_config).unwrap();
+    let treeboost_model = GBDTModel::train_binned(&treeboost_train, treeboost_config).unwrap();
     let treeboost_train_time = start.elapsed();
     println!("✓ TreeBoost trained in {:?}", treeboost_train_time);
     println!("  Trees: {}", treeboost_model.num_trees());

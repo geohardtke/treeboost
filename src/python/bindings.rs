@@ -31,7 +31,6 @@ use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::booster::{GBDTConfig, GBDTModel, LossType};
-use crate::dataset::{BinnedDataset, FeatureInfo, FeatureType, QuantileBinner};
 use crate::serialize;
 use crate::tree::MonotonicConstraint;
 
@@ -385,57 +384,30 @@ impl PyGBDTModel {
         config: &PyGBDTConfig,
         feature_names: Option<Vec<String>>,
     ) -> PyResult<Self> {
-        let features = features.as_array();
-        let targets = targets.as_array();
+        let features_arr = features.as_array();
+        let targets_arr = targets.as_array();
 
-        let num_rows = features.nrows();
-        let num_features = features.ncols();
+        let num_rows = features_arr.nrows();
+        let num_features = features_arr.ncols();
 
-        if targets.len() != num_rows {
-            return Err(PyValueError::new_err(format!(
-                "targets length {} does not match features rows {}",
-                targets.len(),
-                num_rows
-            )));
+        // Convert to row-major flat Vec<f32> for Rust high-level API
+        let mut features_flat: Vec<f32> = Vec::with_capacity(num_rows * num_features);
+        for row in features_arr.rows() {
+            features_flat.extend(row.iter().copied());
         }
 
-        // Convert features to column-major Vec<Vec<f64>> for binner
-        let feature_columns: Vec<Vec<f64>> = (0..num_features)
-            .map(|col| features.column(col).iter().map(|&v| v as f64).collect())
-            .collect();
+        let targets_vec: Vec<f32> = targets_arr.to_vec();
 
-        // Create binner and bin the features
-        let binner = QuantileBinner::new(config.inner.num_bins);
-        let targets_vec: Vec<f32> = targets.to_vec();
-
-        // Bin each feature column
-        let mut binned_data = Vec::with_capacity(num_rows * num_features);
-        let mut feature_info = Vec::with_capacity(num_features);
-
-        for (i, col) in feature_columns.iter().enumerate() {
-            let boundaries = binner.compute_boundaries(col);
-            let binned = binner.bin_column(col, &boundaries);
-            binned_data.extend(binned);
-
-            let name = feature_names
-                .as_ref()
-                .and_then(|names| names.get(i).cloned())
-                .unwrap_or_else(|| format!("feature_{}", i));
-
-            feature_info.push(FeatureInfo {
-                name,
-                feature_type: FeatureType::Numeric,
-                num_bins: (boundaries.len() + 1).min(255) as u8,
-                bin_boundaries: boundaries,
-            });
-        }
-
-        // Create BinnedDataset
-        let dataset = BinnedDataset::new(num_rows, binned_data, targets_vec, feature_info);
-
-        // Train model (release GIL during training)
+        // Train model using high-level Rust API (release GIL during training)
+        // Binning is now done in Rust with Rayon parallelization
         let model = py.allow_threads(|| {
-            GBDTModel::train(&dataset, config.inner.clone())
+            GBDTModel::train(
+                &features_flat,
+                num_features,
+                &targets_vec,
+                config.inner.clone(),
+                feature_names,
+            )
         }).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         Ok(Self { model })

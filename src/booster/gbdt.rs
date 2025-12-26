@@ -1,7 +1,7 @@
 //! GBDT model and training
 
 use crate::booster::GBDTConfig;
-use crate::dataset::{BinnedDataset, ColumnPermutation, FeatureInfo};
+use crate::dataset::{BinnedDataset, ColumnPermutation, FeatureInfo, FeatureType, QuantileBinner};
 use crate::tree::{InteractionConstraints, Tree, TreeGrower};
 use crate::{Result, TreeBoostError};
 use rand::seq::SliceRandom;
@@ -27,8 +27,116 @@ pub struct GBDTModel {
 }
 
 impl GBDTModel {
-    /// Train a GBDT model
-    pub fn train(dataset: &BinnedDataset, config: GBDTConfig) -> Result<Self> {
+    /// Train a GBDT model from raw feature data (high-level API)
+    ///
+    /// This is the primary training API that handles binning automatically.
+    /// Features are discretized using T-Digest quantile binning with parallelization.
+    ///
+    /// # Arguments
+    /// * `features` - Row-major feature matrix: `features[row * num_features + feature]`
+    ///                Shape: `(num_rows, num_features)` flattened to 1D
+    /// * `num_features` - Number of features (columns)
+    /// * `targets` - Target values, one per row
+    /// * `config` - Training configuration
+    /// * `feature_names` - Optional feature names (defaults to "feature_0", "feature_1", ...)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let features = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // 2 rows × 3 features
+    /// let targets = vec![0.5, 1.5];
+    /// let config = GBDTConfig::new().with_num_rounds(100);
+    /// let model = GBDTModel::train(&features, 3, &targets, config, None)?;
+    /// ```
+    pub fn train(
+        features: &[f32],
+        num_features: usize,
+        targets: &[f32],
+        config: GBDTConfig,
+        feature_names: Option<Vec<String>>,
+    ) -> Result<Self> {
+        let num_rows = if num_features > 0 {
+            features.len() / num_features
+        } else {
+            0
+        };
+
+        if num_rows == 0 || num_features == 0 {
+            return Err(TreeBoostError::Config("Empty dataset".to_string()));
+        }
+
+        if features.len() != num_rows * num_features {
+            return Err(TreeBoostError::Config(format!(
+                "Feature array length {} doesn't match num_rows * num_features ({} * {} = {})",
+                features.len(),
+                num_rows,
+                num_features,
+                num_rows * num_features
+            )));
+        }
+
+        if targets.len() != num_rows {
+            return Err(TreeBoostError::Config(format!(
+                "Target length {} doesn't match num_rows {}",
+                targets.len(),
+                num_rows
+            )));
+        }
+
+        // Create binner
+        let binner = QuantileBinner::new(config.num_bins);
+
+        // Parallel binning: process each feature column in parallel
+        let binned_results: Vec<(Vec<u8>, FeatureInfo)> = (0..num_features)
+            .into_par_iter()
+            .map(|f| {
+                // Extract column (row-major to column values)
+                let column: Vec<f64> = (0..num_rows)
+                    .map(|r| features[r * num_features + f] as f64)
+                    .collect();
+
+                // Compute boundaries and bin
+                let boundaries = binner.compute_boundaries(&column);
+                let binned = binner.bin_column(&column, &boundaries);
+
+                // Create feature info
+                let name = feature_names
+                    .as_ref()
+                    .and_then(|names| names.get(f).cloned())
+                    .unwrap_or_else(|| format!("feature_{}", f));
+
+                let info = FeatureInfo {
+                    name,
+                    feature_type: FeatureType::Numeric,
+                    num_bins: (boundaries.len() + 1).min(255) as u8,
+                    bin_boundaries: boundaries,
+                };
+
+                (binned, info)
+            })
+            .collect();
+
+        // Combine results into column-major storage
+        let mut binned_data = Vec::with_capacity(num_rows * num_features);
+        let mut feature_info = Vec::with_capacity(num_features);
+
+        for (binned_col, info) in binned_results {
+            binned_data.extend(binned_col);
+            feature_info.push(info);
+        }
+
+        // Create BinnedDataset and train
+        let dataset = BinnedDataset::new(num_rows, binned_data, targets.to_vec(), feature_info);
+
+        Self::train_binned(&dataset, config)
+    }
+
+    /// Train a GBDT model from pre-binned data (low-level API)
+    ///
+    /// Use this when you have already binned your data (e.g., for repeated training
+    /// with different hyperparameters on the same binned dataset).
+    ///
+    /// For most use cases, prefer `train()` which handles binning automatically.
+    pub fn train_binned(dataset: &BinnedDataset, config: GBDTConfig) -> Result<Self> {
         config.validate().map_err(TreeBoostError::Config)?;
 
         let loss_fn = config.loss_type.create();
@@ -99,55 +207,77 @@ impl GBDTModel {
             Vec::new()
         };
 
-        for _round in 0..config.num_rounds {
-            // Compute gradients and hessians
-            // Parallel mode: enable for large datasets (100k+ rows)
-            if config.parallel_gradient {
-                train_indices.par_iter().for_each(|&idx| {
-                    let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
-                    // SAFETY: Each idx is unique within train_indices, so no data races
-                    unsafe {
-                        let grad_ptr = gradients.as_ptr() as *mut f32;
-                        let hess_ptr = hessians.as_ptr() as *mut f32;
-                        *grad_ptr.add(idx) = g;
-                        *hess_ptr.add(idx) = h;
-                    }
-                });
-            } else {
-                for &idx in &train_indices {
-                    let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
-                    gradients[idx] = g;
-                    hessians[idx] = h;
-                }
-            }
+        // Determine if we can use fused gradient+histogram (no subsampling)
+        let use_fused = !config.goss_enabled && config.subsample >= 1.0;
 
-            // GOSS or random subsampling (reuse pre-allocated buffers)
-            sample_indices.clear();
-            if config.goss_enabled {
-                // GOSS: Gradient-based One-Side Sampling
-                // Reuses goss_indexed buffer, writes result to sample_indices
-                Self::goss_sample_into(
+        for _round in 0..config.num_rounds {
+            // Grow tree - either fused or separate gradient+histogram paths
+            let tree = if use_fused {
+                // FUSED PATH: Compute gradients AND build root histogram in single pass
+                // This eliminates cache pollution for ~40-80% speedup on large datasets
+                tree_grower.grow_fused(
+                    dataset,
                     &train_indices,
+                    targets,
+                    &predictions,
+                    loss_fn.as_ref(),
                     &mut gradients,
                     &mut hessians,
-                    config.goss_top_rate,
-                    config.goss_other_rate,
-                    &mut rng,
-                    &mut goss_indexed,
-                    &mut sample_indices,
                 )
-            } else if config.subsample < 1.0 {
-                // Random subsampling (Stochastic Gradient Boosting)
-                let n_samples =
-                    ((train_indices.len() as f32) * config.subsample).ceil() as usize;
-                shuffle_buffer.shuffle(&mut rng);
-                sample_indices.extend_from_slice(&shuffle_buffer[..n_samples]);
             } else {
-                sample_indices.extend_from_slice(&train_indices);
-            }
+                // SEPARATE PATH: Compute gradients first, then build histogram
+                // Required for GOSS (needs all gradients for sampling) and random subsampling
 
-            // Grow tree using subsampled training indices
-            let tree = tree_grower.grow_with_indices(dataset, &gradients, &hessians, &sample_indices);
+                // Compute gradients and hessians
+                if config.parallel_gradient {
+                    train_indices.par_iter().for_each(|&idx| {
+                        let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
+                        // SAFETY: Each idx is unique within train_indices, so no data races
+                        unsafe {
+                            let grad_ptr = gradients.as_ptr() as *mut f32;
+                            let hess_ptr = hessians.as_ptr() as *mut f32;
+                            *grad_ptr.add(idx) = g;
+                            *hess_ptr.add(idx) = h;
+                        }
+                    });
+                } else {
+                    for &idx in &train_indices {
+                        let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
+                        gradients[idx] = g;
+                        hessians[idx] = h;
+                    }
+                }
+
+                // GOSS or random subsampling
+                let tree_indices: &[usize] = if config.goss_enabled {
+                    // GOSS: Gradient-based One-Side Sampling
+                    sample_indices.clear();
+                    Self::goss_sample_into(
+                        &train_indices,
+                        &mut gradients,
+                        &mut hessians,
+                        config.goss_top_rate,
+                        config.goss_other_rate,
+                        &mut rng,
+                        &mut goss_indexed,
+                        &mut sample_indices,
+                    );
+                    &sample_indices
+                } else if config.subsample < 1.0 {
+                    // Random subsampling (Stochastic Gradient Boosting)
+                    sample_indices.clear();
+                    let n_samples =
+                        ((train_indices.len() as f32) * config.subsample).ceil() as usize;
+                    shuffle_buffer.shuffle(&mut rng);
+                    sample_indices.extend_from_slice(&shuffle_buffer[..n_samples]);
+                    &sample_indices
+                } else {
+                    &train_indices
+                };
+
+                // Grow tree using the selected training indices
+                tree_grower.grow_with_indices(dataset, &gradients, &hessians, tree_indices)
+            };
 
             // Update predictions using tree-wise batch prediction
             // This is more cache-friendly than row-wise and avoids intermediate allocation
@@ -732,7 +862,7 @@ mod tests {
             .with_max_depth(3)
             .with_learning_rate(0.1);
 
-        let model = GBDTModel::train(&dataset, config).unwrap();
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
         assert_eq!(model.num_trees(), 10);
 
@@ -749,7 +879,7 @@ mod tests {
             .with_num_rounds(10)
             .with_pseudo_huber_loss(1.0);
 
-        let model = GBDTModel::train(&dataset, config).unwrap();
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
         assert_eq!(model.num_trees(), 10);
     }
 
@@ -761,7 +891,7 @@ mod tests {
             .with_num_rounds(10)
             .with_conformal(0.2, 0.9);
 
-        let model = GBDTModel::train(&dataset, config).unwrap();
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
         assert!(model.conformal_quantile().is_some());
         assert!(model.conformal_quantile().unwrap() > 0.0);
@@ -787,7 +917,7 @@ mod tests {
             .with_max_depth(4)
             .with_early_stopping(5, 0.2); // Stop after 5 rounds without improvement, 20% validation
 
-        let model = GBDTModel::train(&dataset, config).unwrap();
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
         // Should have stopped early (fewer than 100 trees)
         // With deterministic data, early stopping should trigger
@@ -805,7 +935,7 @@ mod tests {
             .with_subsample(0.8)  // 80% row subsampling
             .with_colsample(0.8); // 80% column subsampling
 
-        let model = GBDTModel::train(&dataset, config).unwrap();
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
         assert_eq!(model.num_trees(), 10);
 
@@ -824,7 +954,7 @@ mod tests {
             .with_max_depth(4)
             .with_goss(true);
 
-        let model = GBDTModel::train(&dataset, config).unwrap();
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
         assert_eq!(model.num_trees(), 10);
 
@@ -843,7 +973,7 @@ mod tests {
             .with_max_depth(4)
             .with_goss_rates(0.3, 0.15); // top 30%, sample 15% of rest
 
-        let model = GBDTModel::train(&dataset, config).unwrap();
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
         assert_eq!(model.num_trees(), 10);
 
@@ -860,7 +990,7 @@ mod tests {
             .with_num_rounds(10)
             .with_max_depth(4);
 
-        let model = GBDTModel::train(&dataset, config).unwrap();
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
         // Should have computed column permutation
         assert!(model.column_permutation().is_some());
@@ -878,7 +1008,7 @@ mod tests {
             .with_max_depth(4)
             .with_column_reordering(false);
 
-        let model = GBDTModel::train(&dataset, config).unwrap();
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
         // Should not have computed column permutation
         assert!(model.column_permutation().is_none());
@@ -892,7 +1022,7 @@ mod tests {
             .with_num_rounds(20)
             .with_max_depth(4);
 
-        let model = GBDTModel::train(&dataset, config).unwrap();
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
         let importances = model.feature_importances(3);
 
         assert_eq!(importances.len(), 3);
@@ -918,7 +1048,7 @@ mod tests {
                 MonotonicConstraint::None,
             ]);
 
-        let model = GBDTModel::train(&dataset, config).unwrap();
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
         // Model should train successfully with constraints
         assert!(model.num_trees() > 0);
@@ -938,7 +1068,7 @@ mod tests {
             .with_max_depth(4)
             .with_interaction_groups(vec![vec![0, 1]]);
 
-        let model = GBDTModel::train(&dataset, config).unwrap();
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
         // Model should train successfully with constraints
         assert!(model.num_trees() > 0);

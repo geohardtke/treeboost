@@ -149,7 +149,7 @@ fn benchmark_training(c: &mut Criterion) {
                         .with_max_depth(max_depth)
                         .with_learning_rate(0.1)
                         .with_min_samples_leaf(5);
-                    black_box(GBDTModel::train(data, config).unwrap())
+                    black_box(GBDTModel::train_binned(data, config).unwrap())
                 });
             },
         );
@@ -224,7 +224,7 @@ fn benchmark_prediction(c: &mut Criterion) {
         .with_max_depth(max_depth)
         .with_learning_rate(0.1)
         .with_min_samples_leaf(5);
-    let treeboost_model = GBDTModel::train(&treeboost_train, treeboost_config).unwrap();
+    let treeboost_model = GBDTModel::train_binned(&treeboost_train, treeboost_config).unwrap();
 
     // Train gbdt-rs model
     let mut gbdt_train = to_gbdt_data(&train_features, &train_targets, train_rows, num_features);
@@ -314,7 +314,7 @@ fn benchmark_parallel_training(c: &mut Criterion) {
                 .with_max_depth(max_depth)
                 .with_learning_rate(0.1)
                 .with_min_samples_leaf(5);
-            black_box(GBDTModel::train(&treeboost_data, config).unwrap())
+            black_box(GBDTModel::train_binned(&treeboost_data, config).unwrap())
         });
     });
 

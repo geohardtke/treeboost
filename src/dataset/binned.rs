@@ -38,6 +38,15 @@ impl BinEntry {
         self.count += 1;
     }
 
+    /// Add multiple samples' gradients and hessians to this bin
+    /// Used by sparse histogram building for default bin accumulation
+    #[inline]
+    pub fn accumulate_with_count(&mut self, gradient: f32, hessian: f32, count: u32) {
+        self.sum_gradients += gradient;
+        self.sum_hessians += hessian;
+        self.count += count;
+    }
+
     /// Merge another bin entry into this one
     #[inline]
     pub fn merge(&mut self, other: &BinEntry) {
