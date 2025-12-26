@@ -338,7 +338,7 @@ fn main() -> Result<()> {
             println!("    4-bit packing: {}", config.packed_dataset);
 
             println!("\nTraining model...");
-            let model = GBDTModel::train(&dataset, config)?;
+            let model = GBDTModel::train_binned(&dataset, config)?;
 
             println!("Training complete: {} trees built", model.num_trees());
 

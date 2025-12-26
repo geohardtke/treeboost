@@ -91,11 +91,11 @@ fn benchmark_full_training(num_rows: usize, num_features: usize, num_rounds: usi
         .with_learning_rate(0.1);
 
     // Warmup
-    let _ = treeboost::booster::GBDTModel::train(&dataset, config.clone());
+    let _ = treeboost::booster::GBDTModel::train_binned(&dataset, config.clone());
 
     // Benchmark
     let start = Instant::now();
-    let _ = treeboost::booster::GBDTModel::train(&dataset, config);
+    let _ = treeboost::booster::GBDTModel::train_binned(&dataset, config);
     let elapsed = start.elapsed();
 
     elapsed.as_secs_f64() * 1000.0

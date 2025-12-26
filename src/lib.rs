@@ -29,7 +29,7 @@
 //!     .with_pseudo_huber_loss(1.0)
 //!     .with_entropy_weight(0.1);
 //!
-//! let model = GBDTModel::train(&dataset, config)?;
+//! let model = GBDTModel::train_binned(&dataset, config)?;
 //!
 //! // Predict
 //! let predictions = model.predict(&dataset);

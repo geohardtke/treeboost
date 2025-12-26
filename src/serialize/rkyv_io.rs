@@ -76,7 +76,7 @@ mod tests {
             .with_num_rounds(5)
             .with_max_depth(3);
 
-        let model = GBDTModel::train(&dataset, config).unwrap();
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
         // Save to temp file
         let dir = tempdir().unwrap();

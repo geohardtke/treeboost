@@ -56,7 +56,7 @@ fn test_basic_training_and_prediction() {
         .with_max_depth(4)
         .with_learning_rate(0.1);
 
-    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
 
     assert_eq!(model.num_trees(), 50);
 
@@ -93,7 +93,7 @@ fn test_pseudo_huber_loss() {
         .with_max_depth(3)
         .with_pseudo_huber_loss(1.0);
 
-    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
 
     let predictions = model.predict(&dataset);
 
@@ -127,7 +127,7 @@ fn test_conformal_prediction() {
         .with_max_depth(4)
         .with_conformal(0.2, 0.9); // 20% calibration, 90% coverage
 
-    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
 
     assert!(model.conformal_quantile().is_some());
 
@@ -153,7 +153,7 @@ fn test_model_serialization() {
 
     let config = GBDTConfig::new().with_num_rounds(10).with_max_depth(3);
 
-    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
     let original_predictions = model.predict(&dataset);
 
     // Save model
@@ -185,7 +185,7 @@ fn test_feature_importance() {
 
     let config = GBDTConfig::new().with_num_rounds(50).with_max_depth(5);
 
-    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
     let importances = model.feature_importances(5);
 
     assert_eq!(importances.len(), 5);
@@ -381,7 +381,7 @@ fn test_entropy_regularization() {
         .with_entropy_weight(0.0);
 
     let model_no_entropy =
-        GBDTModel::train(&dataset, config_no_entropy).expect("Training should succeed");
+        GBDTModel::train_binned(&dataset, config_no_entropy).expect("Training should succeed");
 
     // Train with entropy regularization
     let config_entropy = GBDTConfig::new()
@@ -390,7 +390,7 @@ fn test_entropy_regularization() {
         .with_entropy_weight(0.1);
 
     let model_entropy =
-        GBDTModel::train(&dataset, config_entropy).expect("Training should succeed");
+        GBDTModel::train_binned(&dataset, config_entropy).expect("Training should succeed");
 
     // Both models should produce reasonable predictions
     let preds_no_entropy = model_no_entropy.predict(&dataset);
@@ -421,7 +421,7 @@ fn test_max_leaves_constraint() {
         .with_max_leaves(8)
         .with_max_depth(10); // High max_depth, but leaves constrained
 
-    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
 
     // Each tree should have at most 8 leaves
     for tree in model.trees() {
@@ -478,7 +478,7 @@ fn test_data_pipeline_end_to_end() {
         .with_max_depth(4)
         .with_learning_rate(0.1);
 
-    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
 
     // Make predictions
     let predictions = model.predict(&dataset);
@@ -662,7 +662,7 @@ fn test_parquet_large_regression() {
         .with_max_depth(5)
         .with_learning_rate(0.1);
 
-    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
     let predictions = model.predict(&dataset);
 
     assert_eq!(predictions.len(), dataset.num_rows());
@@ -730,7 +730,7 @@ fn test_parquet_large_mixed() {
         .with_max_depth(6)
         .with_learning_rate(0.1);
 
-    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
     let predictions = model.predict(&dataset);
 
     assert_eq!(predictions.len(), dataset.num_rows());
@@ -772,7 +772,7 @@ fn test_parquet_large_dirty() {
         .with_max_depth(4)
         .with_pseudo_huber_loss(1.0);
 
-    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
     let predictions = model.predict(&dataset);
 
     assert_eq!(predictions.len(), dataset.num_rows());
@@ -836,7 +836,7 @@ fn test_parquet_high_cardinality() {
         .with_max_depth(5)
         .with_learning_rate(0.1);
 
-    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
     let predictions = model.predict(&dataset);
 
     assert_eq!(predictions.len(), dataset.num_rows());
@@ -879,7 +879,7 @@ fn test_parquet_stress_test() {
         .with_learning_rate(0.1);
 
     let start = Instant::now();
-    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
     let train_time = start.elapsed();
 
     println!("Trained {} trees in {:?}", model.num_trees(), train_time);
@@ -1058,7 +1058,7 @@ fn test_column_reordering_by_importance() {
         .with_max_depth(4)
         .with_learning_rate(0.1);
 
-    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
 
     // Get importance-based reordering
     let (reordered, permutation) = model.optimize_dataset_layout(&dataset);
@@ -1156,7 +1156,7 @@ fn test_packed_dataset_prediction_equivalence() {
         .with_max_depth(3)
         .with_learning_rate(0.1);
 
-    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
 
     // Get predictions on original
     let preds_original = model.predict(&dataset);
@@ -1253,7 +1253,7 @@ fn test_raw_prediction_equivalence() {
         .with_max_depth(4)
         .with_learning_rate(0.1);
 
-    let model = GBDTModel::train(&dataset, config).expect("Training should succeed");
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
 
     // Get predictions using binned data
     let binned_predictions = model.predict(&dataset);
