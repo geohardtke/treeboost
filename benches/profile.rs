@@ -1195,35 +1195,6 @@ fn benchmark_histogram_kernels(c: &mut Criterion) {
                 black_box((&hist_grads, &hist_hess, &hist_counts));
             });
         });
-
-        // New approach: multi-histogram SIMD
-        #[cfg(target_arch = "x86_64")]
-        if std::arch::is_x86_feature_detected!("avx2") {
-            group.bench_function(format!("multi_hist_simd_{}k", num_rows / 1000), |b| {
-                let mut hist_grads = [0.0f32; 256];
-                let mut hist_hess = [0.0f32; 256];
-                let mut hist_counts = [0u32; 256];
-
-                b.iter(|| {
-                    hist_grads.fill(0.0);
-                    hist_hess.fill(0.0);
-                    hist_counts.fill(0);
-
-                    unsafe {
-                        kernel::x86::histogram_accumulate_multi_avx2(
-                            feature_bins.as_ptr(),
-                            num_rows,
-                            gradients.as_ptr(),
-                            hessians.as_ptr(),
-                            hist_grads.as_mut_ptr(),
-                            hist_hess.as_mut_ptr(),
-                            hist_counts.as_mut_ptr(),
-                        );
-                    }
-                    black_box((&hist_grads, &hist_hess, &hist_counts));
-                });
-            });
-        }
     }
 
     group.finish();
