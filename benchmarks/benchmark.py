@@ -3,13 +3,26 @@
 Benchmark TreeBoost against XGBoost, LightGBM, and CatBoost.
 
 Compares training time, prediction time, and accuracy across various dataset sizes.
-All libraries are forced to use CPU-only for fair comparison.
+Supports both cross-library comparisons and CPU vs GPU comparisons.
 
 Usage:
+    # Cross-library CPU comparison (default)
     python benchmarks/benchmark.py
+
+    # Cross-library GPU comparison (all libraries using GPU)
+    python benchmarks/benchmark.py --mode cross-library-gpu
+
+    # Single library CPU vs GPU comparison
+    python benchmarks/benchmark.py --mode treeboost-gpu
+    python benchmarks/benchmark.py --mode xgboost-gpu
+
+    # All libraries CPU vs GPU comparison
+    python benchmarks/benchmark.py --mode all-gpu
+
+    # Other options
     python benchmarks/benchmark.py --iterations 5
     python benchmarks/benchmark.py --sizes small medium large
-    python benchmarks/benchmark.py --skip catboost  # Skip slow libraries
+    python benchmarks/benchmark.py --skip catboost
     python benchmarks/benchmark.py --output results/my_benchmark.json
 
 Requirements:
@@ -17,11 +30,13 @@ Requirements:
 """
 
 import argparse
+import contextlib
 import gc
 import json
 import os
 import platform
 import statistics
+import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -29,6 +44,18 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import numpy as np
+
+
+@contextlib.contextmanager
+def suppress_stderr():
+    """Suppress stderr output (for hiding GPU compilation warnings)."""
+    with open(os.devnull, 'w') as devnull:
+        old_stderr = sys.stderr
+        sys.stderr = devnull
+        try:
+            yield
+        finally:
+            sys.stderr = old_stderr
 
 # Check available libraries
 LIBRARIES = {}
@@ -76,6 +103,7 @@ class BenchmarkResult:
     mse: float
     r2: float
     iterations: int
+    device: str = "cpu"  # "cpu" or "gpu"
 
 
 @dataclass
@@ -161,26 +189,46 @@ def benchmark_function(
 
 
 # =============================================================================
-# Library-specific training and prediction functions
+# TreeBoost training and prediction functions
 # =============================================================================
 
-def train_treeboost(
+def train_treeboost_cpu(
     X_train: np.ndarray,
     y_train: np.ndarray,
     n_rounds: int,
     max_depth: int,
     learning_rate: float,
 ) -> Any:
-    """Train TreeBoost model (CPU, with all optimizations enabled)."""
+    """Train TreeBoost model (CPU backend)."""
     config = GBDTConfig()
     config.num_rounds = n_rounds
     config.max_depth = max_depth
     config.learning_rate = learning_rate
     config.max_leaves = 31
-    # Ensure optimizations are enabled (should be default, but be explicit)
     config.parallel_prediction = True
     config.column_reordering = True
     config.packed_dataset = True
+    config.use_cpu()  # Force CPU backend
+    return GBDTModel.train(X_train, y_train, config)
+
+
+def train_treeboost_gpu(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    n_rounds: int,
+    max_depth: int,
+    learning_rate: float,
+) -> Any:
+    """Train TreeBoost model (GPU backend)."""
+    config = GBDTConfig()
+    config.num_rounds = n_rounds
+    config.max_depth = max_depth
+    config.learning_rate = learning_rate
+    config.max_leaves = 31
+    config.parallel_prediction = True
+    config.column_reordering = True
+    config.packed_dataset = True
+    config.use_gpu()  # Force GPU backend
     return GBDTModel.train(X_train, y_train, config)
 
 
@@ -189,7 +237,11 @@ def predict_treeboost(model: Any, X: np.ndarray) -> np.ndarray:
     return model.predict(X)
 
 
-def train_xgboost(
+# =============================================================================
+# XGBoost training and prediction functions
+# =============================================================================
+
+def train_xgboost_cpu(
     X_train: np.ndarray,
     y_train: np.ndarray,
     n_rounds: int,
@@ -209,13 +261,38 @@ def train_xgboost(
     return xgb.train(params, dtrain, num_boost_round=n_rounds)
 
 
+def train_xgboost_gpu(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    n_rounds: int,
+    max_depth: int,
+    learning_rate: float,
+) -> Any:
+    """Train XGBoost model (GPU via CUDA)."""
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    params = {
+        "objective": "reg:squarederror",
+        "max_depth": max_depth,
+        "eta": learning_rate,
+        "verbosity": 0,
+        "device": "cuda",  # Force GPU
+        "tree_method": "hist",  # GPU histogram method
+    }
+    with suppress_stderr():
+        return xgb.train(params, dtrain, num_boost_round=n_rounds)
+
+
 def predict_xgboost(model: Any, X: np.ndarray) -> np.ndarray:
     """Predict with XGBoost model."""
     dtest = xgb.DMatrix(X)
     return model.predict(dtest)
 
 
-def train_lightgbm(
+# =============================================================================
+# LightGBM training and prediction functions
+# =============================================================================
+
+def train_lightgbm_cpu(
     X_train: np.ndarray,
     y_train: np.ndarray,
     n_rounds: int,
@@ -236,12 +313,37 @@ def train_lightgbm(
     return lgb.train(params, train_data, num_boost_round=n_rounds)
 
 
+def train_lightgbm_gpu(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    n_rounds: int,
+    max_depth: int,
+    learning_rate: float,
+) -> Any:
+    """Train LightGBM model (GPU via CUDA)."""
+    train_data = lgb.Dataset(X_train, label=y_train)
+    params = {
+        "objective": "regression",
+        "max_depth": max_depth,
+        "learning_rate": learning_rate,
+        "num_leaves": 31,
+        "verbosity": -1,
+        "device": "gpu",  # Force GPU
+    }
+    with suppress_stderr():
+        return lgb.train(params, train_data, num_boost_round=n_rounds)
+
+
 def predict_lightgbm(model: Any, X: np.ndarray) -> np.ndarray:
     """Predict with LightGBM model."""
     return model.predict(X)
 
 
-def train_catboost(
+# =============================================================================
+# CatBoost training and prediction functions
+# =============================================================================
+
+def train_catboost_cpu(
     X_train: np.ndarray,
     y_train: np.ndarray,
     n_rounds: int,
@@ -261,36 +363,108 @@ def train_catboost(
     return model
 
 
+def train_catboost_gpu(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    n_rounds: int,
+    max_depth: int,
+    learning_rate: float,
+) -> Any:
+    """Train CatBoost model (GPU via CUDA)."""
+    model = CatBoostRegressor(
+        iterations=n_rounds,
+        depth=max_depth,
+        learning_rate=learning_rate,
+        verbose=False,
+        task_type="GPU",  # Force GPU
+    )
+    with suppress_stderr():
+        model.fit(X_train, y_train)
+    return model
+
+
 def predict_catboost(model: Any, X: np.ndarray) -> np.ndarray:
     """Predict with CatBoost model."""
     return model.predict(X)
 
 
-# Library configurations
+# Library configurations for cross-library comparison (CPU only)
 LIBRARY_CONFIGS = {
     "treeboost": {
-        "train": train_treeboost,
+        "train": train_treeboost_cpu,
         "predict": predict_treeboost,
         "color": "#3498db",  # Blue
         "marker": "o",
     },
     "xgboost": {
-        "train": train_xgboost,
+        "train": train_xgboost_cpu,
         "predict": predict_xgboost,
         "color": "#e74c3c",  # Red
         "marker": "s",
     },
     "lightgbm": {
-        "train": train_lightgbm,
+        "train": train_lightgbm_cpu,
         "predict": predict_lightgbm,
         "color": "#2ecc71",  # Green
         "marker": "^",
     },
     "catboost": {
-        "train": train_catboost,
+        "train": train_catboost_cpu,
         "predict": predict_catboost,
         "color": "#9b59b6",  # Purple
         "marker": "D",
+    },
+}
+
+# Library configurations for cross-library GPU comparison
+LIBRARY_CONFIGS_GPU = {
+    "treeboost": {
+        "train": train_treeboost_gpu,
+        "predict": predict_treeboost,
+        "color": "#3498db",  # Blue
+        "marker": "o",
+    },
+    "xgboost": {
+        "train": train_xgboost_gpu,
+        "predict": predict_xgboost,
+        "color": "#e74c3c",  # Red
+        "marker": "s",
+    },
+    "lightgbm": {
+        "train": train_lightgbm_gpu,
+        "predict": predict_lightgbm,
+        "color": "#2ecc71",  # Green
+        "marker": "^",
+    },
+    "catboost": {
+        "train": train_catboost_gpu,
+        "predict": predict_catboost,
+        "color": "#9b59b6",  # Purple
+        "marker": "D",
+    },
+}
+
+# GPU comparison configurations
+GPU_CONFIGS = {
+    "treeboost": {
+        "cpu_train": train_treeboost_cpu,
+        "gpu_train": train_treeboost_gpu,
+        "predict": predict_treeboost,
+    },
+    "xgboost": {
+        "cpu_train": train_xgboost_cpu,
+        "gpu_train": train_xgboost_gpu,
+        "predict": predict_xgboost,
+    },
+    "lightgbm": {
+        "cpu_train": train_lightgbm_cpu,
+        "gpu_train": train_lightgbm_gpu,
+        "predict": predict_lightgbm,
+    },
+    "catboost": {
+        "cpu_train": train_catboost_cpu,
+        "gpu_train": train_catboost_gpu,
+        "predict": predict_catboost,
     },
 }
 
@@ -316,14 +490,27 @@ def run_benchmark(
     max_depth: int,
     learning_rate: float,
     iterations: int,
+    device: str = "cpu",
+    use_gpu_config: bool = False,
 ) -> Optional[BenchmarkResult]:
     """Run benchmark for a single library and dataset."""
     if not LIBRARIES.get(library, False):
         return None
 
-    config = LIBRARY_CONFIGS[library]
-    train_fn = config["train"]
-    predict_fn = config["predict"]
+    if use_gpu_config:
+        # Cross-library GPU comparison mode
+        config = LIBRARY_CONFIGS_GPU[library]
+        train_fn = config["train"]
+        predict_fn = config["predict"]
+        device = "gpu"
+    elif device == "cpu":
+        config = LIBRARY_CONFIGS[library]
+        train_fn = config["train"]
+        predict_fn = config["predict"]
+    else:
+        config = GPU_CONFIGS[library]
+        train_fn = config["gpu_train"]
+        predict_fn = config["predict"]
 
     try:
         # Benchmark training
@@ -356,9 +543,10 @@ def run_benchmark(
             mse=mse,
             r2=r2,
             iterations=iterations,
+            device=device,
         )
     except Exception as e:
-        print(f"  Error benchmarking {library}: {e}")
+        print(f"  Error benchmarking {library} ({device}): {e}")
         return None
 
 
@@ -369,8 +557,72 @@ def run_all_benchmarks(
     max_depth: int,
     learning_rate: float,
     iterations: int,
+    use_gpu: bool = False,
 ) -> list[BenchmarkResult]:
     """Run benchmarks across all datasets and libraries."""
+    results = []
+    device_label = "GPU" if use_gpu else "CPU"
+
+    for dataset_name in datasets:
+        if dataset_name not in DATASET_CONFIGS:
+            print(f"Unknown dataset: {dataset_name}")
+            continue
+
+        config = DATASET_CONFIGS[dataset_name]
+        n_samples = config["n_samples"]
+        n_features = config["n_features"]
+
+        print(f"\n{'=' * 70}")
+        print(f"Dataset: {dataset_name} ({n_samples:,} samples, {n_features} features)")
+        print("=" * 70)
+
+        # Generate data
+        print("Generating data...")
+        X_train, X_test, y_train, y_test = generate_regression_data(
+            n_samples, n_features
+        )
+        print(f"  Train: {X_train.shape}, Test: {X_test.shape}")
+
+        for lib in libraries:
+            if not LIBRARIES.get(lib, False):
+                print(f"\n  {lib}: SKIPPED (not installed)")
+                continue
+
+            print(f"\n  {lib} ({device_label}):")
+            result = run_benchmark(
+                lib,
+                dataset_name,
+                X_train, X_test,
+                y_train, y_test,
+                n_rounds,
+                max_depth,
+                learning_rate,
+                iterations,
+                use_gpu_config=use_gpu,
+            )
+
+            if result:
+                print(f"    Train: {result.train_time_ms:>8.2f} ms (±{result.train_time_std:.2f})")
+                print(f"    Predict: {result.predict_time_ms:>6.2f} ms (±{result.predict_time_std:.2f})")
+                print(f"    MSE: {result.mse:.6f}, R²: {result.r2:.4f}")
+                results.append(result)
+
+        # Clean up
+        del X_train, X_test, y_train, y_test
+        gc.collect()
+
+    return results
+
+
+def run_gpu_comparison(
+    datasets: list[str],
+    libraries: list[str],
+    n_rounds: int,
+    max_depth: int,
+    learning_rate: float,
+    iterations: int,
+) -> list[BenchmarkResult]:
+    """Run CPU vs GPU benchmarks for specified libraries."""
     results = []
 
     for dataset_name in datasets:
@@ -399,7 +651,10 @@ def run_all_benchmarks(
                 continue
 
             print(f"\n  {lib}:")
-            result = run_benchmark(
+
+            # CPU benchmark
+            print(f"    CPU:")
+            cpu_result = run_benchmark(
                 lib,
                 dataset_name,
                 X_train, X_test,
@@ -408,13 +663,37 @@ def run_all_benchmarks(
                 max_depth,
                 learning_rate,
                 iterations,
+                device="cpu",
             )
 
-            if result:
-                print(f"    Train: {result.train_time_ms:>8.2f} ms (±{result.train_time_std:.2f})")
-                print(f"    Predict: {result.predict_time_ms:>6.2f} ms (±{result.predict_time_std:.2f})")
-                print(f"    MSE: {result.mse:.6f}, R²: {result.r2:.4f}")
-                results.append(result)
+            if cpu_result:
+                print(f"      Train: {cpu_result.train_time_ms:>8.2f} ms (±{cpu_result.train_time_std:.2f})")
+                print(f"      Predict: {cpu_result.predict_time_ms:>6.2f} ms (±{cpu_result.predict_time_std:.2f})")
+                results.append(cpu_result)
+
+            # GPU benchmark
+            print(f"    GPU:")
+            gpu_result = run_benchmark(
+                lib,
+                dataset_name,
+                X_train, X_test,
+                y_train, y_test,
+                n_rounds,
+                max_depth,
+                learning_rate,
+                iterations,
+                device="gpu",
+            )
+
+            if gpu_result:
+                print(f"      Train: {gpu_result.train_time_ms:>8.2f} ms (±{gpu_result.train_time_std:.2f})")
+                print(f"      Predict: {gpu_result.predict_time_ms:>6.2f} ms (±{gpu_result.predict_time_std:.2f})")
+                results.append(gpu_result)
+
+            # Show speedup if both succeeded
+            if cpu_result and gpu_result:
+                speedup = cpu_result.train_time_ms / gpu_result.train_time_ms
+                print(f"    GPU Speedup: {speedup:.2f}x")
 
         # Clean up
         del X_train, X_test, y_train, y_test
@@ -535,6 +814,44 @@ def print_summary(results: list[BenchmarkResult]):
         print()
 
 
+def print_gpu_summary(results: list[BenchmarkResult]):
+    """Print a GPU vs CPU summary table."""
+    if not results:
+        print("\nNo results to summarize.")
+        return
+
+    print("\n" + "=" * 90)
+    print("GPU vs CPU COMPARISON")
+    print("=" * 90)
+
+    # Group by dataset and library
+    datasets = sorted(set(r.dataset_name for r in results))
+    libraries = sorted(set(r.library for r in results))
+
+    print("\n--- Training Time (ms) and GPU Speedup ---")
+    print(f"{'Dataset':<12}{'Library':<12}{'CPU (ms)':>12}{'GPU (ms)':>12}{'Speedup':>12}{'Winner':>10}")
+    print("-" * 70)
+
+    for ds in datasets:
+        for lib in libraries:
+            cpu_result = next((r for r in results if r.dataset_name == ds and r.library == lib and r.device == "cpu"), None)
+            gpu_result = next((r for r in results if r.dataset_name == ds and r.library == lib and r.device == "gpu"), None)
+
+            if cpu_result or gpu_result:
+                cpu_time = f"{cpu_result.train_time_ms:.2f}" if cpu_result else "N/A"
+                gpu_time = f"{gpu_result.train_time_ms:.2f}" if gpu_result else "N/A"
+
+                if cpu_result and gpu_result:
+                    speedup = cpu_result.train_time_ms / gpu_result.train_time_ms
+                    winner = "GPU" if speedup > 1.0 else "CPU"
+                    speedup_str = f"{speedup:.2f}x"
+                else:
+                    speedup_str = "N/A"
+                    winner = "N/A"
+
+                print(f"{ds:<12}{lib:<12}{cpu_time:>12}{gpu_time:>12}{speedup_str:>12}{winner:>10}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Benchmark TreeBoost against other GBDT libraries"
@@ -595,13 +912,40 @@ def main():
         action="store_true",
         help="Don't save results to file"
     )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="cross-library",
+        choices=["cross-library", "cross-library-gpu", "treeboost-gpu", "xgboost-gpu", "lightgbm-gpu", "catboost-gpu", "all-gpu"],
+        help="Benchmark mode: cross-library (CPU, default), cross-library-gpu (all libs GPU), treeboost-gpu (CPU vs GPU), all-gpu (all libs CPU vs GPU)"
+    )
     args = parser.parse_args()
 
-    # Determine which libraries to benchmark
-    if args.only:
-        libraries = args.only
+    # Determine which libraries to benchmark based on mode
+    if args.mode == "cross-library":
+        if args.only:
+            libraries = args.only
+        else:
+            libraries = [lib for lib in LIBRARY_CONFIGS.keys() if lib not in args.skip]
+        is_gpu_mode = False
+        is_cross_gpu = False
+    elif args.mode == "cross-library-gpu":
+        if args.only:
+            libraries = args.only
+        else:
+            libraries = [lib for lib in LIBRARY_CONFIGS_GPU.keys() if lib not in args.skip]
+        is_gpu_mode = False
+        is_cross_gpu = True
+    elif args.mode == "all-gpu":
+        libraries = [lib for lib in GPU_CONFIGS.keys() if lib not in args.skip]
+        is_gpu_mode = True
+        is_cross_gpu = False
     else:
-        libraries = [lib for lib in LIBRARY_CONFIGS.keys() if lib not in args.skip]
+        # Single library GPU comparison (e.g., treeboost-gpu, xgboost-gpu)
+        lib_name = args.mode.replace("-gpu", "")
+        libraries = [lib_name]
+        is_gpu_mode = True
+        is_cross_gpu = False
 
     # Check at least one library is available
     available = [lib for lib in libraries if LIBRARIES.get(lib, False)]
@@ -611,14 +955,25 @@ def main():
         return 1
 
     print("=" * 70)
-    print("GBDT BENCHMARK: TreeBoost vs XGBoost vs LightGBM vs CatBoost")
+    if is_gpu_mode:
+        print(f"GBDT BENCHMARK: CPU vs GPU Comparison")
+    elif is_cross_gpu:
+        print("GBDT BENCHMARK: TreeBoost vs XGBoost vs LightGBM vs CatBoost (GPU)")
+    else:
+        print("GBDT BENCHMARK: TreeBoost vs XGBoost vs LightGBM vs CatBoost (CPU)")
     print("=" * 70)
 
     system_info = get_system_info()
     print(f"\nPlatform: {system_info.platform}")
     print(f"Python: {system_info.python_version}")
     print(f"CPU cores: {system_info.cpu_count}")
-    print(f"Device: CPU (all libraries forced to CPU-only)")
+
+    if is_gpu_mode:
+        print(f"Mode: CPU vs GPU comparison")
+    elif is_cross_gpu:
+        print(f"Device: GPU (all libraries using GPU)")
+    else:
+        print(f"Device: CPU (all libraries using CPU)")
 
     print(f"\nLibraries: {', '.join(available)}")
     print(f"Datasets: {', '.join(args.sizes)}")
@@ -626,17 +981,38 @@ def main():
     print(f"Iterations: {args.iterations}")
 
     # Run benchmarks
-    results = run_all_benchmarks(
-        datasets=args.sizes,
-        libraries=libraries,
-        n_rounds=args.rounds,
-        max_depth=args.max_depth,
-        learning_rate=args.learning_rate,
-        iterations=args.iterations,
-    )
-
-    # Print summary
-    print_summary(results)
+    if is_gpu_mode:
+        results = run_gpu_comparison(
+            datasets=args.sizes,
+            libraries=libraries,
+            n_rounds=args.rounds,
+            max_depth=args.max_depth,
+            learning_rate=args.learning_rate,
+            iterations=args.iterations,
+        )
+        print_gpu_summary(results)
+    elif is_cross_gpu:
+        results = run_all_benchmarks(
+            datasets=args.sizes,
+            libraries=libraries,
+            n_rounds=args.rounds,
+            max_depth=args.max_depth,
+            learning_rate=args.learning_rate,
+            iterations=args.iterations,
+            use_gpu=True,
+        )
+        print_summary(results)
+    else:
+        results = run_all_benchmarks(
+            datasets=args.sizes,
+            libraries=libraries,
+            n_rounds=args.rounds,
+            max_depth=args.max_depth,
+            learning_rate=args.learning_rate,
+            iterations=args.iterations,
+            use_gpu=False,
+        )
+        print_summary(results)
 
     # Save results
     if not args.no_save and results:
@@ -648,7 +1024,8 @@ def main():
             output_path = Path(args.output)
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_path = results_dir / f"benchmark_{timestamp}.json"
+            mode_suffix = f"_{args.mode}" if args.mode != "cross-library" else ""
+            output_path = results_dir / f"benchmark{mode_suffix}_{timestamp}.json"
 
         save_results(results, output_path, system_info)
 
