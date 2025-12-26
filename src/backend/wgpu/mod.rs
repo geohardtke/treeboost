@@ -114,64 +114,6 @@ impl WgpuBackend {
         )
     }
 
-    /// Pipelined histogram building with double-buffering.
-    ///
-    /// This method overlaps GPU compute with CPU data preparation:
-    /// - First call returns `None` (starts async compute, no previous result)
-    /// - Subsequent calls return previous histogram while starting next compute
-    /// - Use `flush_pipelined()` to get the final result
-    ///
-    /// # Performance
-    ///
-    /// For a sequence of N histogram builds:
-    /// - Synchronous: N * (upload + compute + download)
-    /// - Pipelined: 1 * upload + N * max(upload, compute) + 1 * download
-    ///
-    /// Expected 20-40% throughput improvement when upload time ≈ compute time.
-    pub fn build_histograms_pipelined(
-        &self,
-        bins: &dyn BinStorage,
-        grad_hess: &[(f32, f32)],
-        row_indices: &[usize],
-    ) -> Option<Vec<Histogram>> {
-        let num_rows = bins.num_rows();
-        let num_features = bins.num_features();
-
-        // Get row-major bins (converting if necessary)
-        let bins_row_major: std::borrow::Cow<[u8]> = match bins.as_row_major() {
-            Some(data) => std::borrow::Cow::Borrowed(data),
-            None => {
-                let mut row_major = vec![0u8; num_rows * num_features];
-                for f in 0..num_features {
-                    if let Some(col) = bins.feature_column(f) {
-                        for r in 0..num_rows {
-                            row_major[r * num_features + f] = col[r];
-                        }
-                    }
-                }
-                std::borrow::Cow::Owned(row_major)
-            }
-        };
-
-        self.kernel.build_histograms_pipelined(
-            &bins_row_major,
-            grad_hess,
-            row_indices,
-            num_rows,
-            num_features,
-        )
-    }
-
-    /// Flush pending pipelined work and return the final histogram.
-    ///
-    /// Call this after the last `build_histograms_pipelined()` to get the
-    /// final result that was still pending.
-    ///
-    /// Returns `None` if there was no pending work.
-    pub fn flush_pipelined(&self, num_features: usize) -> Option<Vec<Histogram>> {
-        self.kernel.flush_pipelined(num_features)
-    }
-
     /// Build histograms for multiple batches in a single GPU dispatch.
     ///
     /// This is significantly more efficient than calling `build_histograms` multiple times

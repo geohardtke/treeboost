@@ -153,7 +153,7 @@ impl GpuDevice {
         self.device.poll(wgpu::Maintain::Poll).is_queue_empty()
     }
 
-    /// Read buffer data back to CPU.
+    /// Read buffer data back to CPU (synchronous/blocking).
     pub fn read_buffer<T: bytemuck::Pod>(&self, staging: &Buffer, output: &mut [T]) {
         let slice = staging.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
