@@ -3,13 +3,23 @@
 //! Uses a sorted row array with position tracking for zero-allocation partitioning.
 //! This is the LightGBM approach: a single Vec<usize> contains all row indices,
 //! partitioned in-place by node. Each node tracks its range (start, end) into this array.
+//!
+//! # Backend Support
+//!
+//! Histogram building can use different backends:
+//! - Scalar (CPU): Default, uses cache-blocked approach with AVX2/NEON SIMD loads
+//! - WGPU (GPU): Uses compute shaders for parallel histogram accumulation
+//!
+//! Backend selection is automatic based on dataset size and hardware availability.
 
+use crate::backend::{BackendConfig, BackendSelector, BackendType, HistogramBackend};
 use crate::dataset::BinnedDataset;
-use crate::histogram::{FusedHistogramBuilder, HistogramBuilder, NodeHistograms};
+use crate::histogram::{FusedHistogramBuilder, Histogram, NodeHistograms};
 use crate::loss::LossFunction;
 use crate::tree::{InteractionConstraints, MonotonicConstraint, Node, SplitFinder, SplitInfo, Tree};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -144,8 +154,30 @@ impl SplitCandidate {
     }
 }
 
+/// State for a split being processed in a batch
+struct BatchedSplitState {
+    /// Original candidate info
+    node_idx: usize,
+    split_info: SplitInfo,
+    parent_histograms: NodeHistograms,
+    ancestor_features: Vec<usize>,
+
+    /// Smaller child info
+    smaller_start: usize,
+    smaller_end: usize,
+    smaller_idx: usize,
+    smaller_g: f32,
+    smaller_h: f32,
+
+    /// Larger child info
+    larger_start: usize,
+    larger_end: usize,
+    larger_idx: usize,
+    larger_g: f32,
+    larger_h: f32,
+}
+
 /// Tree grower configuration
-#[derive(Debug, Clone)]
 pub struct TreeGrower {
     /// Maximum depth of tree
     max_depth: usize,
@@ -169,6 +201,12 @@ pub struct TreeGrower {
     monotonic_constraints: Vec<MonotonicConstraint>,
     /// Feature interaction constraints
     interaction_constraints: InteractionConstraints,
+    /// Backend type for histogram building (Auto = choose based on dataset size)
+    backend_type: BackendType,
+    /// GPU batch size for histogram dispatch (0 = no batching)
+    gpu_batch_size: usize,
+    /// Cached backend instance (lazily initialized, reused across trees)
+    cached_backend: RefCell<Option<Box<dyn HistogramBackend>>>,
 }
 
 impl Default for TreeGrower {
@@ -185,6 +223,49 @@ impl Default for TreeGrower {
             colsample: 1.0, // Use all features by default
             monotonic_constraints: Vec::new(),
             interaction_constraints: InteractionConstraints::new(),
+            backend_type: BackendType::Auto,
+            gpu_batch_size: 32, // Default batch size for GPU histogram dispatch
+            cached_backend: RefCell::new(None),
+        }
+    }
+}
+
+impl std::fmt::Debug for TreeGrower {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TreeGrower")
+            .field("max_depth", &self.max_depth)
+            .field("max_leaves", &self.max_leaves)
+            .field("lambda", &self.lambda)
+            .field("min_samples_leaf", &self.min_samples_leaf)
+            .field("min_hessian_leaf", &self.min_hessian_leaf)
+            .field("entropy_weight", &self.entropy_weight)
+            .field("min_gain", &self.min_gain)
+            .field("learning_rate", &self.learning_rate)
+            .field("colsample", &self.colsample)
+            .field("backend_type", &self.backend_type)
+            .field("gpu_batch_size", &self.gpu_batch_size)
+            .finish()
+    }
+}
+
+impl Clone for TreeGrower {
+    fn clone(&self) -> Self {
+        Self {
+            max_depth: self.max_depth,
+            max_leaves: self.max_leaves,
+            lambda: self.lambda,
+            min_samples_leaf: self.min_samples_leaf,
+            min_hessian_leaf: self.min_hessian_leaf,
+            entropy_weight: self.entropy_weight,
+            min_gain: self.min_gain,
+            learning_rate: self.learning_rate,
+            colsample: self.colsample,
+            monotonic_constraints: self.monotonic_constraints.clone(),
+            interaction_constraints: self.interaction_constraints.clone(),
+            backend_type: self.backend_type.clone(),
+            gpu_batch_size: self.gpu_batch_size,
+            // Reset cached backend - clone gets its own lazily initialized backend
+            cached_backend: RefCell::new(None),
         }
     }
 }
@@ -257,6 +338,47 @@ impl TreeGrower {
         self
     }
 
+    /// Set the backend type for histogram building
+    ///
+    /// - `Auto`: Automatically choose based on dataset size and hardware
+    /// - `Wgpu`: Force GPU acceleration (falls back to Scalar if unavailable)
+    /// - `Scalar`: Force CPU-only (uses AVX2/NEON SIMD where available)
+    pub fn with_backend(mut self, backend_type: BackendType) -> Self {
+        self.backend_type = backend_type;
+        self
+    }
+
+    /// Set the GPU batch size for histogram dispatch
+    ///
+    /// When using GPU backend, multiple small histogram builds are batched together
+    /// into a single GPU dispatch to amortize dispatch overhead.
+    ///
+    /// - Default: 32 (optimal for trees with max_depth 5-6)
+    /// - Set to 0 to disable batching (for debugging or comparison)
+    pub fn with_gpu_batch_size(mut self, batch_size: usize) -> Self {
+        self.gpu_batch_size = batch_size;
+        self
+    }
+
+    /// Initialize backend (called once at start of tree growing)
+    fn ensure_backend(&self, num_rows: usize) {
+        let mut cached = self.cached_backend.borrow_mut();
+        if cached.is_none() {
+            let config = BackendConfig {
+                preferred: self.backend_type.clone(),
+                ..Default::default()
+            };
+            *cached = Some(BackendSelector::with_config(config).select(num_rows));
+        }
+    }
+
+    /// Get the backend for histogram operations
+    fn backend(&self) -> std::cell::Ref<'_, Box<dyn HistogramBackend>> {
+        std::cell::Ref::map(self.cached_backend.borrow(), |opt| {
+            opt.as_ref().expect("Backend not initialized")
+        })
+    }
+
     /// Create a split finder with current configuration
     fn create_split_finder(&self) -> SplitFinder {
         SplitFinder::new()
@@ -301,8 +423,18 @@ impl TreeGrower {
     ) -> Tree {
         let num_features = dataset.num_features();
         let num_rows = row_indices.len();
-        let histogram_builder = HistogramBuilder::new();
+
+        // Ensure backend is initialized
+        self.ensure_backend(num_rows);
         let split_finder = self.create_split_finder();
+
+        // Convert separate gradient/hessian arrays to interleaved format for backend
+        // This is a one-time cost per tree, amortized over all histogram builds
+        let grad_hess: Vec<(f32, f32)> = gradients
+            .iter()
+            .zip(hessians.iter())
+            .map(|(&g, &h)| (g, h))
+            .collect();
 
         // Generate column subsample mask (per tree)
         let feature_mask: Option<Vec<usize>> = if self.colsample < 1.0 {
@@ -339,13 +471,12 @@ impl TreeGrower {
         // Initialize row partitioner with all rows (single allocation for entire tree growth)
         let mut partitioner = RowPartitioner::new(row_indices.to_vec());
 
-        // Build root histograms from subsampled rows (feature-parallel via Rayon)
-        let root_histograms = histogram_builder.build(
+        // Build root histograms using backend
+        let root_histograms = NodeHistograms::from_vec(self.backend().build_histograms(
             dataset,
+            &grad_hess,
             partitioner.get_rows(0, num_rows),
-            gradients,
-            hessians,
-        );
+        ));
 
         // Compute effective feature mask for root (no ancestors)
         let root_feature_mask = self.compute_effective_feature_mask(
@@ -376,190 +507,235 @@ impl TreeGrower {
 
         let mut num_leaves = 1;
 
-        // Best-first growth loop
-        while let Some(candidate) = candidates.pop() {
-            // Check stopping conditions
-            if num_leaves >= self.max_leaves {
-                break;
-            }
+        // Determine batch size for GPU acceleration
+        // When batching is enabled, process multiple candidates per iteration
+        let use_batching = self.gpu_batch_size > 1 && self.backend().is_tensor_tile();
+        let effective_batch_size = if use_batching { self.gpu_batch_size } else { 1 };
 
-            let split_info = match &candidate.split_info {
-                Some(info) if info.is_valid() => info.clone(),
-                _ => continue, // No valid split
-            };
+        // Best-first growth loop with optional batching
+        while !candidates.is_empty() && num_leaves < self.max_leaves {
+            // Phase 1: Collect up to batch_size valid candidates
+            let mut batch_states: Vec<BatchedSplitState> = Vec::with_capacity(effective_batch_size);
 
-            let current_node = tree.get_node(candidate.node_idx);
-            if current_node.depth >= self.max_depth {
-                continue;
-            }
+            while batch_states.len() < effective_batch_size && !candidates.is_empty() {
+                let candidate = candidates.pop().unwrap();
 
-            // Perform the split: partition rows in-place (zero allocation!)
-            let mid = partitioner.partition_in_place(
-                dataset,
-                candidate.row_start,
-                candidate.row_end,
-                split_info.feature_idx,
-                split_info.bin_threshold,
-            );
-
-            let left_start = candidate.row_start;
-            let left_end = mid;
-            let right_start = mid;
-            let right_end = candidate.row_end;
-            let left_count = left_end - left_start;
-            let right_count = right_end - right_start;
-
-            // Create child leaf nodes
-            let left_weight = Node::compute_leaf_weight(
-                split_info.left_gradient,
-                split_info.left_hessian,
-                self.lambda,
-            );
-            let right_weight = Node::compute_leaf_weight(
-                split_info.right_gradient,
-                split_info.right_hessian,
-                self.lambda,
-            );
-
-            let child_depth = current_node.depth + 1;
-
-            let left_node = Node::leaf(
-                left_weight * self.learning_rate,
-                child_depth,
-                left_count,
-                split_info.left_gradient,
-                split_info.left_hessian,
-            );
-            let right_node = Node::leaf(
-                right_weight * self.learning_rate,
-                child_depth,
-                right_count,
-                split_info.right_gradient,
-                split_info.right_hessian,
-            );
-
-            let left_idx = tree.add_node(left_node);
-            let right_idx = tree.add_node(right_node);
-
-            // Get the actual split value from bin boundaries
-            let split_value = dataset.get_split_value(
-                split_info.feature_idx,
-                split_info.bin_threshold,
-            );
-
-            // Convert current leaf to internal node
-            let current_node = tree.get_node_mut(candidate.node_idx);
-            current_node.node_type = crate::tree::NodeType::Internal {
-                feature_idx: split_info.feature_idx,
-                bin_threshold: split_info.bin_threshold,
-                split_value,
-                left_child: left_idx,
-                right_child: right_idx,
-            };
-
-            num_leaves += 1; // One leaf becomes two (net +1)
-
-            // Skip further splits if we've reached the limit
-            if num_leaves >= self.max_leaves {
-                break;
-            }
-
-            // Build histograms for children using subtraction trick
-            let parent_histograms = candidate.histograms.unwrap();
-
-            // Determine smaller child for histogram subtraction trick
-            let (smaller_start, smaller_end, smaller_idx, larger_start, larger_end, larger_idx, smaller_g, smaller_h, larger_g, larger_h) =
-                if left_count <= right_count {
-                    (
-                        left_start,
-                        left_end,
-                        left_idx,
-                        right_start,
-                        right_end,
-                        right_idx,
-                        split_info.left_gradient,
-                        split_info.left_hessian,
-                        split_info.right_gradient,
-                        split_info.right_hessian,
-                    )
-                } else {
-                    (
-                        right_start,
-                        right_end,
-                        right_idx,
-                        left_start,
-                        left_end,
-                        left_idx,
-                        split_info.right_gradient,
-                        split_info.right_hessian,
-                        split_info.left_gradient,
-                        split_info.left_hessian,
-                    )
+                // Check if candidate has valid split
+                let split_info = match &candidate.split_info {
+                    Some(info) if info.is_valid() => info.clone(),
+                    _ => continue, // No valid split, try next candidate
                 };
 
-            let smaller_count = smaller_end - smaller_start;
-            let larger_count = larger_end - larger_start;
+                // Check depth constraint
+                let current_node = tree.get_node(candidate.node_idx);
+                if current_node.depth >= self.max_depth {
+                    continue;
+                }
 
-            // Build histogram for smaller child directly (feature-parallel via Rayon)
-            let smaller_histograms = histogram_builder.build(
-                dataset,
-                partitioner.get_rows(smaller_start, smaller_end),
-                gradients,
-                hessians,
-            );
+                // Check leaf limit
+                if num_leaves >= self.max_leaves {
+                    break;
+                }
 
-            // Compute larger child histogram using subtraction
-            let larger_histograms =
-                HistogramBuilder::build_sibling(&parent_histograms, &smaller_histograms);
+                // Perform the split: partition rows in-place (zero allocation!)
+                let mid = partitioner.partition_in_place(
+                    dataset,
+                    candidate.row_start,
+                    candidate.row_end,
+                    split_info.feature_idx,
+                    split_info.bin_threshold,
+                );
 
-            // Compute child ancestor features (parent's ancestors + current split feature)
-            let mut child_ancestors = candidate.ancestor_features.clone();
-            child_ancestors.push(split_info.feature_idx);
+                let left_start = candidate.row_start;
+                let left_end = mid;
+                let right_start = mid;
+                let right_end = candidate.row_end;
+                let left_count = left_end - left_start;
+                let right_count = right_end - right_start;
 
-            // Compute effective feature mask for children (interaction + column subsampling)
-            let child_feature_mask = self.compute_effective_feature_mask(
-                &child_ancestors,
-                feature_mask.as_deref(),
-                num_features,
-            );
+                // Create child leaf nodes
+                let left_weight = Node::compute_leaf_weight(
+                    split_info.left_gradient,
+                    split_info.left_hessian,
+                    self.lambda,
+                );
+                let right_weight = Node::compute_leaf_weight(
+                    split_info.right_gradient,
+                    split_info.right_hessian,
+                    self.lambda,
+                );
 
-            // Find splits for children
-            let smaller_split = split_finder.find_best_split_with_features(
-                &smaller_histograms,
-                smaller_g,
-                smaller_h,
-                smaller_count as u32,
-                child_feature_mask.as_deref(),
-            );
-            let larger_split = split_finder.find_best_split_with_features(
-                &larger_histograms,
-                larger_g,
-                larger_h,
-                larger_count as u32,
-                child_feature_mask.as_deref(),
-            );
+                let child_depth = current_node.depth + 1;
 
-            candidates.push(SplitCandidate {
-                node_idx: smaller_idx,
-                row_start: smaller_start,
-                row_end: smaller_end,
-                histograms: Some(smaller_histograms),
-                split_info: smaller_split,
-                sum_gradients: smaller_g,
-                sum_hessians: smaller_h,
-                ancestor_features: child_ancestors.clone(),
-            });
+                let left_node = Node::leaf(
+                    left_weight * self.learning_rate,
+                    child_depth,
+                    left_count,
+                    split_info.left_gradient,
+                    split_info.left_hessian,
+                );
+                let right_node = Node::leaf(
+                    right_weight * self.learning_rate,
+                    child_depth,
+                    right_count,
+                    split_info.right_gradient,
+                    split_info.right_hessian,
+                );
 
-            candidates.push(SplitCandidate {
-                node_idx: larger_idx,
-                row_start: larger_start,
-                row_end: larger_end,
-                histograms: Some(larger_histograms),
-                split_info: larger_split,
-                sum_gradients: larger_g,
-                sum_hessians: larger_h,
-                ancestor_features: child_ancestors,
-            });
+                let left_idx = tree.add_node(left_node);
+                let right_idx = tree.add_node(right_node);
+
+                // Get the actual split value from bin boundaries
+                let split_value = dataset.get_split_value(
+                    split_info.feature_idx,
+                    split_info.bin_threshold,
+                );
+
+                // Convert current leaf to internal node
+                let current_node = tree.get_node_mut(candidate.node_idx);
+                current_node.node_type = crate::tree::NodeType::Internal {
+                    feature_idx: split_info.feature_idx,
+                    bin_threshold: split_info.bin_threshold,
+                    split_value,
+                    left_child: left_idx,
+                    right_child: right_idx,
+                };
+
+                num_leaves += 1; // One leaf becomes two (net +1)
+
+                // Skip histogram building if we've hit the leaf limit
+                if num_leaves >= self.max_leaves {
+                    break;
+                }
+
+                // Determine smaller child for histogram subtraction trick
+                let parent_histograms = candidate.histograms.unwrap();
+                let (smaller_start, smaller_end, smaller_idx, larger_start, larger_end, larger_idx, smaller_g, smaller_h, larger_g, larger_h) =
+                    if left_count <= right_count {
+                        (
+                            left_start, left_end, left_idx,
+                            right_start, right_end, right_idx,
+                            split_info.left_gradient, split_info.left_hessian,
+                            split_info.right_gradient, split_info.right_hessian,
+                        )
+                    } else {
+                        (
+                            right_start, right_end, right_idx,
+                            left_start, left_end, left_idx,
+                            split_info.right_gradient, split_info.right_hessian,
+                            split_info.left_gradient, split_info.left_hessian,
+                        )
+                    };
+
+                // Store state for batched histogram building
+                batch_states.push(BatchedSplitState {
+                    node_idx: candidate.node_idx,
+                    split_info,
+                    parent_histograms,
+                    ancestor_features: candidate.ancestor_features,
+                    smaller_start,
+                    smaller_end,
+                    smaller_idx,
+                    smaller_g,
+                    smaller_h,
+                    larger_start,
+                    larger_end,
+                    larger_idx,
+                    larger_g,
+                    larger_h,
+                });
+            }
+
+            // Phase 2: Build histograms (batched for GPU, individual for CPU)
+            if batch_states.is_empty() {
+                break;
+            }
+
+            let all_smaller_histograms: Vec<Vec<Histogram>> = if use_batching && batch_states.len() > 1 {
+                // Batched GPU dispatch: build all histograms in one kernel launch
+                let row_slices: Vec<&[usize]> = batch_states
+                    .iter()
+                    .map(|state| partitioner.get_rows(state.smaller_start, state.smaller_end))
+                    .collect();
+                self.backend().build_histograms_batched(dataset, &grad_hess, &row_slices)
+            } else {
+                // Individual builds (CPU or single histogram)
+                batch_states
+                    .iter()
+                    .map(|state| {
+                        self.backend().build_histograms(
+                            dataset,
+                            &grad_hess,
+                            partitioner.get_rows(state.smaller_start, state.smaller_end),
+                        )
+                    })
+                    .collect()
+            };
+
+            // Phase 3: Process results - compute larger children, find splits, push to heap
+            for (state, smaller_hists) in batch_states.into_iter().zip(all_smaller_histograms.into_iter()) {
+                let smaller_histograms = NodeHistograms::from_vec(smaller_hists);
+
+                // Compute larger child histogram using subtraction trick
+                let larger_histograms = NodeHistograms::from_vec(
+                    self.backend().build_histograms_sibling(
+                        &state.parent_histograms.histograms,
+                        &smaller_histograms.histograms,
+                    ),
+                );
+
+                let smaller_count = state.smaller_end - state.smaller_start;
+                let larger_count = state.larger_end - state.larger_start;
+
+                // Compute child ancestor features (parent's ancestors + current split feature)
+                let mut child_ancestors = state.ancestor_features;
+                child_ancestors.push(state.split_info.feature_idx);
+
+                // Compute effective feature mask for children (interaction + column subsampling)
+                let child_feature_mask = self.compute_effective_feature_mask(
+                    &child_ancestors,
+                    feature_mask.as_deref(),
+                    num_features,
+                );
+
+                // Find splits for children
+                let smaller_split = split_finder.find_best_split_with_features(
+                    &smaller_histograms,
+                    state.smaller_g,
+                    state.smaller_h,
+                    smaller_count as u32,
+                    child_feature_mask.as_deref(),
+                );
+                let larger_split = split_finder.find_best_split_with_features(
+                    &larger_histograms,
+                    state.larger_g,
+                    state.larger_h,
+                    larger_count as u32,
+                    child_feature_mask.as_deref(),
+                );
+
+                candidates.push(SplitCandidate {
+                    node_idx: state.smaller_idx,
+                    row_start: state.smaller_start,
+                    row_end: state.smaller_end,
+                    histograms: Some(smaller_histograms),
+                    split_info: smaller_split,
+                    sum_gradients: state.smaller_g,
+                    sum_hessians: state.smaller_h,
+                    ancestor_features: child_ancestors.clone(),
+                });
+
+                candidates.push(SplitCandidate {
+                    node_idx: state.larger_idx,
+                    row_start: state.larger_start,
+                    row_end: state.larger_end,
+                    histograms: Some(larger_histograms),
+                    split_info: larger_split,
+                    sum_gradients: state.larger_g,
+                    sum_hessians: state.larger_h,
+                    ancestor_features: child_ancestors,
+                });
+            }
         }
 
         tree
@@ -596,7 +772,9 @@ impl TreeGrower {
     ) -> Tree {
         let num_features = dataset.num_features();
         let num_rows = row_indices.len();
-        let histogram_builder = HistogramBuilder::new();
+
+        // Ensure backend is initialized
+        self.ensure_backend(num_rows);
         let fused_builder = FusedHistogramBuilder::new();
         let split_finder = self.create_split_finder();
 
@@ -633,6 +811,14 @@ impl TreeGrower {
         let total_gradient = fused_result.total_gradient;
         let total_hessian = fused_result.total_hessian;
         let root_histograms = fused_result.histograms;
+
+        // Convert pre-computed gradients/hessians to interleaved format for backend
+        // This is done once after the fused root computation
+        let grad_hess: Vec<(f32, f32)> = gradients
+            .iter()
+            .zip(hessians.iter())
+            .map(|(&g, &h)| (g, h))
+            .collect();
 
         let initial_weight = Node::compute_leaf_weight(total_gradient, total_hessian, self.lambda);
 
@@ -676,166 +862,216 @@ impl TreeGrower {
 
         let mut num_leaves = 1;
 
-        // Best-first growth loop (same as grow_with_indices, but uses pre-computed gradients)
-        while let Some(candidate) = candidates.pop() {
-            if num_leaves >= self.max_leaves {
-                break;
-            }
+        // Determine batch size for GPU acceleration
+        let use_batching = self.gpu_batch_size > 1 && self.backend().is_tensor_tile();
+        let effective_batch_size = if use_batching { self.gpu_batch_size } else { 1 };
 
-            let split_info = match &candidate.split_info {
-                Some(info) if info.is_valid() => info.clone(),
-                _ => continue,
-            };
+        // Best-first growth loop with optional batching (uses pre-computed gradients)
+        while !candidates.is_empty() && num_leaves < self.max_leaves {
+            // Phase 1: Collect up to batch_size valid candidates
+            let mut batch_states: Vec<BatchedSplitState> = Vec::with_capacity(effective_batch_size);
 
-            let current_node = tree.get_node(candidate.node_idx);
-            if current_node.depth >= self.max_depth {
-                continue;
-            }
+            while batch_states.len() < effective_batch_size && !candidates.is_empty() {
+                let candidate = candidates.pop().unwrap();
 
-            // Partition rows in-place
-            let mid = partitioner.partition_in_place(
-                dataset,
-                candidate.row_start,
-                candidate.row_end,
-                split_info.feature_idx,
-                split_info.bin_threshold,
-            );
-
-            let left_start = candidate.row_start;
-            let left_end = mid;
-            let right_start = mid;
-            let right_end = candidate.row_end;
-            let left_count = left_end - left_start;
-            let right_count = right_end - right_start;
-
-            if left_count < self.min_samples_leaf || right_count < self.min_samples_leaf {
-                continue;
-            }
-
-            // Create child leaf nodes
-            let left_weight =
-                Node::compute_leaf_weight(split_info.left_gradient, split_info.left_hessian, self.lambda);
-            let right_weight =
-                Node::compute_leaf_weight(split_info.right_gradient, split_info.right_hessian, self.lambda);
-
-            let child_depth = current_node.depth + 1;
-
-            let left_node = Node::leaf(
-                left_weight * self.learning_rate,
-                child_depth,
-                left_count,
-                split_info.left_gradient,
-                split_info.left_hessian,
-            );
-            let right_node = Node::leaf(
-                right_weight * self.learning_rate,
-                child_depth,
-                right_count,
-                split_info.right_gradient,
-                split_info.right_hessian,
-            );
-
-            let left_idx = tree.add_node(left_node);
-            let right_idx = tree.add_node(right_node);
-
-            // Get the actual split value from bin boundaries
-            let split_value = dataset.get_split_value(
-                split_info.feature_idx,
-                split_info.bin_threshold,
-            );
-
-            // Convert current leaf to internal node
-            let current_node = tree.get_node_mut(candidate.node_idx);
-            current_node.node_type = crate::tree::NodeType::Internal {
-                feature_idx: split_info.feature_idx,
-                bin_threshold: split_info.bin_threshold,
-                split_value,
-                left_child: left_idx,
-                right_child: right_idx,
-            };
-
-            num_leaves += 1;
-
-            if num_leaves >= self.max_leaves {
-                break;
-            }
-
-            // Build child histograms using the pre-computed gradients
-            let parent_histograms = candidate.histograms.unwrap();
-
-            let (smaller_start, smaller_end, smaller_idx, larger_start, larger_end, larger_idx, smaller_g, smaller_h, larger_g, larger_h) =
-                if left_count <= right_count {
-                    (left_start, left_end, left_idx, right_start, right_end, right_idx,
-                     split_info.left_gradient, split_info.left_hessian,
-                     split_info.right_gradient, split_info.right_hessian)
-                } else {
-                    (right_start, right_end, right_idx, left_start, left_end, left_idx,
-                     split_info.right_gradient, split_info.right_hessian,
-                     split_info.left_gradient, split_info.left_hessian)
+                let split_info = match &candidate.split_info {
+                    Some(info) if info.is_valid() => info.clone(),
+                    _ => continue,
                 };
 
-            let smaller_count = smaller_end - smaller_start;
-            let larger_count = larger_end - larger_start;
+                let current_node = tree.get_node(candidate.node_idx);
+                if current_node.depth >= self.max_depth {
+                    continue;
+                }
 
-            // Build histogram for smaller child (uses pre-computed gradients)
-            let smaller_histograms = histogram_builder.build(
-                dataset,
-                partitioner.get_rows(smaller_start, smaller_end),
-                gradients,
-                hessians,
-            );
+                if num_leaves >= self.max_leaves {
+                    break;
+                }
 
-            // Compute larger child histogram using subtraction
-            let larger_histograms =
-                HistogramBuilder::build_sibling(&parent_histograms, &smaller_histograms);
+                // Partition rows in-place
+                let mid = partitioner.partition_in_place(
+                    dataset,
+                    candidate.row_start,
+                    candidate.row_end,
+                    split_info.feature_idx,
+                    split_info.bin_threshold,
+                );
 
-            // Compute child ancestor features
-            let mut child_ancestors = candidate.ancestor_features.clone();
-            child_ancestors.push(split_info.feature_idx);
+                let left_start = candidate.row_start;
+                let left_end = mid;
+                let right_start = mid;
+                let right_end = candidate.row_end;
+                let left_count = left_end - left_start;
+                let right_count = right_end - right_start;
 
-            let child_feature_mask = self.compute_effective_feature_mask(
-                &child_ancestors,
-                feature_mask.as_deref(),
-                num_features,
-            );
+                if left_count < self.min_samples_leaf || right_count < self.min_samples_leaf {
+                    continue;
+                }
 
-            // Find splits for children
-            let smaller_split = split_finder.find_best_split_with_features(
-                &smaller_histograms,
-                smaller_g,
-                smaller_h,
-                smaller_count as u32,
-                child_feature_mask.as_deref(),
-            );
-            let larger_split = split_finder.find_best_split_with_features(
-                &larger_histograms,
-                larger_g,
-                larger_h,
-                larger_count as u32,
-                child_feature_mask.as_deref(),
-            );
+                // Create child leaf nodes
+                let left_weight =
+                    Node::compute_leaf_weight(split_info.left_gradient, split_info.left_hessian, self.lambda);
+                let right_weight =
+                    Node::compute_leaf_weight(split_info.right_gradient, split_info.right_hessian, self.lambda);
 
-            candidates.push(SplitCandidate {
-                node_idx: smaller_idx,
-                row_start: smaller_start,
-                row_end: smaller_end,
-                histograms: Some(smaller_histograms),
-                split_info: smaller_split,
-                sum_gradients: smaller_g,
-                sum_hessians: smaller_h,
-                ancestor_features: child_ancestors.clone(),
-            });
+                let child_depth = current_node.depth + 1;
 
-            candidates.push(SplitCandidate {
-                node_idx: larger_idx,
-                row_start: larger_start,
-                row_end: larger_end,
-                histograms: Some(larger_histograms),
-                split_info: larger_split,
-                sum_gradients: larger_g,
-                sum_hessians: larger_h,
-                ancestor_features: child_ancestors,
-            });
+                let left_node = Node::leaf(
+                    left_weight * self.learning_rate,
+                    child_depth,
+                    left_count,
+                    split_info.left_gradient,
+                    split_info.left_hessian,
+                );
+                let right_node = Node::leaf(
+                    right_weight * self.learning_rate,
+                    child_depth,
+                    right_count,
+                    split_info.right_gradient,
+                    split_info.right_hessian,
+                );
+
+                let left_idx = tree.add_node(left_node);
+                let right_idx = tree.add_node(right_node);
+
+                // Get the actual split value from bin boundaries
+                let split_value = dataset.get_split_value(
+                    split_info.feature_idx,
+                    split_info.bin_threshold,
+                );
+
+                // Convert current leaf to internal node
+                let current_node = tree.get_node_mut(candidate.node_idx);
+                current_node.node_type = crate::tree::NodeType::Internal {
+                    feature_idx: split_info.feature_idx,
+                    bin_threshold: split_info.bin_threshold,
+                    split_value,
+                    left_child: left_idx,
+                    right_child: right_idx,
+                };
+
+                num_leaves += 1;
+
+                if num_leaves >= self.max_leaves {
+                    break;
+                }
+
+                // Build child histograms using the pre-computed gradients
+                let parent_histograms = candidate.histograms.unwrap();
+
+                let (smaller_start, smaller_end, smaller_idx, larger_start, larger_end, larger_idx, smaller_g, smaller_h, larger_g, larger_h) =
+                    if left_count <= right_count {
+                        (left_start, left_end, left_idx, right_start, right_end, right_idx,
+                         split_info.left_gradient, split_info.left_hessian,
+                         split_info.right_gradient, split_info.right_hessian)
+                    } else {
+                        (right_start, right_end, right_idx, left_start, left_end, left_idx,
+                         split_info.right_gradient, split_info.right_hessian,
+                         split_info.left_gradient, split_info.left_hessian)
+                    };
+
+                batch_states.push(BatchedSplitState {
+                    node_idx: candidate.node_idx,
+                    split_info,
+                    parent_histograms,
+                    ancestor_features: candidate.ancestor_features,
+                    smaller_start,
+                    smaller_end,
+                    smaller_idx,
+                    smaller_g,
+                    smaller_h,
+                    larger_start,
+                    larger_end,
+                    larger_idx,
+                    larger_g,
+                    larger_h,
+                });
+            }
+
+            // Phase 2: Build histograms (batched for GPU, individual for CPU)
+            if batch_states.is_empty() {
+                break;
+            }
+
+            let all_smaller_histograms: Vec<Vec<Histogram>> = if use_batching && batch_states.len() > 1 {
+                let row_slices: Vec<&[usize]> = batch_states
+                    .iter()
+                    .map(|state| partitioner.get_rows(state.smaller_start, state.smaller_end))
+                    .collect();
+                self.backend().build_histograms_batched(dataset, &grad_hess, &row_slices)
+            } else {
+                batch_states
+                    .iter()
+                    .map(|state| {
+                        self.backend().build_histograms(
+                            dataset,
+                            &grad_hess,
+                            partitioner.get_rows(state.smaller_start, state.smaller_end),
+                        )
+                    })
+                    .collect()
+            };
+
+            // Phase 3: Process results
+            for (state, smaller_hists) in batch_states.into_iter().zip(all_smaller_histograms.into_iter()) {
+                let smaller_histograms = NodeHistograms::from_vec(smaller_hists);
+
+                let larger_histograms = NodeHistograms::from_vec(
+                    self.backend().build_histograms_sibling(
+                        &state.parent_histograms.histograms,
+                        &smaller_histograms.histograms,
+                    ),
+                );
+
+                let smaller_count = state.smaller_end - state.smaller_start;
+                let larger_count = state.larger_end - state.larger_start;
+
+                let mut child_ancestors = state.ancestor_features;
+                child_ancestors.push(state.split_info.feature_idx);
+
+                let child_feature_mask = self.compute_effective_feature_mask(
+                    &child_ancestors,
+                    feature_mask.as_deref(),
+                    num_features,
+                );
+
+                let smaller_split = split_finder.find_best_split_with_features(
+                    &smaller_histograms,
+                    state.smaller_g,
+                    state.smaller_h,
+                    smaller_count as u32,
+                    child_feature_mask.as_deref(),
+                );
+                let larger_split = split_finder.find_best_split_with_features(
+                    &larger_histograms,
+                    state.larger_g,
+                    state.larger_h,
+                    larger_count as u32,
+                    child_feature_mask.as_deref(),
+                );
+
+                candidates.push(SplitCandidate {
+                    node_idx: state.smaller_idx,
+                    row_start: state.smaller_start,
+                    row_end: state.smaller_end,
+                    histograms: Some(smaller_histograms),
+                    split_info: smaller_split,
+                    sum_gradients: state.smaller_g,
+                    sum_hessians: state.smaller_h,
+                    ancestor_features: child_ancestors.clone(),
+                });
+
+                candidates.push(SplitCandidate {
+                    node_idx: state.larger_idx,
+                    row_start: state.larger_start,
+                    row_end: state.larger_end,
+                    histograms: Some(larger_histograms),
+                    split_info: larger_split,
+                    sum_gradients: state.larger_g,
+                    sum_hessians: state.larger_h,
+                    ancestor_features: child_ancestors,
+                });
+            }
         }
 
         tree

@@ -411,8 +411,8 @@ fn main() {
         let grad_hess = create_grad_hess(num_rows);
         let row_indices: Vec<usize> = (0..num_rows).collect();
 
-        let mut scalar_result = None;
-        let mut wgpu_result = None;
+        let mut scalar_result: Option<BenchResult> = None;
+        let mut wgpu_result: Option<BenchResult> = None;
 
         // Benchmark scalar
         if bench_scalar {

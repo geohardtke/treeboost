@@ -17,8 +17,11 @@
 pub mod device;
 pub mod kernels;
 
+pub use kernels::GpuProfileData;
+
 use std::sync::Arc;
 
+use crate::backend::scalar::ScalarBackend;
 use crate::backend::traits::{BinStorage, HistogramBackend, SplitCandidate, SplitConfig};
 use crate::histogram::Histogram;
 use crate::kernel;
@@ -29,10 +32,13 @@ use kernels::HistogramKernel;
 /// WGPU GPU backend for histogram building.
 ///
 /// Uses compute shaders for parallel histogram accumulation across all features.
-/// Falls back to CPU for operations that don't benefit from GPU parallelism.
+/// Falls back to CPU for operations that don't benefit from GPU parallelism,
+/// including small histogram builds where GPU overhead dominates.
 pub struct WgpuBackend {
     device: Arc<GpuDevice>,
     kernel: HistogramKernel,
+    /// CPU fallback for small row counts where GPU overhead dominates
+    cpu_fallback: ScalarBackend,
 }
 
 impl WgpuBackend {
@@ -50,7 +56,11 @@ impl WgpuBackend {
         //     device.backend()
         // );
 
-        Some(Self { device, kernel })
+        Some(Self {
+            device,
+            kernel,
+            cpu_fallback: ScalarBackend::new(),
+        })
     }
 
     /// Get the GPU device name.
@@ -61,6 +71,161 @@ impl WgpuBackend {
     /// Get the GPU backend type (Vulkan, Metal, DX12).
     pub fn backend_type(&self) -> wgpu::Backend {
         self.device.backend()
+    }
+
+    /// Build histograms with detailed profiling.
+    ///
+    /// Returns histograms and detailed timing for each GPU operation.
+    /// Useful for understanding GPU overhead and identifying bottlenecks.
+    ///
+    /// Note: This bypasses the CPU fallback for small row counts to profile
+    /// the actual GPU path.
+    pub fn build_histograms_profiled(
+        &self,
+        bins: &dyn BinStorage,
+        grad_hess: &[(f32, f32)],
+        row_indices: &[usize],
+    ) -> (Vec<Histogram>, GpuProfileData) {
+        let num_rows = bins.num_rows();
+        let num_features = bins.num_features();
+
+        // Get row-major bins (converting if necessary)
+        let bins_row_major: std::borrow::Cow<[u8]> = match bins.as_row_major() {
+            Some(data) => std::borrow::Cow::Borrowed(data),
+            None => {
+                let mut row_major = vec![0u8; num_rows * num_features];
+                for f in 0..num_features {
+                    if let Some(col) = bins.feature_column(f) {
+                        for r in 0..num_rows {
+                            row_major[r * num_features + f] = col[r];
+                        }
+                    }
+                }
+                std::borrow::Cow::Owned(row_major)
+            }
+        };
+
+        self.kernel.build_histograms_profiled(
+            &bins_row_major,
+            grad_hess,
+            row_indices,
+            num_rows,
+            num_features,
+        )
+    }
+
+    /// Pipelined histogram building with double-buffering.
+    ///
+    /// This method overlaps GPU compute with CPU data preparation:
+    /// - First call returns `None` (starts async compute, no previous result)
+    /// - Subsequent calls return previous histogram while starting next compute
+    /// - Use `flush_pipelined()` to get the final result
+    ///
+    /// # Performance
+    ///
+    /// For a sequence of N histogram builds:
+    /// - Synchronous: N * (upload + compute + download)
+    /// - Pipelined: 1 * upload + N * max(upload, compute) + 1 * download
+    ///
+    /// Expected 20-40% throughput improvement when upload time ≈ compute time.
+    pub fn build_histograms_pipelined(
+        &self,
+        bins: &dyn BinStorage,
+        grad_hess: &[(f32, f32)],
+        row_indices: &[usize],
+    ) -> Option<Vec<Histogram>> {
+        let num_rows = bins.num_rows();
+        let num_features = bins.num_features();
+
+        // Get row-major bins (converting if necessary)
+        let bins_row_major: std::borrow::Cow<[u8]> = match bins.as_row_major() {
+            Some(data) => std::borrow::Cow::Borrowed(data),
+            None => {
+                let mut row_major = vec![0u8; num_rows * num_features];
+                for f in 0..num_features {
+                    if let Some(col) = bins.feature_column(f) {
+                        for r in 0..num_rows {
+                            row_major[r * num_features + f] = col[r];
+                        }
+                    }
+                }
+                std::borrow::Cow::Owned(row_major)
+            }
+        };
+
+        self.kernel.build_histograms_pipelined(
+            &bins_row_major,
+            grad_hess,
+            row_indices,
+            num_rows,
+            num_features,
+        )
+    }
+
+    /// Flush pending pipelined work and return the final histogram.
+    ///
+    /// Call this after the last `build_histograms_pipelined()` to get the
+    /// final result that was still pending.
+    ///
+    /// Returns `None` if there was no pending work.
+    pub fn flush_pipelined(&self, num_features: usize) -> Option<Vec<Histogram>> {
+        self.kernel.flush_pipelined(num_features)
+    }
+
+    /// Build histograms for multiple batches in a single GPU dispatch.
+    ///
+    /// This is significantly more efficient than calling `build_histograms` multiple times
+    /// because it amortizes GPU dispatch overhead across all batches.
+    ///
+    /// # Performance
+    ///
+    /// For N batches of small row subsets:
+    /// - Individual: N * dispatch_overhead + N * compute_time
+    /// - Batched: 1 * dispatch_overhead + N * compute_time (parallel)
+    ///
+    /// Expected speedup: 2-30x depending on batch count and sizes.
+    ///
+    /// # Arguments
+    ///
+    /// * `bins` - Dataset with bin data
+    /// * `grad_hess` - Gradient/hessian pairs for entire dataset
+    /// * `batches` - Slice of row index arrays, one per batch
+    ///
+    /// # Returns
+    ///
+    /// Vector of histogram vectors, one per batch.
+    pub fn build_histograms_batched(
+        &self,
+        bins: &dyn BinStorage,
+        grad_hess: &[(f32, f32)],
+        batches: &[&[usize]],
+    ) -> Vec<Vec<Histogram>> {
+        let num_rows = bins.num_rows();
+        let num_features = bins.num_features();
+
+        // Get row-major bins (converting if necessary)
+        let bins_row_major: std::borrow::Cow<[u8]> = match bins.as_row_major() {
+            Some(data) => std::borrow::Cow::Borrowed(data),
+            None => {
+                let mut row_major = vec![0u8; num_rows * num_features];
+                for f in 0..num_features {
+                    if let Some(col) = bins.feature_column(f) {
+                        for r in 0..num_rows {
+                            row_major[r * num_features + f] = col[r];
+                        }
+                    }
+                }
+                std::borrow::Cow::Owned(row_major)
+            }
+        };
+
+        self.kernel.build_histograms_batched(
+            &bins_row_major,
+            grad_hess,
+            batches,
+            num_rows,
+            num_features,
+        )
     }
 }
 
@@ -174,6 +339,16 @@ impl HistogramBackend for WgpuBackend {
         }
 
         best
+    }
+
+    fn build_histograms_batched(
+        &self,
+        bins: &dyn BinStorage,
+        grad_hess: &[(f32, f32)],
+        batches: &[&[usize]],
+    ) -> Vec<Vec<Histogram>> {
+        // Use the optimized GPU batched implementation
+        WgpuBackend::build_histograms_batched(self, bins, grad_hess, batches)
     }
 }
 

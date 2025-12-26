@@ -67,6 +67,12 @@ pub struct BackendConfig {
     /// Minimum dataset size to use tensor-tile backends.
     /// Below this threshold, scalar is always used (lower overhead).
     pub tensor_tile_min_rows: usize,
+
+    /// GPU histogram batch size for tree growth.
+    /// When growing trees, multiple small histogram builds are batched together
+    /// into a single GPU dispatch to amortize dispatch overhead.
+    /// Default: 32 (optimal for trees with max_depth 5-6)
+    pub gpu_batch_size: usize,
 }
 
 impl Default for BackendConfig {
@@ -75,6 +81,7 @@ impl Default for BackendConfig {
             preferred: BackendType::Auto,
             fallback_to_scalar: true,
             tensor_tile_min_rows: 10_000,
+            gpu_batch_size: 32,
         }
     }
 }
@@ -86,6 +93,7 @@ impl BackendConfig {
             preferred: BackendType::Scalar,
             fallback_to_scalar: true,
             tensor_tile_min_rows: usize::MAX,
+            gpu_batch_size: 32,
         }
     }
 
@@ -95,6 +103,13 @@ impl BackendConfig {
             preferred: BackendType::Wgpu,
             fallback_to_scalar: true,
             tensor_tile_min_rows: 10_000,
+            gpu_batch_size: 32,
         }
+    }
+
+    /// Set the GPU batch size for histogram building.
+    pub fn with_gpu_batch_size(mut self, batch_size: usize) -> Self {
+        self.gpu_batch_size = batch_size;
+        self
     }
 }

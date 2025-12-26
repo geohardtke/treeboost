@@ -154,4 +154,32 @@ pub trait HistogramBackend: Send + Sync {
         histograms: &[Histogram],
         config: &SplitConfig,
     ) -> Option<SplitCandidate>;
+
+    /// Build histograms for multiple batches in a single dispatch.
+    ///
+    /// This method allows GPU backends to batch multiple small histogram builds
+    /// into a single dispatch, amortizing dispatch overhead.
+    ///
+    /// # Arguments
+    /// * `bins` - Binned feature data
+    /// * `grad_hess` - Interleaved (gradient, hessian) pairs for each row
+    /// * `batches` - Slice of row index slices, one per batch
+    ///
+    /// # Returns
+    /// A vector of histogram vectors, one per batch.
+    ///
+    /// # Default Implementation
+    /// Falls back to individual `build_histograms` calls.
+    fn build_histograms_batched(
+        &self,
+        bins: &dyn BinStorage,
+        grad_hess: &[(f32, f32)],
+        batches: &[&[usize]],
+    ) -> Vec<Vec<Histogram>> {
+        // Default: fall back to individual builds
+        batches
+            .iter()
+            .map(|row_indices| self.build_histograms(bins, grad_hess, row_indices))
+            .collect()
+    }
 }

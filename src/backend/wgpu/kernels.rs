@@ -20,7 +20,48 @@
 use super::device::GpuDevice;
 use crate::histogram::Histogram;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use wgpu::{BindGroupDescriptor, BindGroupEntry, BindGroupLayout, Buffer, ComputePipeline};
+
+/// Detailed timing breakdown for GPU histogram building.
+/// All times are in seconds.
+#[derive(Debug, Clone, Default)]
+pub struct GpuProfileData {
+    /// CPU: Convert indices to u32
+    pub indices_convert: Duration,
+    /// CPU: Check bins alignment / pack to u32
+    pub bins_pack: Duration,
+    /// GPU: Ensure buffers are allocated (may include allocation)
+    pub buffer_alloc: Duration,
+    /// GPU: Upload params to uniform buffer
+    pub upload_params: Duration,
+    /// GPU: Upload bins (may be skipped if cached)
+    pub upload_bins: Duration,
+    /// Whether bins upload was skipped due to caching
+    pub bins_cached: bool,
+    /// GPU: Upload grad/hess
+    pub upload_grad_hess: Duration,
+    /// GPU: Upload indices
+    pub upload_indices: Duration,
+    /// GPU: Create bind groups
+    pub bind_group_create: Duration,
+    /// GPU: Encode zero pass + histogram pass + copy commands
+    pub encode_commands: Duration,
+    /// GPU: Submit and wait for completion
+    pub gpu_execute: Duration,
+    /// GPU: Read staging buffers back to CPU
+    pub download_results: Duration,
+    /// CPU: Convert raw u32 data to Histogram structs
+    pub unpack_histograms: Duration,
+    /// Total time for the entire operation
+    pub total: Duration,
+    /// Number of rows processed
+    pub num_rows: usize,
+    /// Number of features
+    pub num_features: usize,
+    /// Number of indices (subset size)
+    pub num_indices: usize,
+}
 
 /// Parameters passed to histogram shader via uniform buffer.
 #[repr(C)]
@@ -28,14 +69,41 @@ use wgpu::{BindGroupDescriptor, BindGroupEntry, BindGroupLayout, Buffer, Compute
 pub struct HistogramParams {
     pub num_rows: u32,
     pub num_features: u32,
-    pub num_indices: u32, // 0 = use all rows
-    pub _padding: u32,
+    pub num_indices: u32, // 0 = use all rows (single batch mode)
+    pub num_batches: u32, // 0 or 1 = single batch mode, >1 = batched mode
+}
+
+/// Batch descriptor for batched histogram building.
+/// Describes a contiguous slice of the concatenated row_indices array.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct BatchInfo {
+    pub start: u32, // Start offset in row_indices
+    pub count: u32, // Number of rows in this batch
 }
 
 /// Pooled buffer that tracks capacity for reuse.
 struct PooledBuffer {
     buffer: Buffer,
     capacity: u64,
+}
+
+/// Cache key for detecting if data has changed (pointer + length).
+/// Uses raw pointer address as a fingerprint - if same pointer and length,
+/// data hasn't changed and we can skip the upload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CacheKey {
+    ptr: usize,
+    len: usize,
+}
+
+impl CacheKey {
+    fn from_slice<T>(slice: &[T]) -> Self {
+        Self {
+            ptr: slice.as_ptr() as usize,
+            len: slice.len(),
+        }
+    }
 }
 
 /// Single buffer set for double-buffering.
@@ -118,8 +186,10 @@ struct BufferPool {
     // Input buffers
     params: Option<Buffer>,
     bins: Option<PooledBuffer>,
+    bins_cache_key: Option<CacheKey>, // Track what bins are currently uploaded (stable across training)
     grad_hess: Option<PooledBuffer>,
     indices: Option<PooledBuffer>,
+    batch_info: Option<PooledBuffer>, // Batch descriptors for batched mode
     // Output histogram buffers
     hist_grad: Option<PooledBuffer>,
     hist_hess: Option<PooledBuffer>,
@@ -135,8 +205,10 @@ impl BufferPool {
         Self {
             params: None,
             bins: None,
+            bins_cache_key: None,
             grad_hess: None,
             indices: None,
+            batch_info: None,
             hist_grad: None,
             hist_hess: None,
             hist_count: None,
@@ -150,10 +222,15 @@ impl BufferPool {
 /// GPU histogram kernel executor.
 pub struct HistogramKernel {
     device: Arc<GpuDevice>,
+    // Single-batch pipelines
     pipeline_dense: ComputePipeline,
     pipeline_zero: ComputePipeline,
     bind_group_layout_dense: BindGroupLayout,
     bind_group_layout_zero: BindGroupLayout,
+    // Batched pipelines
+    pipeline_batched: ComputePipeline,
+    pipeline_zero_batched: ComputePipeline,
+    bind_group_layout_batched: BindGroupLayout,
     /// Buffer pool for reusing allocations (Mutex for thread safety)
     buffer_pool: Mutex<BufferPool>,
     /// Double-buffer pool for overlapped upload/compute
@@ -179,9 +256,23 @@ impl HistogramKernel {
             "zero_histograms",
         );
 
+        // Batched pipelines
+        let pipeline_batched = device.create_compute_pipeline(
+            "histogram_batched_pipeline",
+            shader_source,
+            "histogram_batched",
+        );
+
+        let pipeline_zero_batched = device.create_compute_pipeline(
+            "zero_histograms_batched_pipeline",
+            shader_source,
+            "zero_histograms_batched",
+        );
+
         // Get bind group layouts from each pipeline (they differ in which bindings are used)
         let bind_group_layout_dense = pipeline_dense.get_bind_group_layout(0);
         let bind_group_layout_zero = pipeline_zero.get_bind_group_layout(0);
+        let bind_group_layout_batched = pipeline_batched.get_bind_group_layout(0);
 
         Self {
             device,
@@ -189,6 +280,9 @@ impl HistogramKernel {
             pipeline_zero,
             bind_group_layout_dense,
             bind_group_layout_zero,
+            pipeline_batched,
+            pipeline_zero_batched,
+            bind_group_layout_batched,
             buffer_pool: Mutex::new(BufferPool::new()),
             double_buffer_pool: Mutex::new(DoubleBufferPool::new()),
         }
@@ -254,7 +348,7 @@ impl HistogramKernel {
             num_rows: num_rows as u32,
             num_features: num_features as u32,
             num_indices: indices_u32.len() as u32,
-            _padding: 0,
+            num_batches: 0, // Single batch mode
         };
 
         // Lock buffer pool and ensure all buffers exist with sufficient capacity
@@ -268,15 +362,11 @@ impl HistogramKernel {
             ));
         }
 
-        // Ensure input buffers have sufficient capacity
-        Self::ensure_storage_buffer(dev, &mut pool.bins, "bins_buffer", bins_size, false);
-        Self::ensure_storage_buffer(
-            dev,
-            &mut pool.grad_hess,
-            "grad_hess_buffer",
-            grad_hess_size,
-            false,
-        );
+        // Ensure input buffers have sufficient capacity (invalidate cache if reallocated)
+        if Self::ensure_storage_buffer(dev, &mut pool.bins, "bins_buffer", bins_size, false) {
+            pool.bins_cache_key = None; // Buffer was reallocated, must re-upload
+        }
+        Self::ensure_storage_buffer(dev, &mut pool.grad_hess, "grad_hess_buffer", grad_hess_size, false);
         Self::ensure_storage_buffer(dev, &mut pool.indices, "indices_buffer", indices_size, false);
 
         // Ensure output histogram buffers
@@ -289,10 +379,23 @@ impl HistogramKernel {
         Self::ensure_staging_buffer(dev, &mut pool.staging_hess, "staging_hess", hist_size);
         Self::ensure_staging_buffer(dev, &mut pool.staging_count, "staging_count", hist_size);
 
-        // Write data to buffers
+        // Write data to buffers (with caching to skip redundant uploads)
+        // Params always need updating (num_indices changes per call)
         dev.write_buffer(pool.params.as_ref().unwrap(), &[params]);
-        dev.write_buffer(&pool.bins.as_ref().unwrap().buffer, &bins_packed);
-        dev.write_buffer(&pool.grad_hess.as_ref().unwrap().buffer, &grad_hess_flat);
+
+        // Bins: only upload if data changed (same dataset = same pointer)
+        // This works because dataset bins never change during training
+        let bins_key = CacheKey::from_slice(bins_row_major);
+        if pool.bins_cache_key != Some(bins_key) {
+            dev.write_buffer(&pool.bins.as_ref().unwrap().buffer, bins_packed);
+            pool.bins_cache_key = Some(bins_key);
+        }
+
+        // Grad/Hess: always upload - values change every round even though the
+        // slice pointer may stay the same (pointer-based caching would be incorrect)
+        dev.write_buffer(&pool.grad_hess.as_ref().unwrap().buffer, grad_hess_flat);
+
+        // Indices: always upload (different subset each call)
         if !indices_u32.is_empty() {
             dev.write_buffer(&pool.indices.as_ref().unwrap().buffer, &indices_u32);
         }
@@ -450,14 +553,237 @@ impl HistogramKernel {
         histograms
     }
 
+    /// Build histograms with detailed profiling.
+    ///
+    /// Returns both the histograms and detailed timing breakdown for each step.
+    /// Use this to understand GPU overhead and identify optimization opportunities.
+    pub fn build_histograms_profiled(
+        &self,
+        bins_row_major: &[u8],
+        grad_hess: &[(f32, f32)],
+        row_indices: &[usize],
+        num_rows: usize,
+        num_features: usize,
+    ) -> (Vec<Histogram>, GpuProfileData) {
+        let total_start = Instant::now();
+        let mut profile = GpuProfileData {
+            num_rows,
+            num_features,
+            num_indices: row_indices.len(),
+            ..Default::default()
+        };
+
+        let dev = &self.device;
+
+        // Zero-copy reinterpret of grad_hess slice as f32 slice
+        let grad_hess_flat: &[f32] = unsafe {
+            std::slice::from_raw_parts(
+                grad_hess.as_ptr() as *const f32,
+                grad_hess.len() * 2,
+            )
+        };
+
+        // Convert row indices to u32
+        let t = Instant::now();
+        let indices_u32: Vec<u32> = row_indices.iter().map(|&i| i as u32).collect();
+        profile.indices_convert = t.elapsed();
+
+        // Pack bins
+        let t = Instant::now();
+        let bins_aligned = bins_row_major.len() % 4 == 0;
+        let bins_packed_owned: Vec<u32>;
+        let bins_packed: &[u32] = if bins_aligned {
+            bytemuck::cast_slice(bins_row_major)
+        } else {
+            bins_packed_owned = pack_bins_u32(bins_row_major);
+            &bins_packed_owned
+        };
+        profile.bins_pack = t.elapsed();
+
+        // Calculate sizes
+        let bins_size = (bins_packed.len() * 4) as u64;
+        let grad_hess_size = (grad_hess_flat.len() * 4) as u64;
+        let indices_size = if indices_u32.is_empty() { 4u64 } else { (indices_u32.len() * 4) as u64 };
+        let hist_size = (num_features * 256 * 4) as u64;
+
+        let params = HistogramParams {
+            num_rows: num_rows as u32,
+            num_features: num_features as u32,
+            num_indices: indices_u32.len() as u32,
+            num_batches: 0, // Single batch mode
+        };
+
+        // Buffer allocation
+        let t = Instant::now();
+        let mut pool = self.buffer_pool.lock().unwrap();
+
+        if pool.params.is_none() {
+            pool.params = Some(dev.create_uniform_buffer(
+                "params_buffer",
+                std::mem::size_of::<HistogramParams>() as u64,
+            ));
+        }
+
+        if Self::ensure_storage_buffer(dev, &mut pool.bins, "bins_buffer", bins_size, false) {
+            pool.bins_cache_key = None;
+        }
+        Self::ensure_storage_buffer(dev, &mut pool.grad_hess, "grad_hess_buffer", grad_hess_size, false);
+        Self::ensure_storage_buffer(dev, &mut pool.indices, "indices_buffer", indices_size, false);
+        Self::ensure_storage_buffer(dev, &mut pool.hist_grad, "hist_grad", hist_size, true);
+        Self::ensure_storage_buffer(dev, &mut pool.hist_hess, "hist_hess", hist_size, true);
+        Self::ensure_storage_buffer(dev, &mut pool.hist_count, "hist_count", hist_size, true);
+        Self::ensure_staging_buffer(dev, &mut pool.staging_grad, "staging_grad", hist_size);
+        Self::ensure_staging_buffer(dev, &mut pool.staging_hess, "staging_hess", hist_size);
+        Self::ensure_staging_buffer(dev, &mut pool.staging_count, "staging_count", hist_size);
+        profile.buffer_alloc = t.elapsed();
+
+        // Upload params
+        let t = Instant::now();
+        dev.write_buffer(pool.params.as_ref().unwrap(), &[params]);
+        profile.upload_params = t.elapsed();
+
+        // Upload bins (check cache)
+        let t = Instant::now();
+        let bins_key = CacheKey::from_slice(bins_row_major);
+        if pool.bins_cache_key != Some(bins_key) {
+            dev.write_buffer(&pool.bins.as_ref().unwrap().buffer, bins_packed);
+            pool.bins_cache_key = Some(bins_key);
+            profile.bins_cached = false;
+        } else {
+            profile.bins_cached = true;
+        }
+        profile.upload_bins = t.elapsed();
+
+        // Upload grad/hess
+        let t = Instant::now();
+        dev.write_buffer(&pool.grad_hess.as_ref().unwrap().buffer, grad_hess_flat);
+        profile.upload_grad_hess = t.elapsed();
+
+        // Upload indices
+        let t = Instant::now();
+        if !indices_u32.is_empty() {
+            dev.write_buffer(&pool.indices.as_ref().unwrap().buffer, &indices_u32);
+        }
+        profile.upload_indices = t.elapsed();
+
+        // Create bind groups
+        let t = Instant::now();
+        let bind_group_zero = dev.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("zero_bind_group"),
+            layout: &self.bind_group_layout_zero,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: pool.params.as_ref().unwrap().as_entire_binding() },
+                BindGroupEntry { binding: 4, resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry { binding: 5, resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry { binding: 6, resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding() },
+            ],
+        });
+
+        let bind_group_dense = dev.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("histogram_bind_group"),
+            layout: &self.bind_group_layout_dense,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: pool.params.as_ref().unwrap().as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: pool.bins.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry { binding: 2, resource: pool.grad_hess.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry { binding: 3, resource: pool.indices.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry { binding: 4, resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry { binding: 5, resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry { binding: 6, resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding() },
+            ],
+        });
+        profile.bind_group_create = t.elapsed();
+
+        // Encode commands
+        let t = Instant::now();
+        let mut encoder = dev.create_encoder("histogram_encoder");
+
+        // Zero histograms
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("zero_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline_zero);
+            pass.set_bind_group(0, &bind_group_zero, &[]);
+            let total_bins = (num_features * 256) as u32;
+            let workgroups = (total_bins + 255) / 256;
+            pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+
+        // Histogram kernel
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("histogram_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline_dense);
+            pass.set_bind_group(0, &bind_group_dense, &[]);
+            pass.dispatch_workgroups(num_features as u32, 1, 1);
+        }
+
+        // Copy to staging
+        encoder.copy_buffer_to_buffer(&pool.hist_grad.as_ref().unwrap().buffer, 0, &pool.staging_grad.as_ref().unwrap().buffer, 0, hist_size);
+        encoder.copy_buffer_to_buffer(&pool.hist_hess.as_ref().unwrap().buffer, 0, &pool.staging_hess.as_ref().unwrap().buffer, 0, hist_size);
+        encoder.copy_buffer_to_buffer(&pool.hist_count.as_ref().unwrap().buffer, 0, &pool.staging_count.as_ref().unwrap().buffer, 0, hist_size);
+        profile.encode_commands = t.elapsed();
+
+        // Submit and wait
+        let t = Instant::now();
+        dev.submit_and_wait(encoder);
+        profile.gpu_execute = t.elapsed();
+
+        // Download results
+        let t = Instant::now();
+        let mut grad_data = vec![0u32; num_features * 256];
+        let mut hess_data = vec![0u32; num_features * 256];
+        let mut count_data = vec![0u32; num_features * 256];
+
+        dev.read_buffer(&pool.staging_grad.as_ref().unwrap().buffer, &mut grad_data);
+        dev.read_buffer(&pool.staging_hess.as_ref().unwrap().buffer, &mut hess_data);
+        dev.read_buffer(&pool.staging_count.as_ref().unwrap().buffer, &mut count_data);
+        profile.download_results = t.elapsed();
+
+        drop(pool);
+
+        // Unpack histograms
+        let t = Instant::now();
+        let mut histograms = Vec::with_capacity(num_features);
+        for f in 0..num_features {
+            let mut hist = Histogram::new();
+            let offset = f * 256;
+
+            for bin in 0..256 {
+                let idx = offset + bin;
+                let sum_grad = f32::from_bits(grad_data[idx]);
+                let sum_hess = f32::from_bits(hess_data[idx]);
+                let count = count_data[idx];
+
+                if count > 0 {
+                    hist.accumulate(bin as u8, sum_grad, sum_hess);
+                    let entry = hist.get_mut(bin as u8);
+                    entry.count = count;
+                }
+            }
+
+            histograms.push(hist);
+        }
+        profile.unpack_histograms = t.elapsed();
+
+        profile.total = total_start.elapsed();
+
+        (histograms, profile)
+    }
+
     /// Ensure a storage buffer exists with sufficient capacity.
+    /// Returns true if buffer was (re)allocated (cache should be invalidated).
     fn ensure_storage_buffer(
         dev: &GpuDevice,
         pool: &mut Option<PooledBuffer>,
         label: &str,
         required_size: u64,
         read_write: bool,
-    ) {
+    ) -> bool {
         let needs_new = match pool {
             Some(ref pb) => pb.capacity < required_size,
             None => true,
@@ -468,6 +794,9 @@ impl HistogramKernel {
             let capacity = ((required_size as f64 * 1.2) as u64 + 3) & !3;
             let buffer = dev.create_storage_buffer(label, capacity, read_write);
             *pool = Some(PooledBuffer { buffer, capacity });
+            true
+        } else {
+            false
         }
     }
 
@@ -502,7 +831,6 @@ impl HistogramKernel {
     ///
     /// # Returns
     /// `None` on first call (no previous results), `Some(histograms)` on subsequent calls.
-    #[allow(dead_code)]
     pub fn build_histograms_pipelined(
         &self,
         bins_row_major: &[u8],
@@ -544,7 +872,7 @@ impl HistogramKernel {
             num_rows: num_rows as u32,
             num_features: num_features as u32,
             num_indices: indices_u32.len() as u32,
-            _padding: 0,
+            num_batches: 0, // Single batch mode
         };
 
         let mut db_pool = self.double_buffer_pool.lock().unwrap();
@@ -716,7 +1044,6 @@ impl HistogramKernel {
     }
 
     /// Flush any pending pipelined work and return final results.
-    #[allow(dead_code)]
     pub fn flush_pipelined(&self, num_features: usize) -> Option<Vec<Histogram>> {
         let mut db_pool = self.double_buffer_pool.lock().unwrap();
 
@@ -741,6 +1068,298 @@ impl HistogramKernel {
         } else {
             None
         }
+    }
+
+    /// Build histograms for multiple batches in a single GPU dispatch.
+    ///
+    /// This is significantly more efficient than calling `build_histograms` multiple times
+    /// because it amortizes GPU dispatch overhead across all batches.
+    ///
+    /// # Arguments
+    ///
+    /// * `bins_row_major` - Row-major bin data for entire dataset
+    /// * `grad_hess` - Gradient/hessian pairs for entire dataset
+    /// * `batches` - Slice of row index arrays, one per batch
+    /// * `num_rows` - Total number of rows in dataset
+    /// * `num_features` - Number of features
+    ///
+    /// # Returns
+    ///
+    /// Vector of histogram vectors, one per batch. Each inner vector contains
+    /// `num_features` histograms.
+    pub fn build_histograms_batched(
+        &self,
+        bins_row_major: &[u8],
+        grad_hess: &[(f32, f32)],
+        batches: &[&[usize]],
+        num_rows: usize,
+        num_features: usize,
+    ) -> Vec<Vec<Histogram>> {
+        let num_batches = batches.len();
+        if num_batches == 0 {
+            return Vec::new();
+        }
+
+        // For single batch, use the optimized single-batch path
+        if num_batches == 1 {
+            return vec![self.build_histograms(
+                bins_row_major,
+                grad_hess,
+                batches[0],
+                num_rows,
+                num_features,
+            )];
+        }
+
+        let dev = &self.device;
+
+        // Zero-copy reinterpret of grad_hess slice as f32 slice
+        let grad_hess_flat: &[f32] = unsafe {
+            std::slice::from_raw_parts(
+                grad_hess.as_ptr() as *const f32,
+                grad_hess.len() * 2,
+            )
+        };
+
+        // Concatenate all batch row indices and create batch info
+        let mut all_indices: Vec<u32> = Vec::new();
+        let mut batch_info_data: Vec<BatchInfo> = Vec::with_capacity(num_batches);
+
+        for batch_indices in batches {
+            let start = all_indices.len() as u32;
+            let count = batch_indices.len() as u32;
+            batch_info_data.push(BatchInfo { start, count });
+            all_indices.extend(batch_indices.iter().map(|&i| i as u32));
+        }
+
+        // For bins, try zero-copy cast if aligned, else pack
+        let bins_aligned = bins_row_major.len() % 4 == 0;
+        let bins_packed_owned: Vec<u32>;
+        let bins_packed: &[u32] = if bins_aligned {
+            bytemuck::cast_slice(bins_row_major)
+        } else {
+            bins_packed_owned = pack_bins_u32(bins_row_major);
+            &bins_packed_owned
+        };
+
+        // Calculate buffer sizes
+        let bins_size = (bins_packed.len() * 4) as u64;
+        let grad_hess_size = (grad_hess_flat.len() * 4) as u64;
+        let indices_size = if all_indices.is_empty() {
+            4u64
+        } else {
+            (all_indices.len() * 4) as u64
+        };
+        let batch_info_size = (batch_info_data.len() * std::mem::size_of::<BatchInfo>()) as u64;
+        let hist_size = (num_batches * num_features * 256 * 4) as u64;
+
+        // Create uniform buffer with parameters
+        let params = HistogramParams {
+            num_rows: num_rows as u32,
+            num_features: num_features as u32,
+            num_indices: all_indices.len() as u32,
+            num_batches: num_batches as u32,
+        };
+
+        // Lock buffer pool and ensure all buffers exist
+        let mut pool = self.buffer_pool.lock().unwrap();
+
+        // Ensure params buffer
+        if pool.params.is_none() {
+            pool.params = Some(dev.create_uniform_buffer(
+                "params_buffer",
+                std::mem::size_of::<HistogramParams>() as u64,
+            ));
+        }
+
+        // Ensure input buffers
+        Self::ensure_storage_buffer(dev, &mut pool.bins, "bins_buffer", bins_size, false);
+        Self::ensure_storage_buffer(dev, &mut pool.grad_hess, "grad_hess_buffer", grad_hess_size, false);
+        Self::ensure_storage_buffer(dev, &mut pool.indices, "indices_buffer", indices_size, false);
+        Self::ensure_storage_buffer(dev, &mut pool.batch_info, "batch_info_buffer", batch_info_size, false);
+
+        // Ensure output buffers (sized for all batches)
+        Self::ensure_storage_buffer(dev, &mut pool.hist_grad, "hist_grad_buffer", hist_size, true);
+        Self::ensure_storage_buffer(dev, &mut pool.hist_hess, "hist_hess_buffer", hist_size, true);
+        Self::ensure_storage_buffer(dev, &mut pool.hist_count, "hist_count_buffer", hist_size, true);
+
+        // Ensure staging buffers
+        Self::ensure_staging_buffer(dev, &mut pool.staging_grad, "staging_grad", hist_size);
+        Self::ensure_staging_buffer(dev, &mut pool.staging_hess, "staging_hess", hist_size);
+        Self::ensure_staging_buffer(dev, &mut pool.staging_count, "staging_count", hist_size);
+
+        // Upload data
+        dev.write_buffer(pool.params.as_ref().unwrap(), &[params]);
+        dev.write_buffer(&pool.bins.as_ref().unwrap().buffer, bins_packed);
+        dev.write_buffer(&pool.grad_hess.as_ref().unwrap().buffer, grad_hess_flat);
+        dev.write_buffer(&pool.indices.as_ref().unwrap().buffer, &all_indices);
+        dev.write_buffer(&pool.batch_info.as_ref().unwrap().buffer, &batch_info_data);
+
+        // Create bind groups for batched kernel
+        let bind_group_batched = dev.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("batched_bind_group"),
+            layout: &self.bind_group_layout_batched,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: pool.params.as_ref().unwrap().as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: pool.bins.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: pool.grad_hess.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: pool.indices.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 5,
+                    resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 6,
+                    resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 11,
+                    resource: pool.batch_info.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Zero bind group for batched kernel (use batched zero pipeline's layout)
+        let bind_group_layout_zero_batched = self.pipeline_zero_batched.get_bind_group_layout(0);
+        let bind_group_zero = dev.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("zero_bind_group_batched"),
+            layout: &bind_group_layout_zero_batched,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: pool.params.as_ref().unwrap().as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 5,
+                    resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 6,
+                    resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Execute kernels
+        let mut encoder = dev.create_encoder("histogram_batched_encoder");
+
+        // Zero histograms first (for all batches)
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("zero_pass_batched"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline_zero_batched);
+            pass.set_bind_group(0, &bind_group_zero, &[]);
+            let total_bins = (num_batches * num_features * 256) as u32;
+            let workgroups = (total_bins + 255) / 256;
+            pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+
+        // Run batched histogram kernel
+        // Dispatch: (num_features, num_batches, 1)
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("histogram_batched_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline_batched);
+            pass.set_bind_group(0, &bind_group_batched, &[]);
+            pass.dispatch_workgroups(num_features as u32, num_batches as u32, 1);
+        }
+
+        // Copy results to staging buffers
+        encoder.copy_buffer_to_buffer(
+            &pool.hist_grad.as_ref().unwrap().buffer,
+            0,
+            &pool.staging_grad.as_ref().unwrap().buffer,
+            0,
+            hist_size,
+        );
+        encoder.copy_buffer_to_buffer(
+            &pool.hist_hess.as_ref().unwrap().buffer,
+            0,
+            &pool.staging_hess.as_ref().unwrap().buffer,
+            0,
+            hist_size,
+        );
+        encoder.copy_buffer_to_buffer(
+            &pool.hist_count.as_ref().unwrap().buffer,
+            0,
+            &pool.staging_count.as_ref().unwrap().buffer,
+            0,
+            hist_size,
+        );
+
+        // Submit and wait
+        dev.submit_and_wait(encoder);
+
+        // Read back results
+        let total_hist_entries = num_batches * num_features * 256;
+        let mut grad_data = vec![0u32; total_hist_entries];
+        let mut hess_data = vec![0u32; total_hist_entries];
+        let mut count_data = vec![0u32; total_hist_entries];
+
+        dev.read_buffer(&pool.staging_grad.as_ref().unwrap().buffer, &mut grad_data);
+        dev.read_buffer(&pool.staging_hess.as_ref().unwrap().buffer, &mut hess_data);
+        dev.read_buffer(&pool.staging_count.as_ref().unwrap().buffer, &mut count_data);
+
+        // Drop pool borrow
+        drop(pool);
+
+        // Convert to Histogram structs - one Vec<Histogram> per batch
+        // Output layout: [batch * num_features * 256 + feature * 256 + bin]
+        let hist_stride = num_features * 256;
+        let mut all_histograms = Vec::with_capacity(num_batches);
+
+        for batch in 0..num_batches {
+            let batch_offset = batch * hist_stride;
+            let mut batch_histograms = Vec::with_capacity(num_features);
+
+            for f in 0..num_features {
+                let mut hist = Histogram::new();
+                let feature_offset = batch_offset + f * 256;
+
+                for bin in 0..256 {
+                    let idx = feature_offset + bin;
+                    let sum_grad = f32::from_bits(grad_data[idx]);
+                    let sum_hess = f32::from_bits(hess_data[idx]);
+                    let count = count_data[idx];
+
+                    if count > 0 {
+                        hist.accumulate(bin as u8, sum_grad, sum_hess);
+                        let entry = hist.get_mut(bin as u8);
+                        entry.count = count;
+                    }
+                }
+
+                batch_histograms.push(hist);
+            }
+
+            all_histograms.push(batch_histograms);
+        }
+
+        all_histograms
     }
 
     /// Convert raw GPU buffers to Histogram structs.

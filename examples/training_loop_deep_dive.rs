@@ -1,26 +1,45 @@
-//! Deep dive into the training loop overhead
+//! Deep dive into GPU vs CPU backend usage during training
 //!
-//! Run: cargo run --release --example training_loop_deep_dive
+//! Run: cargo run --release --features gpu --example training_loop_deep_dive
 //!
-//! This investigates the ~17ms unexplained overhead per round in GBDTModel::train
-//! when compared to isolated tree grows.
+//! This profiles which backend is used at each point during training and
+//! measures timing to identify optimization opportunities.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use treeboost::backend::{BackendConfig, BackendSelector, BackendType};
 use treeboost::booster::{GBDTConfig, GBDTModel, LossType};
 use treeboost::dataset::{BinnedDataset, FeatureInfo, FeatureType};
 use treeboost::tree::TreeGrower;
 
-fn create_dataset(num_rows: usize, num_features: usize) -> BinnedDataset {
-    let mut features = Vec::with_capacity(num_rows * num_features);
-    for f in 0..num_features {
-        for r in 0..num_rows {
-            features.push(((r * (f + 1) * 17) % 256) as u8);
+#[cfg(feature = "gpu")]
+use treeboost::backend::wgpu::{GpuProfileData, WgpuBackend};
+
+fn create_dataset(num_rows: usize, num_features: usize, seed: u64) -> BinnedDataset {
+    let mut state = seed;
+    let mut next_rand = || -> f32 {
+        state = state.wrapping_mul(1103515245).wrapping_add(12345);
+        ((state >> 16) & 0x7FFF) as f32 / 32767.0
+    };
+
+    // Column-major bin storage
+    let mut bins = Vec::with_capacity(num_rows * num_features);
+    for _f in 0..num_features {
+        for _r in 0..num_rows {
+            bins.push((next_rand() * 255.0) as u8);
         }
     }
 
-    let targets: Vec<f32> = (0..num_rows).map(|i| (i as f32 * 0.01).sin()).collect();
-    let feature_info = (0..num_features)
+    // Targets with pattern
+    let targets: Vec<f32> = (0..num_rows)
+        .map(|i| {
+            let f0 = bins[i] as f32 / 255.0;
+            let f1 = bins[num_rows + i] as f32 / 255.0;
+            f0 * 10.0 + f1 * 5.0 + next_rand() * 0.5
+        })
+        .collect();
+
+    let feature_info: Vec<FeatureInfo> = (0..num_features)
         .map(|i| FeatureInfo {
             name: format!("f{}", i),
             feature_type: FeatureType::Numeric,
@@ -29,368 +48,507 @@ fn create_dataset(num_rows: usize, num_features: usize) -> BinnedDataset {
         })
         .collect();
 
-    BinnedDataset::new(num_rows, features, targets, feature_info)
+    BinnedDataset::new(num_rows, bins, targets, feature_info)
+}
+
+fn section_header(title: &str) {
+    println!("\n\n{}", "=".repeat(70));
+    println!("{}", title);
+    println!("{}", "=".repeat(70));
+}
+
+/// Format duration as microseconds or milliseconds depending on magnitude
+fn fmt_duration(d: Duration) -> String {
+    let us = d.as_nanos() as f64 / 1000.0;
+    if us < 1000.0 {
+        format!("{:>8.1} µs", us)
+    } else {
+        format!("{:>8.3} ms", us / 1000.0)
+    }
+}
+
+/// Format duration with percentage of total
+fn fmt_duration_pct(d: Duration, total: Duration) -> String {
+    let pct = d.as_secs_f64() / total.as_secs_f64() * 100.0;
+    format!("{} ({:>5.1}%)", fmt_duration(d), pct)
+}
+
+#[cfg(feature = "gpu")]
+fn print_gpu_profile(profile: &GpuProfileData, label: &str) {
+    println!("\n  {} ({} rows, {} features, {} indices):",
+        label, profile.num_rows, profile.num_features, profile.num_indices);
+    println!("  {}", "-".repeat(60));
+
+    // CPU Preprocessing
+    println!("  CPU Preprocessing:");
+    println!("    Indices convert (usize→u32):  {}", fmt_duration_pct(profile.indices_convert, profile.total));
+    println!("    Bins pack/align check:        {}", fmt_duration_pct(profile.bins_pack, profile.total));
+
+    // GPU Buffer Management
+    println!("  GPU Buffer Management:");
+    println!("    Buffer allocation:            {}", fmt_duration_pct(profile.buffer_alloc, profile.total));
+    println!("    Upload params:                {}", fmt_duration_pct(profile.upload_params, profile.total));
+    if profile.bins_cached {
+        println!("    Upload bins:                  CACHED (skipped)");
+    } else {
+        println!("    Upload bins:                  {}", fmt_duration_pct(profile.upload_bins, profile.total));
+    }
+    println!("    Upload grad/hess:             {}", fmt_duration_pct(profile.upload_grad_hess, profile.total));
+    println!("    Upload indices:               {}", fmt_duration_pct(profile.upload_indices, profile.total));
+
+    // GPU Execution
+    println!("  GPU Execution:");
+    println!("    Bind group create:            {}", fmt_duration_pct(profile.bind_group_create, profile.total));
+    println!("    Encode commands:              {}", fmt_duration_pct(profile.encode_commands, profile.total));
+    println!("    GPU compute (submit+wait):    {}", fmt_duration_pct(profile.gpu_execute, profile.total));
+
+    // Results Download
+    println!("  Results Download:");
+    println!("    Download histograms:          {}", fmt_duration_pct(profile.download_results, profile.total));
+    println!("    Unpack to Histogram structs:  {}", fmt_duration_pct(profile.unpack_histograms, profile.total));
+
+    println!("  {}", "-".repeat(60));
+    println!("  TOTAL:                          {}", fmt_duration(profile.total));
+
+    // Breakdown summary
+    let cpu_time = profile.indices_convert + profile.bins_pack + profile.unpack_histograms;
+    let upload_time = profile.upload_params + profile.upload_bins + profile.upload_grad_hess + profile.upload_indices;
+    let download_time = profile.download_results;
+    let gpu_overhead = profile.buffer_alloc + profile.bind_group_create + profile.encode_commands;
+    let gpu_compute = profile.gpu_execute;
+
+    println!("\n  Time breakdown:");
+    println!("    CPU work:       {}", fmt_duration_pct(cpu_time, profile.total));
+    println!("    Upload:         {}", fmt_duration_pct(upload_time, profile.total));
+    println!("    GPU overhead:   {}", fmt_duration_pct(gpu_overhead, profile.total));
+    println!("    GPU compute:    {}", fmt_duration_pct(gpu_compute, profile.total));
+    println!("    Download:       {}", fmt_duration_pct(download_time, profile.total));
 }
 
 fn main() {
-    println!("Training Loop Deep Dive");
-    println!("========================\n");
+    println!("Training Loop Deep Dive: CPU vs GPU Backend Analysis");
+    println!("=====================================================\n");
 
     let num_rows = 500_000;
-    let num_features = 100;
+    let num_features = 20;
     let num_rounds = 10;
+    let max_depth = 6;
 
-    println!("Dataset: {} rows × {} features, {} rounds\n", num_rows, num_features, num_rounds);
+    println!("Configuration:");
+    println!("  Rows:       {:>10}", num_rows);
+    println!("  Features:   {:>10}", num_features);
+    println!("  Rounds:     {:>10}", num_rounds);
+    println!("  Max Depth:  {:>10}", max_depth);
 
-    let dataset = create_dataset(num_rows, num_features);
-    let targets = dataset.targets().to_vec();
+    let dataset = create_dataset(num_rows, num_features, 42);
 
     // =========================================================================
-    // BASELINE: Isolated tree grows (what we know is fast)
+    // SECTION 1: Isolated Histogram Building - CPU vs GPU by row count
     // =========================================================================
-    println!("1. BASELINE: ISOLATED TREE GROWS");
-    println!("---------------------------------");
+    section_header("SECTION 1: ISOLATED HISTOGRAM BUILDING BY ROW COUNT");
 
-    let gradients: Vec<f32> = (0..num_rows)
-        .map(|i| if i < num_rows / 2 { -1.0 } else { 1.0 })
+    println!("\nThis shows where GPU becomes faster than CPU for histogram building.");
+    println!("The GPU backend internally falls back to CPU for rows < 5K.\n");
+
+    let grad_hess: Vec<(f32, f32)> = (0..num_rows)
+        .map(|i| (-(dataset.targets()[i]), 1.0))
         .collect();
-    let hessians = vec![1.0f32; num_rows];
-    let row_indices: Vec<usize> = (0..num_rows).collect();
 
-    let grower = TreeGrower::new()
-        .with_max_depth(6)
-        .with_max_leaves(31)
-        .with_learning_rate(0.1);
+    // Test different row counts
+    let test_sizes = [1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000];
 
-    // Warmup
-    for _ in 0..2 {
-        let _ = grower.grow_with_indices(&dataset, &gradients, &hessians, &row_indices);
+    println!("{:>10} | {:>12} | {:>12} | {:>10} | GPU Used?", "Rows", "Scalar (ms)", "GPU (ms)", "Speedup");
+    println!("{}", "-".repeat(70));
+
+    let scalar_config = BackendConfig {
+        preferred: BackendType::Scalar,
+        ..Default::default()
+    };
+    let scalar_backend = BackendSelector::with_config(scalar_config).select(num_rows);
+
+    #[cfg(feature = "gpu")]
+    let gpu_config = BackendConfig {
+        preferred: BackendType::Wgpu,
+        ..Default::default()
+    };
+    #[cfg(feature = "gpu")]
+    let gpu_backend = BackendSelector::with_config(gpu_config).select(num_rows);
+
+    for &size in &test_sizes {
+        if size > num_rows {
+            continue;
+        }
+
+        let row_indices: Vec<usize> = (0..size).collect();
+
+        // Warmup
+        let _ = scalar_backend.build_histograms(&dataset, &grad_hess, &row_indices);
+        #[cfg(feature = "gpu")]
+        let _ = gpu_backend.build_histograms(&dataset, &grad_hess, &row_indices);
+
+        // Benchmark scalar
+        let iterations = if size < 10_000 { 20 } else { 5 };
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let _ = scalar_backend.build_histograms(&dataset, &grad_hess, &row_indices);
+        }
+        let scalar_time = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
+
+        // Benchmark GPU
+        #[cfg(feature = "gpu")]
+        let (gpu_time, gpu_used) = {
+            let start = Instant::now();
+            for _ in 0..iterations {
+                let _ = gpu_backend.build_histograms(&dataset, &grad_hess, &row_indices);
+            }
+            let time = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
+            let used = size >= 5_000; // GPU_MIN_ROWS threshold
+            (time, used)
+        };
+
+        #[cfg(not(feature = "gpu"))]
+        let (gpu_time, gpu_used) = (f64::NAN, false);
+
+        let speedup = scalar_time / gpu_time;
+        let speedup_str = if speedup.is_nan() {
+            "N/A".to_string()
+        } else {
+            format!("{:.2}x", speedup)
+        };
+        let gpu_used_str = if gpu_used { "Yes (GPU)" } else { "No (CPU fallback)" };
+
+        println!("{:>10} | {:>12.3} | {:>12.3} | {:>10} | {}",
+            size, scalar_time, gpu_time, speedup_str, gpu_used_str);
     }
 
-    let start = Instant::now();
-    for _ in 0..num_rounds {
-        let _ = grower.grow_with_indices(&dataset, &gradients, &hessians, &row_indices);
+    // =========================================================================
+    // SECTION 1B: Detailed GPU Profiling
+    // =========================================================================
+    #[cfg(feature = "gpu")]
+    {
+        section_header("SECTION 1B: DETAILED GPU OPERATION BREAKDOWN");
+
+        println!("\nThis shows EXACTLY where time is spent in GPU histogram building.");
+        println!("Each operation is timed individually to identify bottlenecks.\n");
+
+        let gpu_backend = match WgpuBackend::new() {
+            Some(b) => b,
+            None => {
+                println!("No GPU available, skipping detailed profiling");
+                return;
+            }
+        };
+
+        println!("GPU Device: {}", gpu_backend.device_name());
+        println!("Backend: {:?}", gpu_backend.backend_type());
+
+        // Profile at different row counts
+        let profile_sizes = [10_000, 50_000, 100_000, 250_000, 500_000];
+
+        for &size in &profile_sizes {
+            if size > num_rows {
+                continue;
+            }
+
+            let row_indices: Vec<usize> = (0..size).collect();
+
+            // Warmup (also primes the bins cache)
+            let _ = gpu_backend.build_histograms_profiled(&dataset, &grad_hess, &row_indices);
+
+            // Profile (second call will have bins cached)
+            let (_hists, profile) = gpu_backend.build_histograms_profiled(&dataset, &grad_hess, &row_indices);
+
+            print_gpu_profile(&profile, &format!("Profile @ {} rows", size));
+        }
+
+        // Compare first call (cold) vs second call (warm/cached)
+        println!("\n\n  === Cold vs Warm Start Comparison ===");
+        println!("  (First call uploads bins, subsequent calls have bins cached)");
+
+        // Create a fresh backend to see cold start
+        let fresh_backend = WgpuBackend::new().unwrap();
+        let row_indices: Vec<usize> = (0..100_000).collect();
+
+        let (_hists, cold_profile) = fresh_backend.build_histograms_profiled(&dataset, &grad_hess, &row_indices);
+        let (_hists, warm_profile) = fresh_backend.build_histograms_profiled(&dataset, &grad_hess, &row_indices);
+
+        println!("\n  Cold start (first call):");
+        println!("    Bins upload: {} (bins_cached: {})",
+            fmt_duration(cold_profile.upload_bins), cold_profile.bins_cached);
+        println!("    Total:       {}", fmt_duration(cold_profile.total));
+
+        println!("\n  Warm start (second call):");
+        println!("    Bins upload: {} (bins_cached: {})",
+            fmt_duration(warm_profile.upload_bins), warm_profile.bins_cached);
+        println!("    Total:       {}", fmt_duration(warm_profile.total));
+
+        let savings = cold_profile.total.as_secs_f64() - warm_profile.total.as_secs_f64();
+        println!("\n  Caching saves: {:.3} ms per histogram build", savings * 1000.0);
     }
-    let isolated_time = start.elapsed().as_secs_f64() * 1000.0;
-    println!("Isolated {} trees:         {:>8.2} ms ({:.2} ms/tree)",
-        num_rounds, isolated_time, isolated_time / num_rounds as f64);
 
     // =========================================================================
-    // BASELINE: GBDTModel::train (where the overhead is)
+    // SECTION 2: Full Training Comparison
     // =========================================================================
-    println!("\n2. GBDTModel::train TIMING");
-    println!("--------------------------");
+    section_header("SECTION 2: FULL TRAINING TIME COMPARISON");
 
-    let config = GBDTConfig::new()
+    // Train with Scalar backend
+    println!("\nTraining with Scalar backend...");
+    let scalar_config = GBDTConfig::new()
         .with_num_rounds(num_rounds)
-        .with_max_depth(6)
-        .with_learning_rate(0.1);  // Early stopping and conformal disabled by default
+        .with_max_depth(max_depth)
+        .with_learning_rate(0.1)
+        .with_backend(BackendType::Scalar);
 
     // Warmup
-    let _ = GBDTModel::train_binned(&dataset, config.clone());
+    let _ = GBDTModel::train_binned(&dataset, scalar_config.clone());
 
     let start = Instant::now();
-    let _ = GBDTModel::train_binned(&dataset, config.clone());
-    let train_time = start.elapsed().as_secs_f64() * 1000.0;
-    println!("GBDTModel::train:          {:>8.2} ms ({:.2} ms/round)",
-        train_time, train_time / num_rounds as f64);
+    let _ = GBDTModel::train_binned(&dataset, scalar_config.clone());
+    let scalar_train_time = start.elapsed();
+    println!("  Total time: {:.2} ms ({:.2} ms/round)",
+        scalar_train_time.as_secs_f64() * 1000.0,
+        scalar_train_time.as_secs_f64() * 1000.0 / num_rounds as f64);
 
-    let overhead = train_time - isolated_time;
-    println!("Total overhead:            {:>8.2} ms ({:.2} ms/round)",
-        overhead, overhead / num_rounds as f64);
+    // Train with GPU backend
+    #[cfg(feature = "gpu")]
+    let gpu_train_time = {
+        println!("\nTraining with GPU backend...");
+        let gpu_config = GBDTConfig::new()
+            .with_num_rounds(num_rounds)
+            .with_max_depth(max_depth)
+            .with_learning_rate(0.1)
+            .with_backend(BackendType::Wgpu);
+
+        // Warmup
+        let _ = GBDTModel::train_binned(&dataset, gpu_config.clone());
+
+        let start = Instant::now();
+        let _ = GBDTModel::train_binned(&dataset, gpu_config.clone());
+        let gpu_train_time = start.elapsed();
+        println!("  Total time: {:.2} ms ({:.2} ms/round)",
+            gpu_train_time.as_secs_f64() * 1000.0,
+            gpu_train_time.as_secs_f64() * 1000.0 / num_rounds as f64);
+
+        let speedup = scalar_train_time.as_secs_f64() / gpu_train_time.as_secs_f64();
+        println!("\n  Overall GPU Speedup: {:.2}x", speedup);
+        gpu_train_time
+    };
 
     // =========================================================================
-    // MANUAL LOOP: Replicate GBDTModel::train exactly
+    // SECTION 3: Per-Operation Breakdown
     // =========================================================================
-    println!("\n3. MANUAL LOOP REPLICATING GBDTModel::train");
-    println!("---------------------------------------------");
+    section_header("SECTION 3: PER-OPERATION BREAKDOWN");
 
     let loss_fn = LossType::Mse.create();
+    let targets = dataset.targets().to_vec();
 
-    // Initial setup (one-time)
-    let setup_start = Instant::now();
-    let base_prediction = 0.0f32;
-    let mut predictions = vec![base_prediction; num_rows];
-    let mut gradients = vec![0.0f32; num_rows];
-    let mut hessians = vec![0.0f32; num_rows];
-    let train_indices: Vec<usize> = (0..num_rows).collect();
-    let mut sample_indices: Vec<usize> = Vec::with_capacity(train_indices.len());
-    let mut trees: Vec<treeboost::tree::Tree> = Vec::with_capacity(num_rounds);
-    let setup_time = setup_start.elapsed().as_secs_f64() * 1000.0;
-    println!("Setup allocations:         {:>8.3} ms", setup_time);
+    #[cfg(feature = "gpu")]
+    let backends: Vec<(&str, BackendType)> = vec![
+        ("Scalar (CPU)", BackendType::Scalar),
+        ("GPU (Wgpu)", BackendType::Wgpu),
+    ];
 
-    // Training loop with detailed timing
-    let mut time_gradient = 0.0;
-    let mut time_sample = 0.0;
-    let mut time_grow = 0.0;
-    let mut time_predict = 0.0;
-    let mut time_push = 0.0;
+    #[cfg(not(feature = "gpu"))]
+    let backends: Vec<(&str, BackendType)> = vec![
+        ("Scalar (CPU)", BackendType::Scalar),
+    ];
 
-    let loop_start = Instant::now();
+    for (backend_name, backend_type) in backends {
+        println!("\n{} Backend:", backend_name);
+        println!("{}", "-".repeat(50));
 
-    for _round in 0..num_rounds {
-        // 1. Gradient computation
-        let t = Instant::now();
+        let grower = TreeGrower::new()
+            .with_max_depth(max_depth)
+            .with_max_leaves(63)
+            .with_learning_rate(0.1)
+            .with_backend(backend_type.clone());
+
+        let mut predictions = vec![0.0f32; num_rows];
+        let mut gradients = vec![0.0f32; num_rows];
+        let mut hessians = vec![0.0f32; num_rows];
+        let train_indices: Vec<usize> = (0..num_rows).collect();
+
+        let mut time_gradient_ms = 0.0;
+        let mut time_grow_ms = 0.0;
+        let mut time_predict_ms = 0.0;
+
+        // Warmup
         for &idx in &train_indices {
             let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
             gradients[idx] = g;
             hessians[idx] = h;
-        }
-        time_gradient += t.elapsed().as_secs_f64() * 1000.0;
-
-        // 2. Sample indices (no subsampling = copy)
-        let t = Instant::now();
-        sample_indices.clear();
-        sample_indices.extend_from_slice(&train_indices);
-        time_sample += t.elapsed().as_secs_f64() * 1000.0;
-
-        // 3. Tree grow
-        let t = Instant::now();
-        let tree = grower.grow_with_indices(&dataset, &gradients, &hessians, &sample_indices);
-        time_grow += t.elapsed().as_secs_f64() * 1000.0;
-
-        // 4. Prediction update
-        let t = Instant::now();
-        tree.predict_batch_add(&dataset, &mut predictions);
-        time_predict += t.elapsed().as_secs_f64() * 1000.0;
-
-        // 5. Push tree
-        let t = Instant::now();
-        trees.push(tree);
-        time_push += t.elapsed().as_secs_f64() * 1000.0;
-    }
-
-    let loop_time = loop_start.elapsed().as_secs_f64() * 1000.0;
-
-    println!("\nPer-round breakdown:");
-    println!("  Gradient comp:           {:>8.3} ms", time_gradient / num_rounds as f64);
-    println!("  Sample indices:          {:>8.3} ms", time_sample / num_rounds as f64);
-    println!("  Tree grow:               {:>8.3} ms", time_grow / num_rounds as f64);
-    println!("  Predict update:          {:>8.3} ms", time_predict / num_rounds as f64);
-    println!("  Tree push:               {:>8.3} ms", time_push / num_rounds as f64);
-
-    let sum_components = time_gradient + time_sample + time_grow + time_predict + time_push;
-    println!("\nTotal breakdown:");
-    println!("  Sum of components:       {:>8.2} ms", sum_components);
-    println!("  Actual loop time:        {:>8.2} ms", loop_time);
-    println!("  Timing overhead:         {:>8.2} ms", loop_time - sum_components);
-
-    // =========================================================================
-    // KEY COMPARISON
-    // =========================================================================
-    println!("\n4. KEY COMPARISON");
-    println!("------------------");
-    println!("Manual loop total:         {:>8.2} ms", loop_time + setup_time);
-    println!("GBDTModel::train:          {:>8.2} ms", train_time);
-    println!("Difference:                {:>8.2} ms", train_time - (loop_time + setup_time));
-
-    let manual_overhead = (loop_time + setup_time) - isolated_time;
-    println!("\nManual overhead (vs isolated): {:>8.2} ms", manual_overhead);
-    println!("This overhead is from:");
-    println!("  Gradient comp:           {:>8.3} ms", time_gradient);
-    println!("  Sample indices:          {:>8.3} ms", time_sample);
-    println!("  Predict update:          {:>8.3} ms", time_predict);
-    println!("  Tree push:               {:>8.3} ms", time_push);
-    println!("  TOTAL known overhead:    {:>8.3} ms", time_gradient + time_sample + time_predict + time_push);
-
-    let unknown = manual_overhead - (time_gradient + time_sample + time_predict + time_push);
-    println!("  UNKNOWN overhead:        {:>8.3} ms", unknown);
-
-    // =========================================================================
-    // 5. CACHE POLLUTION: Tree grow time with changing gradients
-    // =========================================================================
-    println!("\n5. CACHE POLLUTION INVESTIGATION");
-    println!("---------------------------------");
-
-    // Reset
-    let mut gradients = vec![0.0f32; num_rows];
-    let mut hessians = vec![0.0f32; num_rows];
-    let mut predictions = vec![0.0f32; num_rows];
-
-    // A) Tree grow with SAME gradients (cache warm)
-    let fixed_grads: Vec<f32> = (0..num_rows)
-        .map(|i| if i < num_rows / 2 { -1.0 } else { 1.0 })
-        .collect();
-    let fixed_hess = vec![1.0f32; num_rows];
-
-    let start = Instant::now();
-    for _ in 0..num_rounds {
-        let _ = grower.grow_with_indices(&dataset, &fixed_grads, &fixed_hess, &train_indices);
-    }
-    let warm_cache_time = start.elapsed().as_secs_f64() * 1000.0;
-
-    // B) Tree grow with CHANGING gradients (cache cold each iteration)
-    let start = Instant::now();
-    for round in 0..num_rounds {
-        // Compute new gradients (simulates training)
-        for &idx in &train_indices {
-            let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
-            gradients[idx] = g;
-            hessians[idx] = h;
-        }
-
-        let tree = grower.grow_with_indices(&dataset, &gradients, &hessians, &train_indices);
-        tree.predict_batch_add(&dataset, &mut predictions);
-    }
-    let cold_cache_time = start.elapsed().as_secs_f64() * 1000.0;
-
-    // C) Tree grow with changing gradients but NO prediction update
-    let mut gradients = vec![0.0f32; num_rows];
-    let mut hessians = vec![0.0f32; num_rows];
-
-    let start = Instant::now();
-    for round in 0..num_rounds {
-        // Compute new gradients but no prediction update
-        for idx in 0..num_rows {
-            gradients[idx] = (round as f32 + idx as f32).sin();
-            hessians[idx] = 1.0;
         }
         let _ = grower.grow_with_indices(&dataset, &gradients, &hessians, &train_indices);
-    }
-    let cold_no_pred_time = start.elapsed().as_secs_f64() * 1000.0;
 
-    println!("Warm cache (same grads):   {:>8.2} ms ({:.2} ms/tree)", warm_cache_time, warm_cache_time / num_rounds as f64);
-    println!("Cold (new grads, +pred):   {:>8.2} ms ({:.2} ms/tree)", cold_cache_time, cold_cache_time / num_rounds as f64);
-    println!("Cold (new grads, no pred): {:>8.2} ms ({:.2} ms/tree)", cold_no_pred_time, cold_no_pred_time / num_rounds as f64);
-    println!("\nCache pollution from changing gradients: {:>8.2} ms ({:.2} ms/round)",
-        cold_no_pred_time - warm_cache_time, (cold_no_pred_time - warm_cache_time) / num_rounds as f64);
+        // Reset
+        predictions.fill(0.0);
 
-    // =========================================================================
-    // 6. MEMORY TRAFFIC ANALYSIS
-    // =========================================================================
-    println!("\n6. MEMORY TRAFFIC ANALYSIS");
-    println!("---------------------------");
-
-    // Data touched per round:
-    // - Targets: num_rows × 4 bytes (read)
-    // - Predictions: num_rows × 4 bytes (read)
-    // - Gradients: num_rows × 4 bytes (write)
-    // - Hessians: num_rows × 4 bytes (write)
-    // - train_indices: num_rows × 8 bytes (read)
-    // - sample_indices: num_rows × 8 bytes (write then read)
-    // - Dataset bins: num_rows × num_features bytes (read)
-    // - Histogram storage: num_features × 256 × 12 bytes × ~62 nodes
-
-    let gradient_traffic = num_rows * 4 * 2; // read + write
-    let sample_traffic = num_rows * 8 * 2;    // write + read
-    let predict_traffic = num_rows * 4 * 2;   // read predictions + write
-
-    println!("Per-round memory traffic:");
-    println!("  Gradient comp:           {:>8.1} MB", (num_rows * 4 * 4) as f64 / 1_000_000.0);
-    println!("  Sample indices:          {:>8.1} MB", sample_traffic as f64 / 1_000_000.0);
-    println!("  Predict update:          {:>8.1} MB", predict_traffic as f64 / 1_000_000.0);
-    println!("  Dataset bins (tree):     {:>8.1} MB", (num_rows * num_features) as f64 / 1_000_000.0);
-
-    let total_extra_traffic = gradient_traffic + sample_traffic + predict_traffic;
-    println!("  Extra traffic/round:     {:>8.1} MB", total_extra_traffic as f64 / 1_000_000.0);
-
-    // Assuming 50 GB/s memory bandwidth
-    let bandwidth = 50_000.0; // MB/s
-    let estimated_time = (total_extra_traffic as f64 / 1_000_000.0) / bandwidth * 1000.0;
-    println!("  Estimated time @ 50GB/s: {:>8.3} ms", estimated_time);
-
-    // =========================================================================
-    // 7. WHAT IF WE DON'T COPY SAMPLE INDICES?
-    // =========================================================================
-    println!("\n7. SAMPLE INDICES COPY OVERHEAD");
-    println!("--------------------------------");
-
-    // Instead of copying, just use train_indices directly
-    let mut predictions = vec![0.0f32; num_rows];
-    let mut gradients = vec![0.0f32; num_rows];
-    let mut hessians = vec![0.0f32; num_rows];
-
-    let start = Instant::now();
-    for _round in 0..num_rounds {
-        for &idx in &train_indices {
-            let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
-            gradients[idx] = g;
-            hessians[idx] = h;
-        }
-        // Use train_indices directly (no copy)
-        let tree = grower.grow_with_indices(&dataset, &gradients, &hessians, &train_indices);
-        tree.predict_batch_add(&dataset, &mut predictions);
-    }
-    let no_copy_time = start.elapsed().as_secs_f64() * 1000.0;
-
-    println!("With sample_indices copy:  {:>8.2} ms", loop_time);
-    println!("Without copy (direct use): {:>8.2} ms", no_copy_time);
-    println!("Savings:                   {:>8.2} ms", loop_time - no_copy_time);
-
-    // =========================================================================
-    // 8. GRADIENT COMPUTATION PARALLELISM
-    // =========================================================================
-    println!("\n8. GRADIENT COMPUTATION PARALLELISM");
-    println!("------------------------------------");
-
-    use rayon::prelude::*;
-
-    let mut predictions = vec![0.0f32; num_rows];
-    let mut gradients = vec![0.0f32; num_rows];
-    let mut hessians = vec![0.0f32; num_rows];
-
-    // Sequential
-    let start = Instant::now();
-    for _ in 0..num_rounds {
-        for &idx in &train_indices {
-            let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
-            gradients[idx] = g;
-            hessians[idx] = h;
-        }
-    }
-    let seq_grad_time = start.elapsed().as_secs_f64() * 1000.0;
-
-    // Parallel with chunks
-    let start = Instant::now();
-    for _ in 0..num_rounds {
-        train_indices.par_chunks(8192).for_each(|chunk| {
-            for &idx in chunk {
+        let start = Instant::now();
+        for _round in 0..num_rounds {
+            // Gradient computation
+            let t = Instant::now();
+            for &idx in &train_indices {
                 let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
-                unsafe {
-                    let grad_ptr = gradients.as_ptr() as *mut f32;
-                    let hess_ptr = hessians.as_ptr() as *mut f32;
-                    *grad_ptr.add(idx) = g;
-                    *hess_ptr.add(idx) = h;
+                gradients[idx] = g;
+                hessians[idx] = h;
+            }
+            time_gradient_ms += t.elapsed().as_secs_f64() * 1000.0;
+
+            // Tree grow (includes histogram building + split finding)
+            let t = Instant::now();
+            let tree = grower.grow_with_indices(&dataset, &gradients, &hessians, &train_indices);
+            time_grow_ms += t.elapsed().as_secs_f64() * 1000.0;
+
+            // Prediction update
+            let t = Instant::now();
+            tree.predict_batch_add(&dataset, &mut predictions);
+            time_predict_ms += t.elapsed().as_secs_f64() * 1000.0;
+        }
+        let total_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+        println!("  Gradient computation: {:>8.2} ms ({:>5.1}%)",
+            time_gradient_ms, time_gradient_ms / total_ms * 100.0);
+        println!("  Tree growing:         {:>8.2} ms ({:>5.1}%)  <- Histogram + Split",
+            time_grow_ms, time_grow_ms / total_ms * 100.0);
+        println!("  Prediction update:    {:>8.2} ms ({:>5.1}%)",
+            time_predict_ms, time_predict_ms / total_ms * 100.0);
+        println!("  ---------------------------------");
+        println!("  Total:                {:>8.2} ms", total_ms);
+        println!("  Per round:            {:>8.2} ms", total_ms / num_rounds as f64);
+    }
+
+    // =========================================================================
+    // SECTION 4: GPU Internal Fallback Behavior
+    // =========================================================================
+    #[cfg(feature = "gpu")]
+    {
+        section_header("SECTION 4: GPU INTERNAL FALLBACK ANALYSIS");
+
+        println!("\nThe GPU backend internally falls back to CPU for small row counts.");
+        println!("Threshold: GPU_MIN_ROWS = 5,000 rows");
+        println!("\nDuring tree growing, nodes get progressively smaller:");
+
+        // Estimate node sizes at each depth
+        println!("\nEstimated node sizes (balanced binary tree):");
+        println!("{:>8} | {:>12} | {:>8} | {}", "Depth", "Rows/Node", "# Nodes", "Backend");
+        println!("{}", "-".repeat(50));
+
+        for depth in 0..=max_depth {
+            let nodes_at_depth = 1usize << depth;
+            let rows_per_node = num_rows / nodes_at_depth;
+            let backend = if rows_per_node >= 5_000 { "GPU" } else { "CPU (fallback)" };
+            println!("{:>8} | {:>12} | {:>8} | {}",
+                depth, rows_per_node, nodes_at_depth, backend);
+        }
+
+        println!("\nWith max_depth={} and {} rows:", max_depth, num_rows);
+        let gpu_depth_limit = (num_rows as f64 / 5_000.0).log2().floor() as usize;
+        println!("  - GPU used for depths 0-{} (rows >= 5K)", gpu_depth_limit.min(max_depth));
+        println!("  - CPU fallback for depths {}-{} (rows < 5K)", (gpu_depth_limit + 1).min(max_depth), max_depth);
+
+        // Count histogram operations by estimated backend
+        let mut gpu_hist_count = 0;
+        let mut cpu_hist_count = 0;
+        for depth in 0..=max_depth {
+            let nodes_at_depth = 1usize << depth;
+            let rows_per_node = num_rows / nodes_at_depth;
+            // Each internal node needs histogram build for smaller child
+            // (larger child uses subtraction)
+            if depth < max_depth {
+                if rows_per_node / 2 >= 5_000 {
+                    gpu_hist_count += nodes_at_depth;
+                } else {
+                    cpu_hist_count += nodes_at_depth;
                 }
             }
-        });
+        }
+        // Add root histogram
+        if num_rows >= 5_000 {
+            gpu_hist_count += 1;
+        } else {
+            cpu_hist_count += 1;
+        }
+
+        println!("\nEstimated histogram builds per tree:");
+        println!("  GPU histograms:  ~{}", gpu_hist_count);
+        println!("  CPU histograms:  ~{}", cpu_hist_count);
+        println!("  Total:           ~{}", gpu_hist_count + cpu_hist_count);
     }
-    let par_grad_time = start.elapsed().as_secs_f64() * 1000.0;
-
-    println!("Sequential gradient:       {:>8.3} ms ({:.3} ms/round)", seq_grad_time, seq_grad_time / num_rounds as f64);
-    println!("Parallel gradient:         {:>8.3} ms ({:.3} ms/round)", par_grad_time, par_grad_time / num_rounds as f64);
 
     // =========================================================================
-    // SUMMARY
+    // SECTION 5: Data Transfer Analysis
     // =========================================================================
-    println!("\n9. SUMMARY: WHERE IS THE 17ms OVERHEAD?");
-    println!("----------------------------------------");
+    section_header("SECTION 5: DATA TRANSFER ANALYSIS");
 
-    let per_round_overhead = overhead / num_rounds as f64;
-    println!("Total overhead per round:  {:>8.2} ms", per_round_overhead);
-    println!("\nBreakdown:");
-    println!("  Gradient comp:           {:>8.3} ms ({:.0}%)",
-        time_gradient / num_rounds as f64,
-        (time_gradient / num_rounds as f64 / per_round_overhead) * 100.0);
-    println!("  Sample indices:          {:>8.3} ms ({:.0}%)",
-        time_sample / num_rounds as f64,
-        (time_sample / num_rounds as f64 / per_round_overhead) * 100.0);
-    println!("  Predict update:          {:>8.3} ms ({:.0}%)",
-        time_predict / num_rounds as f64,
-        (time_predict / num_rounds as f64 / per_round_overhead) * 100.0);
+    let bins_size = num_rows * num_features;
+    let grad_hess_size = num_rows * 8; // 2 x f32
+    let hist_size = num_features * 256 * 12; // 3 x f32 per bin
 
-    let cache_pollution = (cold_no_pred_time - warm_cache_time) / num_rounds as f64;
-    println!("  Cache pollution:         {:>8.3} ms ({:.0}%)",
-        cache_pollution,
-        (cache_pollution / per_round_overhead) * 100.0);
+    println!("\nData sizes:");
+    println!("  Bins (dataset):          {:>8.2} MB (uploaded once, cached)", bins_size as f64 / 1_000_000.0);
+    println!("  Grad/Hess (per round):   {:>8.2} MB (uploaded every round)", grad_hess_size as f64 / 1_000_000.0);
+    println!("  Histograms (download):   {:>8.2} MB (per histogram build)", hist_size as f64 / 1_000_000.0);
 
-    let accounted = time_gradient / num_rounds as f64
-        + time_sample / num_rounds as f64
-        + time_predict / num_rounds as f64
-        + cache_pollution;
-    println!("  ---");
-    println!("  ACCOUNTED:               {:>8.3} ms ({:.0}%)", accounted, (accounted / per_round_overhead) * 100.0);
-    println!("  UNACCOUNTED:             {:>8.3} ms ({:.0}%)",
-        per_round_overhead - accounted,
-        ((per_round_overhead - accounted) / per_round_overhead) * 100.0);
+    println!("\nPer-round GPU transfer:");
+    println!("  Upload:   {:.2} MB (grad/hess)", grad_hess_size as f64 / 1_000_000.0);
+    println!("  Download: {:.2} MB (histograms × builds)", hist_size as f64 / 1_000_000.0);
+
+    // Estimate bandwidth requirements
+    let transfer_per_round = grad_hess_size + hist_size * 10; // rough estimate
+    println!("\n  Estimated transfer/round: {:.2} MB", transfer_per_round as f64 / 1_000_000.0);
+    println!("  At 10 GB/s PCIe: {:.2} ms overhead", transfer_per_round as f64 / 10_000_000.0);
+
+    // =========================================================================
+    // SECTION 6: Optimization Opportunities
+    // =========================================================================
+    section_header("SECTION 6: OPTIMIZATION OPPORTUNITIES");
+
+    println!("\nCurrent implementation:");
+    println!("  ✓ Bins cached on GPU (no re-upload)");
+    println!("  ✓ CPU fallback for small nodes (< 10K rows)");
+    println!("  ✓ Sibling subtraction on CPU (trivial operation)");
+    println!("  ✓ Split finding on CPU (O(256 × features), fast)");
+    println!("  ✗ Grad/Hess uploaded every round");
+
+    println!("\nPotential improvements:");
+    println!("  1. Async grad/hess upload during tree traversal");
+    println!("  2. Keep histograms on GPU, only download for splits");
+    println!("  3. GPU split finding for very wide datasets (100+ features)");
+    println!("  4. Batch multiple small histogram builds into one GPU dispatch");
+    println!("  5. Double-buffering for grad/hess (overlap upload with compute)");
+
+    // =========================================================================
+    // SECTION 7: Recommendations
+    // =========================================================================
+    section_header("SECTION 7: RECOMMENDATIONS");
+
+    println!("\nFor dataset: {} rows × {} features", num_rows, num_features);
+
+    #[cfg(feature = "gpu")]
+    {
+        let speedup = scalar_train_time.as_secs_f64() / gpu_train_time.as_secs_f64();
+
+        if speedup > 1.5 {
+            println!("\n  ✓ RECOMMENDED: Use GPU backend (Wgpu)");
+            println!("    Measured speedup: {:.2}x", speedup);
+        } else if speedup > 1.0 {
+            println!("\n  ~ GPU provides marginal benefit ({:.2}x)", speedup);
+            println!("    Consider GPU for larger datasets");
+        } else {
+            println!("\n  ✗ RECOMMENDED: Use Scalar backend (CPU)");
+            println!("    CPU is {:.2}x faster for this dataset", 1.0 / speedup);
+        }
+
+        println!("\nGuidelines:");
+        println!("  - < 100K rows:   Use Scalar (GPU overhead dominates)");
+        println!("  - 100K-500K:     Test both, GPU may help");
+        println!("  - > 500K rows:   Use GPU (significant speedup)");
+        println!("  - Many features: GPU helps more (parallel over features)");
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    {
+        println!("\n  GPU feature not enabled.");
+        println!("  Compile with: cargo run --release --features gpu --example training_loop_deep_dive");
+    }
 }

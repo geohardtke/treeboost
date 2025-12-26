@@ -183,7 +183,8 @@ impl GBDTModel {
             .with_learning_rate(config.learning_rate)
             .with_colsample(config.colsample)
             .with_monotonic_constraints(config.monotonic_constraints.clone())
-            .with_interaction_constraints(interaction_constraints);
+            .with_interaction_constraints(interaction_constraints)
+            .with_backend(config.backend_type.clone());
 
         let mut trees = Vec::with_capacity(config.num_rounds);
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);

@@ -1,5 +1,6 @@
 //! GBDT training configuration
 
+use crate::backend::BackendType;
 use crate::dataset::OrderingStrategy;
 use crate::loss::{LossFunction, MseLoss, PseudoHuberLoss};
 use crate::tree::MonotonicConstraint;
@@ -104,6 +105,11 @@ pub struct GBDTConfig {
     /// Experimental: may not provide stable speedups, benchmark before enabling
     pub parallel_gradient: bool,
 
+    // Backend selection
+    /// Backend type for histogram building (default: Auto = GPU for large datasets, CPU otherwise)
+    #[rkyv(with = rkyv::with::Skip)]
+    pub backend_type: BackendType,
+
     // Monotonic constraints
     /// Monotonic constraints per feature (empty = no constraints)
     pub monotonic_constraints: Vec<MonotonicConstraint>,
@@ -161,6 +167,9 @@ impl Default for GBDTConfig {
             reordering_strategy: OrderingStrategy::ByImportance,
             packed_dataset: true,
             parallel_gradient: false, // Enable for large datasets (100k+ rows)
+
+            // Backend selection (Auto = GPU for large datasets, CPU otherwise)
+            backend_type: BackendType::Auto,
 
             // Monotonic constraints
             monotonic_constraints: Vec::new(),
@@ -309,6 +318,30 @@ impl GBDTConfig {
     /// Use examples/find_crossover.rs to test on your specific data.
     pub fn with_parallel_gradient(mut self, enabled: bool) -> Self {
         self.parallel_gradient = enabled;
+        self
+    }
+
+    /// Set the backend for histogram building
+    ///
+    /// # Backend Types
+    /// - `Auto` (default): Uses GPU for datasets >= 50K rows, CPU otherwise
+    /// - `Scalar`: Force CPU (AVX2/NEON optimized)
+    /// - `Wgpu`: Force GPU (requires `gpu` feature)
+    ///
+    /// # Example
+    /// ```ignore
+    /// use treeboost::{GBDTConfig, BackendType};
+    ///
+    /// // Force GPU backend for training
+    /// let config = GBDTConfig::new()
+    ///     .with_backend(BackendType::Wgpu);
+    ///
+    /// // Force CPU backend for reproducibility
+    /// let config = GBDTConfig::new()
+    ///     .with_backend(BackendType::Scalar);
+    /// ```
+    pub fn with_backend(mut self, backend_type: BackendType) -> Self {
+        self.backend_type = backend_type;
         self
     }
 
