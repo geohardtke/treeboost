@@ -8,7 +8,6 @@
 //! This is the fallback backend for all platforms and the best choice
 //! for small datasets (< 10K rows) due to lower overhead.
 
-pub mod histogram;
 pub mod kernel;
 
 use crate::backend::traits::{BinStorage, HistogramBackend, SplitCandidate, SplitConfig};
@@ -73,7 +72,7 @@ impl HistogramBackend for ScalarBackend {
         grad_hess: &[(f32, f32)],
         row_indices: &[usize],
     ) -> Vec<Histogram> {
-        let builder = histogram::HistogramBuilder::new();
+        let builder = crate::histogram::HistogramBuilder::new();
         let num_features = bins.num_features();
 
         // Convert to the format expected by the builder

@@ -251,6 +251,75 @@ pub unsafe fn histogram_accumulate_contiguous_avx2(
     }
 }
 
+// ============================================================================
+// Grad/Hess Interleaving
+// ============================================================================
+
+/// Block size for cache-blocked histogram building
+pub const BLOCK_SIZE: usize = 2048;
+
+/// AVX2 copy of gradients and hessians to interleaved cache.
+///
+/// Uses AVX2 loads and shuffle/permute to interleave 8 gradient/hessian pairs
+/// at a time: `[g0,g1,...,g7]` + `[h0,h1,...,h7]` -> `[(g0,h0),(g1,h1),...]`
+///
+/// # Safety
+/// - Requires AVX2 support
+/// - `gradients` and `hessians` must have at least `start + len` elements
+/// - `gh_cache` must have capacity for `len` elements
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub unsafe fn copy_gh_interleaved_avx2(
+    gradients: &[f32],
+    hessians: &[f32],
+    start: usize,
+    len: usize,
+    gh_cache: &mut [(f32, f32); BLOCK_SIZE],
+) {
+    use std::arch::x86_64::*;
+
+    let chunks = len / 8;
+    let remainder = len % 8;
+
+    let grad_ptr = gradients.as_ptr().add(start);
+    let hess_ptr = hessians.as_ptr().add(start);
+    let cache_ptr = gh_cache.as_mut_ptr() as *mut f32;
+
+    for i in 0..chunks {
+        let offset = i * 8;
+
+        // Load 8 gradients and 8 hessians
+        let grads = _mm256_loadu_ps(grad_ptr.add(offset));
+        let hess = _mm256_loadu_ps(hess_ptr.add(offset));
+
+        // Interleave using unpack operations
+        // unpacklo: [g0,h0,g1,h1,g4,h4,g5,h5]
+        // unpackhi: [g2,h2,g3,h3,g6,h6,g7,h7]
+        let lo = _mm256_unpacklo_ps(grads, hess);
+        let hi = _mm256_unpackhi_ps(grads, hess);
+
+        // Permute to fix lane crossing
+        // first: [g0,h0,g1,h1,g2,h2,g3,h3]
+        // second: [g4,h4,g5,h5,g6,h6,g7,h7]
+        let first = _mm256_permute2f128_ps(lo, hi, 0x20);
+        let second = _mm256_permute2f128_ps(lo, hi, 0x31);
+
+        // Store interleaved pairs (16 floats = 8 pairs)
+        let dst = cache_ptr.add(offset * 2);
+        _mm256_storeu_ps(dst, first);
+        _mm256_storeu_ps(dst.add(8), second);
+    }
+
+    // Handle remainder with scalar code
+    let rem_start = chunks * 8;
+    for i in 0..remainder {
+        let idx = rem_start + i;
+        let g = *gradients.get_unchecked(start + idx);
+        let h = *hessians.get_unchecked(start + idx);
+        *gh_cache.get_unchecked_mut(idx) = (g, h);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

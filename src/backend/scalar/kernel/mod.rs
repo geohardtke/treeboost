@@ -3,7 +3,7 @@
 //! # Architecture Support
 //!
 //! - **x86_64**: AVX2 (baseline) with AVX-512 runtime upgrade
-//! - **aarch64**: ARM NEON (future)
+//! - **aarch64**: ARM NEON
 //! - **Other**: Scalar fallback
 //!
 //! # Runtime Detection
@@ -16,14 +16,25 @@ pub mod fallback;
 #[cfg(target_arch = "x86_64")]
 pub mod x86;
 
+#[cfg(target_arch = "aarch64")]
+pub mod arm;
+
+// x86_64 exports
 #[cfg(target_arch = "x86_64")]
 pub use x86::{find_best_split_scalar, find_best_split_simd, SplitCandidate};
 #[cfg(target_arch = "x86_64")]
 pub use x86::{unpack_4bit, unpack_4bit_scalar};
 
-#[cfg(not(target_arch = "x86_64"))]
+// aarch64 exports
+#[cfg(target_arch = "aarch64")]
+pub use arm::{find_best_split_scalar, find_best_split_simd, SplitCandidate};
+#[cfg(target_arch = "aarch64")]
+pub use fallback::{unpack_4bit, unpack_4bit_scalar};
+
+// Other architectures - fallback
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub use fallback::{find_best_split_scalar, find_best_split_simd, SplitCandidate};
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub use fallback::{unpack_4bit, unpack_4bit_scalar};
 
 use std::sync::OnceLock;
@@ -40,6 +51,8 @@ pub enum SimdLevel {
     Avx2,
     /// AVX-512 available (512-bit, 16 x f32)
     Avx512,
+    /// ARM NEON available (128-bit, 4 x f32)
+    Neon,
 }
 
 impl SimdLevel {
@@ -55,9 +68,14 @@ impl SimdLevel {
         }
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
     fn detect() -> Self {
-        // TODO: Add ARM NEON detection
+        // NEON is always available on aarch64
+        SimdLevel::Neon
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    fn detect() -> Self {
         SimdLevel::Scalar
     }
 }
@@ -78,6 +96,12 @@ pub fn has_avx2() -> bool {
 #[inline]
 pub fn has_avx512() -> bool {
     matches!(simd_level(), SimdLevel::Avx512)
+}
+
+/// Check if ARM NEON is available
+#[inline]
+pub fn has_neon() -> bool {
+    matches!(simd_level(), SimdLevel::Neon)
 }
 
 // ============================================================================
@@ -173,22 +197,14 @@ pub unsafe fn histogram_accumulate(
     #[cfg(target_arch = "x86_64")]
     {
         match simd_level() {
-            SimdLevel::Avx512 => {
-                // TODO: Implement AVX-512 kernel
+            SimdLevel::Avx512 | SimdLevel::Avx2 => {
                 x86::histogram_accumulate_avx2(
                     feature_bins, row_indices, num_rows,
                     gradients, hessians,
                     hist_grads, hist_hess, hist_counts,
                 )
             }
-            SimdLevel::Avx2 => {
-                x86::histogram_accumulate_avx2(
-                    feature_bins, row_indices, num_rows,
-                    gradients, hessians,
-                    hist_grads, hist_hess, hist_counts,
-                )
-            }
-            SimdLevel::Scalar => {
+            _ => {
                 fallback::histogram_accumulate_scalar(
                     feature_bins, row_indices, num_rows,
                     gradients, hessians,
@@ -198,7 +214,18 @@ pub unsafe fn histogram_accumulate(
         }
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
+    {
+        // NEON histogram uses scalar fallback (scatter is inherently sequential)
+        // NEON is used for grad/hess loading in copy_gh_interleaved
+        fallback::histogram_accumulate_scalar(
+            feature_bins, row_indices, num_rows,
+            gradients, hessians,
+            hist_grads, hist_hess, hist_counts,
+        )
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         fallback::histogram_accumulate_scalar(
             feature_bins, row_indices, num_rows,
@@ -228,22 +255,14 @@ pub unsafe fn histogram_accumulate_contiguous(
     #[cfg(target_arch = "x86_64")]
     {
         match simd_level() {
-            SimdLevel::Avx512 => {
-                // TODO: Implement AVX-512 kernel
+            SimdLevel::Avx512 | SimdLevel::Avx2 => {
                 x86::histogram_accumulate_contiguous_avx2(
                     feature_bins, num_rows,
                     gradients, hessians,
                     hist_grads, hist_hess, hist_counts,
                 )
             }
-            SimdLevel::Avx2 => {
-                x86::histogram_accumulate_contiguous_avx2(
-                    feature_bins, num_rows,
-                    gradients, hessians,
-                    hist_grads, hist_hess, hist_counts,
-                )
-            }
-            SimdLevel::Scalar => {
+            _ => {
                 fallback::histogram_accumulate_contiguous_scalar(
                     feature_bins, num_rows,
                     gradients, hessians,
@@ -253,7 +272,16 @@ pub unsafe fn histogram_accumulate_contiguous(
         }
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
+    {
+        fallback::histogram_accumulate_contiguous_scalar(
+            feature_bins, num_rows,
+            gradients, hessians,
+            hist_grads, hist_hess, hist_counts,
+        )
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         fallback::histogram_accumulate_contiguous_scalar(
             feature_bins, num_rows,
@@ -359,6 +387,68 @@ pub fn subtract_histogram_counts(self_counts: &mut [u32; 256], other_counts: &[u
         }
     }
     fallback::subtract_histogram_counts_scalar(self_counts, other_counts);
+}
+
+// ============================================================================
+// Public API - Runtime-dispatched grad/hess interleaving
+// ============================================================================
+
+/// Block size for cache-blocked histogram building
+pub const BLOCK_SIZE: usize = 2048;
+
+/// Copy gradients and hessians to interleaved cache with SIMD optimization.
+///
+/// Loads gradients and hessians from separate arrays and interleaves them
+/// into `[(g0, h0), (g1, h1), ...]` format for cache-friendly access during
+/// histogram building.
+///
+/// # Arguments
+/// * `gradients` - Source gradient array
+/// * `hessians` - Source hessian array
+/// * `start` - Starting index in source arrays
+/// * `len` - Number of elements to copy
+/// * `gh_cache` - Output interleaved cache
+///
+/// # Safety
+/// - `gradients` and `hessians` must have at least `start + len` elements
+/// - `gh_cache` must have capacity for `len` elements
+#[inline]
+pub unsafe fn copy_gh_interleaved(
+    gradients: &[f32],
+    hessians: &[f32],
+    start: usize,
+    len: usize,
+    gh_cache: &mut [(f32, f32); BLOCK_SIZE],
+) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2() {
+            x86::copy_gh_interleaved_avx2(gradients, hessians, start, len, gh_cache);
+            return;
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        arm::copy_gh_interleaved_neon(gradients, hessians, start, len, gh_cache);
+        return;
+    }
+
+    // Scalar fallback
+    fallback::copy_gh_interleaved_scalar(gradients, hessians, start, len, gh_cache);
+}
+
+/// Copy gradients and hessians for indexed (non-contiguous) rows.
+///
+/// Uses scalar implementation since gather operations have high latency.
+#[inline]
+pub fn copy_gh_indexed(
+    gradients: &[f32],
+    hessians: &[f32],
+    indices: &[usize],
+    gh_cache: &mut [(f32, f32); BLOCK_SIZE],
+) {
+    fallback::copy_gh_indexed_scalar(gradients, hessians, indices, gh_cache);
 }
 
 #[cfg(test)]

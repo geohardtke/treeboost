@@ -430,6 +430,50 @@ pub fn subtract_histogram_counts_scalar(self_counts: &mut [u32; 256], other_coun
     }
 }
 
+// ============================================================================
+// Grad/Hess Interleaving
+// ============================================================================
+
+/// Block size for cache-blocked histogram building
+pub const BLOCK_SIZE: usize = 2048;
+
+/// Scalar copy of gradients and hessians to interleaved cache.
+///
+/// # Safety
+/// - `gradients` and `hessians` must have at least `start + len` elements
+/// - `gh_cache` must have capacity for `len` elements
+#[inline]
+pub unsafe fn copy_gh_interleaved_scalar(
+    gradients: &[f32],
+    hessians: &[f32],
+    start: usize,
+    len: usize,
+    gh_cache: &mut [(f32, f32); BLOCK_SIZE],
+) {
+    for i in 0..len {
+        let g = *gradients.get_unchecked(start + i);
+        let h = *hessians.get_unchecked(start + i);
+        *gh_cache.get_unchecked_mut(i) = (g, h);
+    }
+}
+
+/// Scalar copy of gradients and hessians for indexed (non-contiguous) rows.
+#[inline]
+pub fn copy_gh_indexed_scalar(
+    gradients: &[f32],
+    hessians: &[f32],
+    indices: &[usize],
+    gh_cache: &mut [(f32, f32); BLOCK_SIZE],
+) {
+    unsafe {
+        for (i, &row_idx) in indices.iter().enumerate() {
+            let g = *gradients.get_unchecked(row_idx);
+            let h = *hessians.get_unchecked(row_idx);
+            *gh_cache.get_unchecked_mut(i) = (g, h);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

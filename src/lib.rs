@@ -41,10 +41,12 @@ pub mod dataset;
 pub mod encoding;
 pub mod histogram;
 pub mod inference;
-pub mod kernel;
 pub mod loss;
 pub mod serialize;
 pub mod tree;
+
+// Kernel re-exported from scalar backend (canonical location for CPU kernels)
+pub use backend::scalar::kernel;
 
 #[cfg(feature = "python")]
 mod python;
@@ -52,7 +54,8 @@ mod python;
 // Re-exports for convenience
 pub use backend::{BackendConfig, BackendSelector, BackendType, HistogramBackend};
 pub use booster::{GBDTConfig, GBDTModel};
-pub use dataset::{BinnedDataset, QuantileBinner};
+pub use dataset::{BinnedDataset, FeatureInfo, FeatureType, QuantileBinner};
+pub use histogram::HistogramBuilder;
 pub use inference::Prediction;
 pub use loss::{LossFunction, MseLoss, PseudoHuberLoss};
 pub use tree::{InteractionConstraints, MonotonicConstraint};

@@ -14,7 +14,10 @@ pub mod merge;
 pub mod split;
 pub mod unpack;
 
-pub use histogram::{histogram_accumulate_avx2, histogram_accumulate_contiguous_avx2};
+pub use histogram::{
+    copy_gh_interleaved_avx2, histogram_accumulate_avx2, histogram_accumulate_contiguous_avx2,
+    BLOCK_SIZE,
+};
 pub use merge::{
     merge_histogram_counts_avx2, merge_histogram_grads_avx2, merge_histogram_hess_avx2,
     subtract_histogram_counts_avx2, subtract_histogram_grads_avx2, subtract_histogram_hess_avx2,

@@ -26,6 +26,7 @@
 
 use crate::dataset::{BinnedDataset, SparseColumn, DEFAULT_BIN};
 use crate::histogram::{Histogram, NodeHistograms};
+use crate::kernel;
 use rayon::prelude::*;
 
 /// Block size for cache-blocked histogram building
@@ -125,15 +126,18 @@ impl HistogramBuilder {
 
                 // INTERLEAVED LAYOUT: Pack grad/hess together for better cache locality
                 // Single cache line load gets both values (~17.8% faster than separate arrays)
+                // Uses SIMD (AVX2/NEON) for fast interleaving when available
                 let mut gh_cache = [(0.0f32, 0.0f32); BLOCK_SIZE];
 
-                // Copy block data to interleaved cache
+                // Copy block data to interleaved cache using SIMD-optimized path
                 unsafe {
-                    for i in 0..block_len {
-                        let g = *gradients.get_unchecked(block_start + i);
-                        let h = *hessians.get_unchecked(block_start + i);
-                        *gh_cache.get_unchecked_mut(i) = (g, h);
-                    }
+                    kernel::copy_gh_interleaved(
+                        gradients,
+                        hessians,
+                        block_start,
+                        block_len,
+                        &mut gh_cache,
+                    );
                 }
 
                 // Compute block totals for sparse default bin subtraction
@@ -262,15 +266,10 @@ impl HistogramBuilder {
                 let mut local_hists = NodeHistograms::new(num_features);
 
                 // INTERLEAVED LAYOUT: Pack grad/hess together for better cache locality
+                // Uses scalar for indexed access (gather has high latency, no SIMD benefit)
                 let mut gh_cache = [(0.0f32, 0.0f32); BLOCK_SIZE];
 
-                unsafe {
-                    for (i, &row_idx) in chunk.iter().enumerate() {
-                        let g = *gradients.get_unchecked(row_idx);
-                        let h = *hessians.get_unchecked(row_idx);
-                        *gh_cache.get_unchecked_mut(i) = (g, h);
-                    }
-                }
+                kernel::copy_gh_indexed(gradients, hessians, chunk, &mut gh_cache);
 
                 // Compute block totals for sparse default bin subtraction
                 let (block_total_grad, block_total_hess) = gh_cache[..block_len]
