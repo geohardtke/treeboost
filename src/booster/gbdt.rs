@@ -220,32 +220,33 @@ impl GBDTModel {
         // Determine if we can use fused gradient+histogram (no subsampling)
         let use_fused = !config.goss_enabled && config.subsample >= 1.0;
 
-        // Determine if Full GPU mode should be used
-        // Requires: no subsampling, no GOSS, GPU backend, Full mode resolves
-        #[cfg(any(feature = "cuda", feature = "gpu"))]
-        let use_full_gpu = {
-            let resolved_mode = config.gpu_mode.resolve(config.backend_type);
-            use_fused && matches!(resolved_mode, GpuMode::Full)
-        };
-
-        // Create Full GPU builder if needed
+        // Create Full GPU builders if applicable
+        // For BackendType::Auto, we try CUDA first, then WGPU
         #[cfg(feature = "cuda")]
-        let mut cuda_builder: Option<FullCudaTreeBuilder> = if use_full_gpu
+        let mut cuda_builder: Option<FullCudaTreeBuilder> = if use_fused
             && matches!(config.backend_type, BackendType::Cuda | BackendType::Auto)
         {
             use crate::backend::cuda::CudaDevice;
-            CudaDevice::new().map(|d| FullCudaTreeBuilder::new(std::sync::Arc::new(d)))
+            CudaDevice::new().and_then(|d| {
+                // Resolve gpu_mode knowing we have CUDA available
+                let resolved = config.gpu_mode.resolve(BackendType::Cuda);
+                if matches!(resolved, GpuMode::Full) {
+                    Some(FullCudaTreeBuilder::new(std::sync::Arc::new(d)))
+                } else {
+                    None
+                }
+            })
         } else {
             None
         };
 
         #[cfg(feature = "gpu")]
-        let mut wgpu_builder: Option<FullGpuTreeBuilder> = if use_full_gpu
-            && matches!(config.backend_type, BackendType::Wgpu)
+        let mut wgpu_builder: Option<FullGpuTreeBuilder> = if use_fused
+            && matches!(config.backend_type, BackendType::Wgpu | BackendType::Auto)
             && {
                 #[cfg(feature = "cuda")]
                 {
-                    cuda_builder.is_none() // Only use WGPU if CUDA not available
+                    cuda_builder.is_none() // Only use WGPU if CUDA not available/chosen
                 }
                 #[cfg(not(feature = "cuda"))]
                 {
@@ -254,7 +255,15 @@ impl GBDTModel {
             }
         {
             use crate::backend::wgpu::GpuDevice;
-            GpuDevice::new().map(|d| FullGpuTreeBuilder::new(std::sync::Arc::new(d)))
+            GpuDevice::new().and_then(|d| {
+                // Resolve gpu_mode knowing we have WGPU
+                let resolved = config.gpu_mode.resolve(BackendType::Wgpu);
+                if matches!(resolved, GpuMode::Full) {
+                    Some(FullGpuTreeBuilder::new(std::sync::Arc::new(d)))
+                } else {
+                    None
+                }
+            })
         } else {
             None
         };

@@ -11,7 +11,6 @@ use std::time::Duration;
 
 // TreeBoost imports
 use treeboost::booster::{GBDTConfig, GBDTModel};
-use treeboost::dataset::{BinnedDataset, FeatureInfo, FeatureType};
 
 // Competitor imports
 use forust_ml::objective::ObjectiveType;
@@ -22,7 +21,11 @@ use gbdt::gradient_boost::GBDT;
 
 /// Generate synthetic regression dataset
 /// Returns (features_flat, targets) where features_flat is row-major
-fn generate_regression_data(num_rows: usize, num_features: usize, seed: u64) -> (Vec<f64>, Vec<f64>) {
+fn generate_regression_data(
+    num_rows: usize,
+    num_features: usize,
+    seed: u64,
+) -> (Vec<f64>, Vec<f64>) {
     let mut rng = StdRng::seed_from_u64(seed);
 
     let mut features = Vec::with_capacity(num_rows * num_features);
@@ -43,54 +46,11 @@ fn generate_regression_data(num_rows: usize, num_features: usize, seed: u64) -> 
     (features, targets)
 }
 
-/// Convert to TreeBoost format (column-major binned)
-fn to_treeboost_dataset(
-    features: &[f64],
-    targets: &[f64],
-    num_rows: usize,
-    num_features: usize,
-) -> BinnedDataset {
-    // Create simple uniform bin boundaries
-    let mut all_binned = Vec::with_capacity(num_rows * num_features);
-    let mut all_info = Vec::with_capacity(num_features);
-
-    for f in 0..num_features {
-        // Collect this feature's values
-        let mut col_values: Vec<f64> = (0..num_rows)
-            .map(|r| features[r * num_features + f])
-            .collect();
-
-        // Compute quantile boundaries
-        col_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let num_bins = 255usize;
-        let mut boundaries = Vec::with_capacity(num_bins - 1);
-        for i in 1..num_bins {
-            let idx = (i * col_values.len()) / num_bins;
-            let val = col_values[idx.min(col_values.len() - 1)];
-            if boundaries.is_empty() || val > *boundaries.last().unwrap() {
-                boundaries.push(val);
-            }
-        }
-
-        // Bin the values
-        for r in 0..num_rows {
-            let val = features[r * num_features + f];
-            let bin = boundaries
-                .binary_search_by(|b| b.partial_cmp(&val).unwrap())
-                .unwrap_or_else(|i| i) as u8;
-            all_binned.push(bin);
-        }
-
-        all_info.push(FeatureInfo {
-            name: format!("f{}", f),
-            feature_type: FeatureType::Numeric,
-            num_bins: (boundaries.len() + 1).min(255) as u8,
-            bin_boundaries: boundaries,
-        });
-    }
-
+/// Convert f64 features to f32 for TreeBoost (raw, no binning)
+fn to_treeboost_features(features: &[f64], targets: &[f64]) -> (Vec<f32>, Vec<f32>) {
+    let features_f32: Vec<f32> = features.iter().map(|&f| f as f32).collect();
     let targets_f32: Vec<f32> = targets.iter().map(|&t| t as f32).collect();
-    BinnedDataset::new(num_rows, all_binned, targets_f32, all_info)
+    (features_f32, targets_f32)
 }
 
 /// Convert to gbdt-rs format
@@ -124,10 +84,11 @@ fn to_forust_matrix(features: &[f64], num_rows: usize, num_features: usize) -> V
 
 fn benchmark_training(c: &mut Criterion) {
     let mut group = c.benchmark_group("Training");
-    group.measurement_time(Duration::from_secs(10));
-    group.sample_size(30);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(10);
 
-    // Test different dataset sizes
+    // Test different dataset sizes (smaller default for faster iteration)
     for &num_rows in &[1_000, 10_000, 100_000] {
         let num_features = 10;
         let num_rounds = 50;
@@ -137,24 +98,24 @@ fn benchmark_training(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(num_rows as u64));
 
-        // TreeBoost
-        let treeboost_data = to_treeboost_dataset(&features, &targets, num_rows, num_features);
+        // Pre-compute TreeBoost features (raw, no binning - same as Python)
+        let (treeboost_features, treeboost_targets) = to_treeboost_features(&features, &targets);
         group.bench_with_input(
             BenchmarkId::new("TreeBoost", num_rows),
-            &treeboost_data,
-            |b, data| {
+            &(&treeboost_features, &treeboost_targets),
+            |b, (feats, targs)| {
                 b.iter(|| {
                     let config = GBDTConfig::new()
                         .with_num_rounds(num_rounds)
                         .with_max_depth(max_depth)
                         .with_learning_rate(0.1)
                         .with_min_samples_leaf(5);
-                    black_box(GBDTModel::train_binned(data, config).unwrap())
+                    black_box(GBDTModel::train(feats, num_features, targs, config, None).unwrap())
                 });
             },
         );
 
-        // gbdt-rs (needs data clone since it mutates)
+        // Pre-compute gbdt-rs data once
         let gbdt_data = to_gbdt_data(&features, &targets, num_rows, num_features);
         group.bench_with_input(
             BenchmarkId::new("gbdt-rs", num_rows),
@@ -177,7 +138,7 @@ fn benchmark_training(c: &mut Criterion) {
             },
         );
 
-        // forust
+        // Pre-compute forust data once
         let forust_features = to_forust_matrix(&features, num_rows, num_features);
         let forust_targets: Vec<f64> = targets.clone();
         group.bench_with_input(
@@ -206,8 +167,9 @@ fn benchmark_training(c: &mut Criterion) {
 
 fn benchmark_prediction(c: &mut Criterion) {
     let mut group = c.benchmark_group("Prediction");
-    group.measurement_time(Duration::from_secs(5));
-    group.sample_size(50);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+    group.sample_size(10);
 
     let num_features = 10;
     let num_rounds = 50;
@@ -217,14 +179,22 @@ fn benchmark_prediction(c: &mut Criterion) {
     // Generate training data and train models once
     let (train_features, train_targets) = generate_regression_data(train_rows, num_features, 42);
 
-    // Train TreeBoost model
-    let treeboost_train = to_treeboost_dataset(&train_features, &train_targets, train_rows, num_features);
+    // Train TreeBoost model (raw float data)
+    let (treeboost_features, treeboost_targets) =
+        to_treeboost_features(&train_features, &train_targets);
     let treeboost_config = GBDTConfig::new()
         .with_num_rounds(num_rounds)
         .with_max_depth(max_depth)
         .with_learning_rate(0.1)
         .with_min_samples_leaf(5);
-    let treeboost_model = GBDTModel::train_binned(&treeboost_train, treeboost_config).unwrap();
+    let treeboost_model = GBDTModel::train(
+        &treeboost_features,
+        num_features,
+        &treeboost_targets,
+        treeboost_config,
+        None,
+    )
+    .unwrap();
 
     // Train gbdt-rs model
     let mut gbdt_train = to_gbdt_data(&train_features, &train_targets, train_rows, num_features);
@@ -248,7 +218,9 @@ fn benchmark_prediction(c: &mut Criterion) {
         .set_learning_rate(0.1)
         .set_min_leaf_weight(5.0)
         .set_parallel(false);
-    forust_model.fit_unweighted(&forust_train_matrix, &train_targets, None).unwrap();
+    forust_model
+        .fit_unweighted(&forust_train_matrix, &train_targets, None)
+        .unwrap();
 
     // Benchmark prediction on different test sizes
     for &num_rows in &[100, 1_000, 10_000] {
@@ -256,13 +228,16 @@ fn benchmark_prediction(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(num_rows as u64));
 
-        // TreeBoost prediction
-        let treeboost_test = to_treeboost_dataset(&test_features, &test_targets, num_rows, num_features);
+        // TreeBoost prediction (raw float data)
+        let (treeboost_test_features, _) = to_treeboost_features(&test_features, &test_targets);
+        // Convert f32 back to f64 for predict_raw API
+        let treeboost_test_f64: Vec<f64> =
+            treeboost_test_features.iter().map(|&f| f as f64).collect();
         group.bench_with_input(
             BenchmarkId::new("TreeBoost", num_rows),
-            &treeboost_test,
-            |b, data| {
-                b.iter(|| black_box(treeboost_model.predict(data)));
+            &treeboost_test_f64,
+            |b, feats| {
+                b.iter(|| black_box(treeboost_model.predict_raw(feats)));
             },
         );
 
@@ -293,8 +268,9 @@ fn benchmark_prediction(c: &mut Criterion) {
 
 fn benchmark_parallel_training(c: &mut Criterion) {
     let mut group = c.benchmark_group("ParallelTraining");
-    group.measurement_time(Duration::from_secs(15));
-    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(10);
 
     let num_features = 10;
     let num_rounds = 100;
@@ -305,8 +281,8 @@ fn benchmark_parallel_training(c: &mut Criterion) {
 
     group.throughput(Throughput::Elements(num_rows as u64));
 
-    // TreeBoost (uses Rayon internally)
-    let treeboost_data = to_treeboost_dataset(&features, &targets, num_rows, num_features);
+    // TreeBoost (uses Rayon internally, raw float data)
+    let (treeboost_features, treeboost_targets) = to_treeboost_features(&features, &targets);
     group.bench_function("TreeBoost", |b| {
         b.iter(|| {
             let config = GBDTConfig::new()
@@ -314,7 +290,16 @@ fn benchmark_parallel_training(c: &mut Criterion) {
                 .with_max_depth(max_depth)
                 .with_learning_rate(0.1)
                 .with_min_samples_leaf(5);
-            black_box(GBDTModel::train_binned(&treeboost_data, config).unwrap())
+            black_box(
+                GBDTModel::train(
+                    &treeboost_features,
+                    num_features,
+                    &treeboost_targets,
+                    config,
+                    None,
+                )
+                .unwrap(),
+            )
         });
     });
 

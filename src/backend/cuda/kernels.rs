@@ -463,20 +463,181 @@ impl HistogramKernel {
             .collect()
     }
 
-    /// Build histograms for multiple batches.
+    /// Build histograms for multiple batches in a single GPU dispatch.
+    /// This amortizes dispatch overhead across all batches.
     pub fn build_histograms_batched(
         &mut self,
         bins: &[u8],
         grad_hess: &[(f32, f32)],
         batches: &[&[usize]],
-        num_rows: usize,
+        _num_rows: usize,
         num_features: usize,
     ) -> Vec<Vec<Histogram>> {
-        // For now, fall back to sequential builds
-        // TODO: Implement true batched kernel dispatch
-        batches
-            .iter()
-            .map(|indices| self.build_histograms(bins, grad_hess, indices, num_rows, num_features))
+        self.ensure_initialized();
+
+        let num_batches = batches.len();
+        if num_batches == 0 {
+            return Vec::new();
+        }
+
+        // For single batch, use the optimized single-batch path
+        if num_batches == 1 {
+            return vec![self.build_histograms(bins, grad_hess, batches[0], bins.len() / num_features, num_features)];
+        }
+
+        // Concatenate all batch indices and create node metadata
+        let mut all_indices: Vec<u32> = Vec::new();
+        let mut node_starts: Vec<u32> = Vec::with_capacity(num_batches);
+        let mut node_counts: Vec<u32> = Vec::with_capacity(num_batches);
+        let mut max_count = 0usize;
+
+        for batch in batches {
+            node_starts.push(all_indices.len() as u32);
+            node_counts.push(batch.len() as u32);
+            max_count = max_count.max(batch.len());
+            all_indices.extend(batch.iter().map(|&i| i as u32));
+        }
+
+        if all_indices.is_empty() {
+            return (0..num_batches)
+                .map(|_| (0..num_features).map(|_| Histogram::new()).collect())
+                .collect();
+        }
+
+        // Separate gradients and hessians
+        let gradients: Vec<f32> = grad_hess.iter().map(|(g, _)| *g).collect();
+        let hessians: Vec<f32> = grad_hess.iter().map(|(_, h)| *h).collect();
+
+        // Upload bins (with caching)
+        let bins_key = CacheKey::from_slice(bins);
+        if self.cached_bins_key != Some(bins_key) || self.cached_bins.is_none() {
+            self.cached_bins = Some(self.device.htod_copy(bins));
+            self.cached_bins_key = Some(bins_key);
+        }
+
+        // Upload gradients/hessians (with caching)
+        let grad_key = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&gradients.len(), &mut hasher);
+            if !gradients.is_empty() {
+                std::hash::Hash::hash(&gradients[0].to_bits(), &mut hasher);
+            }
+            CacheKey(std::hash::Hasher::finish(&hasher))
+        };
+
+        if self.cached_grad_hess_key != Some(grad_key)
+            || self.cached_gradients.is_none()
+            || self.cached_hessians.is_none()
+        {
+            self.cached_gradients = Some(self.device.htod_copy(&gradients));
+            self.cached_hessians = Some(self.device.htod_copy(&hessians));
+            self.cached_grad_hess_key = Some(grad_key);
+        }
+
+        // Upload indices and node metadata
+        let d_indices = self.device.htod_copy(&all_indices);
+        let d_node_starts = self.device.htod_copy(&node_starts);
+        let d_node_counts = self.device.htod_copy(&node_counts);
+
+        // Allocate output buffers (num_batches * num_features * 256)
+        let output_size = num_batches * num_features * 256;
+        if self.cached_batched_output_len < output_size
+            || self.cached_batched_grad_hist.is_none()
+            || self.cached_batched_hess_hist.is_none()
+            || self.cached_batched_count_hist.is_none()
+        {
+            self.cached_batched_grad_hist = Some(self.device.alloc_zeros(output_size));
+            self.cached_batched_hess_hist = Some(self.device.alloc_zeros(output_size));
+            self.cached_batched_count_hist = Some(self.device.alloc_zeros(output_size));
+            self.cached_batched_output_len = output_size;
+        }
+
+        let stream = self.device.stream();
+
+        // Zero output histograms
+        let zero_blocks = ((output_size + 255) / 256) as u32;
+        let zero_config = LaunchConfig {
+            block_dim: (256, 1, 1),
+            grid_dim: (zero_blocks, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            let d_grad_hist = self.cached_batched_grad_hist.as_mut().unwrap();
+            let d_hess_hist = self.cached_batched_hess_hist.as_mut().unwrap();
+            let d_count_hist = self.cached_batched_count_hist.as_mut().unwrap();
+            stream
+                .launch_builder(self.zero_histograms_fn.as_ref().unwrap())
+                .arg(d_grad_hist)
+                .arg(d_hess_hist)
+                .arg(d_count_hist)
+                .arg(&(output_size as u32))
+                .launch(zero_config)
+                .expect("Failed to launch zero_histograms kernel");
+        }
+
+        // Grid: (num_features, num_batches * tiles_per_batch)
+        let tiles_per_batch = ((max_count as u32) + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        let shared_mem_bytes = 256 * (4 + 4 + 4);
+
+        let config = LaunchConfig {
+            block_dim: (THREADS_PER_BLOCK, 1, 1),
+            grid_dim: (num_features as u32, (num_batches as u32) * tiles_per_batch, 1),
+            shared_mem_bytes,
+        };
+
+        unsafe {
+            let d_bins = self.cached_bins.as_ref().unwrap();
+            let d_gradients = self.cached_gradients.as_ref().unwrap();
+            let d_hessians = self.cached_hessians.as_ref().unwrap();
+            let d_grad_hist = self.cached_batched_grad_hist.as_mut().unwrap();
+            let d_hess_hist = self.cached_batched_hess_hist.as_mut().unwrap();
+            let d_count_hist = self.cached_batched_count_hist.as_mut().unwrap();
+
+            stream
+                .launch_builder(self.build_histogram_batched_fn.as_ref().unwrap())
+                .arg(d_bins)
+                .arg(d_gradients)
+                .arg(d_hessians)
+                .arg(&d_indices)
+                .arg(&d_node_starts)
+                .arg(&d_node_counts)
+                .arg(d_grad_hist)
+                .arg(d_hess_hist)
+                .arg(d_count_hist)
+                .arg(&(num_features as u32))
+                .arg(&(num_batches as u32))
+                .arg(&tiles_per_batch)
+                .launch(config)
+                .expect("Failed to launch build_histogram_batched kernel");
+        }
+
+        self.device.synchronize();
+
+        // Read back results
+        let grad_hist = self.device.dtoh_copy(self.cached_batched_grad_hist.as_ref().unwrap());
+        let hess_hist = self.device.dtoh_copy(self.cached_batched_hess_hist.as_ref().unwrap());
+        let count_hist = self.device.dtoh_copy(self.cached_batched_count_hist.as_ref().unwrap());
+
+        // Convert to Histogram structs - layout is [batch][feature][bin]
+        (0..num_batches)
+            .map(|batch_idx| {
+                (0..num_features)
+                    .map(|f| {
+                        let base = (batch_idx * num_features + f) * 256;
+                        let mut grads = [0.0f32; 256];
+                        let mut hess = [0.0f32; 256];
+                        let mut counts = [0u32; 256];
+
+                        for bin in 0..256 {
+                            grads[bin] = grad_hist[base + bin];
+                            hess[bin] = hess_hist[base + bin];
+                            counts[bin] = count_hist[base + bin];
+                        }
+
+                        Histogram::from_raw_arrays(&grads, &hess, &counts)
+                    })
+                    .collect()
+            })
             .collect()
     }
 
