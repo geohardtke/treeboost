@@ -1,4 +1,4 @@
-//! Split finding with Shannon Entropy regularization
+//! Split finding with Shannon Entropy regularization and Era-based Directional Splitting
 //!
 //! This module uses SIMD-optimized kernels for split finding when possible.
 //! The SIMD path is taken when:
@@ -6,8 +6,17 @@
 //! - No monotonic constraints
 //!
 //! Otherwise falls back to scalar implementation with full feature support.
+//!
+//! # Era-Based Splitting (DES)
+//!
+//! When era splitting is enabled, only accepts splits where ALL eras agree on
+//! the split direction. This filters out spurious correlations that work in
+//! some eras but not others.
 
-use crate::histogram::{Histogram, NodeHistograms, NUM_BINS};
+use crate::histogram::{
+    average_era_gain, has_directional_agreement, EraHistograms, EraSplitStats, Histogram,
+    NodeHistograms, NUM_BINS,
+};
 use crate::kernel::find_best_split as kernel_find_best_split;
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -616,6 +625,191 @@ impl SplitFinder {
         };
 
         h
+    }
+
+    // ============================================================
+    // Era-Based Split Finding (Directional Era Splitting / DES)
+    // ============================================================
+
+    /// Find the best split using era-stratified histograms (DES)
+    ///
+    /// Only accepts splits where ALL eras agree on the split direction.
+    /// This filters out spurious correlations that work in some eras but not others.
+    ///
+    /// # Arguments
+    /// * `era_histograms` - Per-era histograms for all features
+    /// * `per_era_totals` - (gradient, hessian, count) totals for each era
+    pub fn find_best_split_with_eras(
+        &self,
+        era_histograms: &EraHistograms,
+        per_era_totals: &[(f32, f32, u32)],
+    ) -> Option<SplitInfo> {
+        self.find_best_split_with_eras_and_features(era_histograms, per_era_totals, None)
+    }
+
+    /// Find the best split with era filtering and optional feature mask
+    pub fn find_best_split_with_eras_and_features(
+        &self,
+        era_histograms: &EraHistograms,
+        per_era_totals: &[(f32, f32, u32)],
+        feature_mask: Option<&[usize]>,
+    ) -> Option<SplitInfo> {
+        let mut best_split = SplitInfo::default();
+        let num_features = era_histograms.num_features();
+
+        match feature_mask {
+            Some(features) => {
+                for &feature_idx in features {
+                    if feature_idx >= num_features {
+                        continue;
+                    }
+                    if let Some(split) = self.find_best_split_for_feature_era(
+                        era_histograms,
+                        feature_idx,
+                        per_era_totals,
+                    ) {
+                        if split.gain > best_split.gain {
+                            best_split = split;
+                        }
+                    }
+                }
+            }
+            None => {
+                for feature_idx in 0..num_features {
+                    if let Some(split) = self.find_best_split_for_feature_era(
+                        era_histograms,
+                        feature_idx,
+                        per_era_totals,
+                    ) {
+                        if split.gain > best_split.gain {
+                            best_split = split;
+                        }
+                    }
+                }
+            }
+        }
+
+        if best_split.is_valid() && best_split.gain >= self.min_gain {
+            Some(best_split)
+        } else {
+            None
+        }
+    }
+
+    /// Find the best split for a single feature using era histograms
+    fn find_best_split_for_feature_era(
+        &self,
+        era_histograms: &EraHistograms,
+        feature_idx: usize,
+        per_era_totals: &[(f32, f32, u32)],
+    ) -> Option<SplitInfo> {
+        let num_eras = era_histograms.num_eras();
+        let mut best_split = SplitInfo::default();
+        best_split.feature_idx = feature_idx;
+
+        // Per-era cumulative sums
+        let mut era_left_grads = vec![0.0f32; num_eras];
+        let mut era_left_hess = vec![0.0f32; num_eras];
+        let mut era_left_counts = vec![0u32; num_eras];
+
+        // Scan through bins
+        for bin in 0..255u8 {
+            // Accumulate for each era
+            for era in 0..num_eras {
+                let hist = era_histograms.get(era, feature_idx);
+                let entry = hist.get(bin);
+
+                era_left_grads[era] += entry.sum_gradients;
+                era_left_hess[era] += entry.sum_hessians;
+                era_left_counts[era] += entry.count;
+            }
+
+            // Compute aggregate totals for leaf constraints
+            let total_left_grad: f32 = era_left_grads.iter().sum();
+            let total_left_hess: f32 = era_left_hess.iter().sum();
+            let total_left_count: u32 = era_left_counts.iter().sum();
+
+            let total_grad: f32 = per_era_totals.iter().map(|(g, _, _)| g).sum();
+            let total_hess: f32 = per_era_totals.iter().map(|(_, h, _)| h).sum();
+            let total_count: u32 = per_era_totals.iter().map(|(_, _, c)| c).sum();
+
+            let total_right_count = total_count - total_left_count;
+
+            // Check leaf constraints on aggregate counts
+            if (total_left_count as usize) < self.min_samples_leaf
+                || (total_right_count as usize) < self.min_samples_leaf
+            {
+                continue;
+            }
+
+            let total_right_hess = total_hess - total_left_hess;
+            if total_left_hess < self.min_hessian_leaf || total_right_hess < self.min_hessian_leaf {
+                continue;
+            }
+
+            // Compute per-era split statistics
+            let era_stats: Vec<EraSplitStats> = (0..num_eras)
+                .filter_map(|era| {
+                    let (era_grad_total, era_hess_total, era_count_total) = per_era_totals[era];
+
+                    // Skip eras with no samples in this node
+                    if era_count_total == 0 {
+                        return None;
+                    }
+
+                    Some(EraSplitStats::compute(
+                        era,
+                        era_left_grads[era],
+                        era_left_hess[era],
+                        era_grad_total,
+                        era_hess_total,
+                        self.lambda,
+                    ))
+                })
+                .collect();
+
+            // Skip if no eras have data
+            if era_stats.is_empty() {
+                continue;
+            }
+
+            // Check directional agreement across all eras
+            if !has_directional_agreement(&era_stats) {
+                continue;
+            }
+
+            // Check monotonic constraint on aggregate (if applicable)
+            let total_right_grad = total_grad - total_left_grad;
+            if !self.satisfies_monotonic_constraint(
+                feature_idx,
+                total_left_grad,
+                total_left_hess,
+                total_right_grad,
+                total_right_hess,
+            ) {
+                continue;
+            }
+
+            // Compute average gain across eras
+            let gain = average_era_gain(&era_stats);
+
+            if gain > best_split.gain {
+                best_split.bin_threshold = bin;
+                best_split.gain = gain;
+                best_split.left_gradient = total_left_grad;
+                best_split.left_hessian = total_left_hess;
+                best_split.left_count = total_left_count;
+                best_split.right_gradient = total_right_grad;
+                best_split.right_hessian = total_right_hess;
+                best_split.right_count = total_right_count;
+            }
+        }
+
+        if best_split.is_valid() {
+            Some(best_split)
+        } else {
+            None
+        }
     }
 }
 

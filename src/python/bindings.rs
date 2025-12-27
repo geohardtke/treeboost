@@ -421,6 +421,25 @@ impl PyGBDTConfig {
         Ok(())
     }
 
+    // Era splitting (Directional Era Splitting)
+
+    /// Enable Directional Era Splitting (DES)
+    ///
+    /// When enabled, splits are only accepted if ALL eras agree on the
+    /// split direction. This filters out spurious correlations that work
+    /// in some time periods but not others.
+    ///
+    /// Requires passing era_indices to train_with_eras().
+    #[getter]
+    fn era_splitting(&self) -> bool {
+        self.inner.era_splitting
+    }
+
+    #[setter]
+    fn set_era_splitting(&mut self, value: bool) {
+        self.inner.era_splitting = value;
+    }
+
     // Interaction constraints
 
     /// Set feature interaction constraints
@@ -499,6 +518,83 @@ impl PyGBDTModel {
                 &features_flat,
                 num_features,
                 &targets_vec,
+                config.inner.clone(),
+                feature_names,
+            )
+        }).map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        Ok(Self { model })
+    }
+
+    /// Train a GBDT model with Directional Era Splitting (DES)
+    ///
+    /// Era splitting filters out spurious correlations by requiring all eras
+    /// to agree on split direction. This is useful for time-series or financial
+    /// data where patterns may not generalize across time periods.
+    ///
+    /// Args:
+    ///     features: 2D numpy array of shape (n_samples, n_features)
+    ///     targets: 1D numpy array of shape (n_samples,)
+    ///     era_indices: 1D numpy array of era indices (uint16), shape (n_samples,)
+    ///     config: GBDTConfig instance (must have era_splitting=True)
+    ///     feature_names: Optional list of feature names
+    ///
+    /// Returns:
+    ///     Trained GBDTModel
+    ///
+    /// Example:
+    ///     config = GBDTConfig()
+    ///     config.era_splitting = True
+    ///     model = GBDTModel.train_with_eras(features, targets, era_indices, config)
+    #[staticmethod]
+    #[pyo3(signature = (features, targets, era_indices, config, feature_names=None))]
+    fn train_with_eras<'py>(
+        py: Python<'py>,
+        features: PyReadonlyArray2<'py, f32>,
+        targets: PyReadonlyArray1<'py, f32>,
+        era_indices: PyReadonlyArray1<'py, u16>,
+        config: &PyGBDTConfig,
+        feature_names: Option<Vec<String>>,
+    ) -> PyResult<Self> {
+        let features_arr = features.as_array();
+        let targets_arr = targets.as_array();
+        let era_indices_arr = era_indices.as_array();
+
+        let num_rows = features_arr.nrows();
+        let num_features = features_arr.ncols();
+
+        // Validate era_indices length
+        if era_indices_arr.len() != num_rows {
+            return Err(PyValueError::new_err(format!(
+                "era_indices length {} doesn't match number of rows {}",
+                era_indices_arr.len(),
+                num_rows
+            )));
+        }
+
+        // Validate era_splitting is enabled
+        if !config.inner.era_splitting {
+            return Err(PyValueError::new_err(
+                "era_splitting must be True in config when using train_with_eras"
+            ));
+        }
+
+        // Convert to row-major flat Vec<f32> for Rust high-level API
+        let mut features_flat: Vec<f32> = Vec::with_capacity(num_rows * num_features);
+        for row in features_arr.rows() {
+            features_flat.extend(row.iter().copied());
+        }
+
+        let targets_vec: Vec<f32> = targets_arr.to_vec();
+        let era_indices_vec: Vec<u16> = era_indices_arr.to_vec();
+
+        // Train model using high-level Rust API (release GIL during training)
+        let model = py.allow_threads(|| {
+            GBDTModel::train_with_eras(
+                &features_flat,
+                num_features,
+                &targets_vec,
+                &era_indices_vec,
                 config.inner.clone(),
                 feature_names,
             )

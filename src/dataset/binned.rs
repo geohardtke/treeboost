@@ -190,6 +190,12 @@ pub struct BinnedDataset {
     feature_info: Vec<FeatureInfo>,
     /// Sparse representations for sparse features (None if dense)
     sparse_columns: Vec<Option<SparseColumn>>,
+    /// Era indices for each sample (optional, for era-based splitting)
+    /// Used by Directional Era Splitting (DES) to learn invariant patterns
+    /// u16 supports up to 65536 eras
+    era_indices: Option<Vec<u16>>,
+    /// Number of unique eras (cached for efficiency)
+    num_eras: usize,
     /// Cached row-major layout for GPU backends (lazily computed)
     /// Not serialized - recomputed on first GPU use after deserialization
     #[rkyv(with = rkyv::with::Skip)]
@@ -209,6 +215,8 @@ impl std::fmt::Debug for BinnedDataset {
             .field("sparse_features", &self.num_sparse_features())
             .field("max_bins", &self.max_bins())
             .field("supports_4bit", &self.supports_4bit())
+            .field("has_eras", &self.era_indices.is_some())
+            .field("num_eras", &self.num_eras)
             .field("row_major_cached", &self.row_major_cache.get().is_some())
             .field("row_major_4bit_cached", &self.row_major_4bit_cache.get().is_some())
             .finish()
@@ -223,6 +231,8 @@ impl Clone for BinnedDataset {
             targets: self.targets.clone(),
             feature_info: self.feature_info.clone(),
             sparse_columns: self.sparse_columns.clone(),
+            era_indices: self.era_indices.clone(),
+            num_eras: self.num_eras,
             // Don't clone caches - they will be recomputed if needed
             row_major_cache: OnceLock::new(),
             row_major_4bit_cache: OnceLock::new(),
@@ -266,9 +276,100 @@ impl BinnedDataset {
             targets,
             feature_info,
             sparse_columns,
+            era_indices: None,
+            num_eras: 0,
             row_major_cache: OnceLock::new(),
             row_major_4bit_cache: OnceLock::new(),
         }
+    }
+
+    /// Create a new binned dataset with era indices for era-based splitting
+    ///
+    /// Era indices must be in range [0, num_eras) where num_eras is automatically
+    /// computed from the maximum era index + 1.
+    ///
+    /// # Arguments
+    /// * `num_rows` - Number of samples
+    /// * `features` - Column-major feature data
+    /// * `targets` - Target values
+    /// * `feature_info` - Feature metadata
+    /// * `era_indices` - Era index for each sample (u16, supports up to 65536 eras)
+    pub fn new_with_eras(
+        num_rows: usize,
+        features: Vec<u8>,
+        targets: Vec<f32>,
+        feature_info: Vec<FeatureInfo>,
+        era_indices: Vec<u16>,
+    ) -> Self {
+        debug_assert_eq!(features.len(), num_rows * feature_info.len());
+        debug_assert_eq!(targets.len(), num_rows);
+        debug_assert_eq!(era_indices.len(), num_rows);
+
+        let num_features = feature_info.len();
+
+        // Detect sparse features
+        let sparse_columns: Vec<Option<SparseColumn>> = (0..num_features)
+            .map(|f| {
+                let start = f * num_rows;
+                let column = &features[start..start + num_rows];
+                let sparse = SparseColumn::from_dense(column, DEFAULT_BIN);
+
+                if sparse.is_sparse() {
+                    Some(sparse)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Compute number of eras from max era index
+        let num_eras = era_indices.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0);
+
+        Self {
+            num_rows,
+            features,
+            targets,
+            feature_info,
+            sparse_columns,
+            era_indices: Some(era_indices),
+            num_eras,
+            row_major_cache: OnceLock::new(),
+            row_major_4bit_cache: OnceLock::new(),
+        }
+    }
+
+    /// Set era indices on an existing dataset
+    ///
+    /// # Arguments
+    /// * `era_indices` - Era index for each sample (must have length == num_rows)
+    pub fn set_era_indices(&mut self, era_indices: Vec<u16>) {
+        debug_assert_eq!(era_indices.len(), self.num_rows);
+        self.num_eras = era_indices.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0);
+        self.era_indices = Some(era_indices);
+    }
+
+    /// Check if era indices are available
+    #[inline]
+    pub fn has_eras(&self) -> bool {
+        self.era_indices.is_some()
+    }
+
+    /// Get the number of eras (0 if no era indices)
+    #[inline]
+    pub fn num_eras(&self) -> usize {
+        self.num_eras
+    }
+
+    /// Get era index for a row (panics if no era indices set)
+    #[inline]
+    pub fn era(&self, row_idx: usize) -> u16 {
+        self.era_indices.as_ref().expect("No era indices set")[row_idx]
+    }
+
+    /// Get era indices slice (None if not set)
+    #[inline]
+    pub fn era_indices(&self) -> Option<&[u16]> {
+        self.era_indices.as_deref()
     }
 
     /// Number of samples

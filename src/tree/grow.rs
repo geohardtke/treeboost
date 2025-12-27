@@ -14,9 +14,18 @@
 
 use crate::backend::{BackendConfig, BackendSelector, BackendType, HistogramBackend};
 use crate::dataset::BinnedDataset;
-use crate::histogram::{FusedHistogramBuilder, Histogram, NodeHistograms};
+use crate::histogram::{EraHistograms, FusedHistogramBuilder, Histogram, NodeHistograms};
 use crate::loss::LossFunction;
 use crate::tree::{InteractionConstraints, MonotonicConstraint, Node, SplitFinder, SplitInfo, Tree};
+
+/// Storage for node histograms - either standard or era-stratified
+enum NodeHistogramStorage {
+    Standard(NodeHistograms),
+    Era {
+        histograms: EraHistograms,
+        per_era_totals: Vec<(f32, f32, u32)>,
+    },
+}
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use std::cell::RefCell;
@@ -97,7 +106,6 @@ impl RowPartitioner {
 }
 
 /// Candidate node for splitting (zero-allocation version)
-#[derive(Debug)]
 struct SplitCandidate {
     /// Node index in tree
     node_idx: usize,
@@ -105,8 +113,8 @@ struct SplitCandidate {
     row_start: usize,
     /// End index in RowPartitioner.rows (exclusive)
     row_end: usize,
-    /// Precomputed histograms (if available)
-    histograms: Option<NodeHistograms>,
+    /// Precomputed histograms (standard or era-stratified)
+    histograms: Option<NodeHistogramStorage>,
     /// Best split info (if computed)
     split_info: Option<SplitInfo>,
     /// Gradient sum
@@ -159,7 +167,7 @@ struct BatchedSplitState {
     /// Original candidate info
     _node_idx: usize,
     split_info: SplitInfo,
-    parent_histograms: NodeHistograms,
+    parent_histograms: NodeHistogramStorage,
     ancestor_features: Vec<usize>,
 
     /// Smaller child info
@@ -207,6 +215,9 @@ pub struct TreeGrower {
     gpu_batch_size: usize,
     /// Enable GPU subgroup operations (default: false)
     use_gpu_subgroups: bool,
+    /// Enable era-based splitting (Directional Era Splitting / DES)
+    /// When enabled, only accepts splits where all eras agree on direction
+    era_splitting: bool,
     /// Cached backend instance (lazily initialized, reused across trees)
     cached_backend: RefCell<Option<Box<dyn HistogramBackend>>>,
 }
@@ -228,6 +239,7 @@ impl Default for TreeGrower {
             backend_type: BackendType::Auto,
             gpu_batch_size: 32, // Default batch size for GPU histogram dispatch
             use_gpu_subgroups: false,
+            era_splitting: false, // Disabled by default
             cached_backend: RefCell::new(None),
         }
     }
@@ -248,6 +260,7 @@ impl std::fmt::Debug for TreeGrower {
             .field("backend_type", &self.backend_type)
             .field("gpu_batch_size", &self.gpu_batch_size)
             .field("use_gpu_subgroups", &self.use_gpu_subgroups)
+            .field("era_splitting", &self.era_splitting)
             .finish()
     }
 }
@@ -269,6 +282,7 @@ impl Clone for TreeGrower {
             backend_type: self.backend_type,
             gpu_batch_size: self.gpu_batch_size,
             use_gpu_subgroups: self.use_gpu_subgroups,
+            era_splitting: self.era_splitting,
             // Reset cached backend - clone gets its own lazily initialized backend
             cached_backend: RefCell::new(None),
         }
@@ -381,6 +395,24 @@ impl TreeGrower {
         self
     }
 
+    /// Enable or disable era-based splitting (Directional Era Splitting / DES)
+    ///
+    /// When enabled, only accepts splits where ALL eras agree on the split direction.
+    /// This filters out spurious correlations that work in some eras but not others.
+    ///
+    /// Requires the dataset to have era indices set via `BinnedDataset::set_era_indices`.
+    ///
+    /// - Default: false (disabled)
+    pub fn with_era_splitting(mut self, enabled: bool) -> Self {
+        self.era_splitting = enabled;
+        self
+    }
+
+    /// Check if era splitting is enabled
+    pub fn era_splitting(&self) -> bool {
+        self.era_splitting
+    }
+
     /// Initialize backend (called once at start of tree growing)
     fn ensure_backend(&self, num_rows: usize) {
         let mut cached = self.cached_backend.borrow_mut();
@@ -410,6 +442,70 @@ impl TreeGrower {
             .with_entropy_weight(self.entropy_weight)
             .with_min_gain(self.min_gain)
             .with_monotonic_constraints(self.monotonic_constraints.clone())
+    }
+
+    /// Compute per-era totals (gradient, hessian, count) for given row indices
+    fn compute_per_era_totals(
+        &self,
+        dataset: &BinnedDataset,
+        row_indices: &[usize],
+        gradients: &[f32],
+        hessians: &[f32],
+    ) -> Vec<(f32, f32, u32)> {
+        let num_eras = dataset.num_eras();
+        let era_indices = dataset.era_indices().expect("Dataset must have era indices for DES");
+
+        let mut totals = vec![(0.0f32, 0.0f32, 0u32); num_eras];
+
+        for &row in row_indices {
+            let era = era_indices[row] as usize;
+            totals[era].0 += gradients[row];
+            totals[era].1 += hessians[row];
+            totals[era].2 += 1;
+        }
+
+        totals
+    }
+
+    /// Build era histograms for given row indices using the backend
+    fn build_era_histograms(
+        &self,
+        dataset: &BinnedDataset,
+        row_indices: &[usize],
+        grad_hess: &[(f32, f32)],
+    ) -> EraHistograms {
+        let era_indices = dataset.era_indices().expect("Dataset must have era indices for DES");
+        let num_eras = dataset.num_eras();
+
+        let histograms_2d = self.backend().build_era_histograms(
+            dataset,
+            grad_hess,
+            row_indices,
+            era_indices,
+            num_eras,
+        );
+
+        EraHistograms::from_vec(histograms_2d)
+    }
+
+    /// Compute child era histograms using subtraction trick
+    fn compute_era_sibling(
+        &self,
+        parent: &EraHistograms,
+        child: &EraHistograms,
+    ) -> EraHistograms {
+        EraHistograms::from_subtraction(parent, child)
+    }
+
+    /// Compute child per-era totals from parent and sibling
+    fn compute_era_totals_sibling(
+        parent_totals: &[(f32, f32, u32)],
+        child_totals: &[(f32, f32, u32)],
+    ) -> Vec<(f32, f32, u32)> {
+        parent_totals.iter()
+            .zip(child_totals.iter())
+            .map(|(&(pg, ph, pc), &(cg, ch, cc))| (pg - cg, ph - ch, pc - cc))
+            .collect()
     }
 
     /// Grow a tree using Best-First (Leaf-wise) strategy
@@ -443,6 +539,11 @@ impl TreeGrower {
         hessians: &[f32],
         row_indices: &[usize],
     ) -> Tree {
+        // Use era splitting path if enabled and dataset has era indices
+        if self.era_splitting && dataset.has_eras() {
+            return self.grow_with_indices_era(dataset, gradients, hessians, row_indices);
+        }
+
         let num_features = dataset.num_features();
         let num_rows = row_indices.len();
 
@@ -520,7 +621,7 @@ impl TreeGrower {
             node_idx: 0,
             row_start: 0,
             row_end: num_rows,
-            histograms: Some(root_histograms),
+            histograms: Some(NodeHistogramStorage::Standard(root_histograms)),
             split_info: root_split,
             sum_gradients: total_gradient,
             sum_hessians: total_hessian,
@@ -698,10 +799,16 @@ impl TreeGrower {
             for (state, smaller_hists) in batch_states.into_iter().zip(all_smaller_histograms.into_iter()) {
                 let smaller_histograms = NodeHistograms::from_vec(smaller_hists);
 
+                // Extract parent histograms (must be Standard variant in this path)
+                let parent_hists = match state.parent_histograms {
+                    NodeHistogramStorage::Standard(h) => h,
+                    NodeHistogramStorage::Era { .. } => unreachable!("Era histograms in standard path"),
+                };
+
                 // Compute larger child histogram using subtraction trick
                 let larger_histograms = NodeHistograms::from_vec(
                     self.backend().build_histograms_sibling(
-                        &state.parent_histograms.histograms,
+                        &parent_hists.histograms,
                         &smaller_histograms.histograms,
                     ),
                 );
@@ -740,7 +847,7 @@ impl TreeGrower {
                     node_idx: state.smaller_idx,
                     row_start: state.smaller_start,
                     row_end: state.smaller_end,
-                    histograms: Some(smaller_histograms),
+                    histograms: Some(NodeHistogramStorage::Standard(smaller_histograms)),
                     split_info: smaller_split,
                     sum_gradients: state.smaller_g,
                     sum_hessians: state.smaller_h,
@@ -751,13 +858,316 @@ impl TreeGrower {
                     node_idx: state.larger_idx,
                     row_start: state.larger_start,
                     row_end: state.larger_end,
-                    histograms: Some(larger_histograms),
+                    histograms: Some(NodeHistogramStorage::Standard(larger_histograms)),
                     split_info: larger_split,
                     sum_gradients: state.larger_g,
                     sum_hessians: state.larger_h,
                     ancestor_features: child_ancestors,
                 });
             }
+        }
+
+        tree
+    }
+
+    /// Grow a tree using era-stratified histograms (Directional Era Splitting / DES)
+    ///
+    /// Only accepts splits where ALL eras agree on the split direction.
+    /// This filters out spurious correlations that work in some eras but not others.
+    ///
+    /// # Arguments
+    /// * `dataset` - Binned training data (must have era indices set)
+    /// * `gradients` - Gradient for each sample
+    /// * `hessians` - Hessian for each sample
+    /// * `row_indices` - Subset of row indices to use for training this tree
+    fn grow_with_indices_era(
+        &self,
+        dataset: &BinnedDataset,
+        gradients: &[f32],
+        hessians: &[f32],
+        row_indices: &[usize],
+    ) -> Tree {
+        debug_assert!(dataset.has_eras(), "Dataset must have era indices for DES");
+
+        let num_features = dataset.num_features();
+        let num_rows = row_indices.len();
+
+        // Ensure backend is initialized for GPU era histograms
+        self.ensure_backend(num_rows);
+
+        // Convert separate gradient/hessian arrays to interleaved format for backend
+        let grad_hess: Vec<(f32, f32)> = gradients
+            .iter()
+            .zip(hessians.iter())
+            .map(|(&g, &h)| (g, h))
+            .collect();
+
+        let split_finder = self.create_split_finder();
+
+        // Generate column subsample mask (per tree)
+        let feature_mask: Option<Vec<usize>> = if self.colsample < 1.0 {
+            let n_features = ((num_features as f32) * self.colsample).ceil() as usize;
+            let n_features = n_features.max(1);
+            let mut rng = rand::rngs::StdRng::seed_from_u64(
+                (num_rows as u64).wrapping_mul(31337)
+            );
+            let mut all_features: Vec<usize> = (0..num_features).collect();
+            all_features.shuffle(&mut rng);
+            all_features.truncate(n_features);
+            Some(all_features)
+        } else {
+            None
+        };
+
+        // Compute initial sums for the subsampled rows only
+        let total_gradient: f32 = row_indices.iter().map(|&i| gradients[i]).sum();
+        let total_hessian: f32 = row_indices.iter().map(|&i| hessians[i]).sum();
+        let initial_weight = Node::compute_leaf_weight(total_gradient, total_hessian, self.lambda);
+
+        // Initialize tree with root leaf
+        let mut tree = Tree::new(
+            initial_weight * self.learning_rate,
+            num_rows,
+            total_gradient,
+            total_hessian,
+        );
+
+        // Initialize priority queue with root candidate
+        let mut candidates: BinaryHeap<SplitCandidate> = BinaryHeap::new();
+
+        // Initialize row partitioner
+        let mut partitioner = RowPartitioner::new(row_indices.to_vec());
+
+        // Build root era histograms using backend
+        let root_era_histograms = self.build_era_histograms(
+            dataset,
+            partitioner.get_rows(0, num_rows),
+            &grad_hess,
+        );
+
+        // Compute per-era totals for root
+        let root_per_era_totals = self.compute_per_era_totals(
+            dataset,
+            partitioner.get_rows(0, num_rows),
+            gradients,
+            hessians,
+        );
+
+        // Compute effective feature mask for root
+        let root_feature_mask = self.compute_effective_feature_mask(
+            &[],
+            feature_mask.as_deref(),
+            num_features,
+        );
+
+        // Find best split for root using era-aware method
+        let root_split = split_finder.find_best_split_with_eras_and_features(
+            &root_era_histograms,
+            &root_per_era_totals,
+            root_feature_mask.as_deref(),
+        );
+
+        candidates.push(SplitCandidate {
+            node_idx: 0,
+            row_start: 0,
+            row_end: num_rows,
+            histograms: Some(NodeHistogramStorage::Era {
+                histograms: root_era_histograms,
+                per_era_totals: root_per_era_totals,
+            }),
+            split_info: root_split,
+            sum_gradients: total_gradient,
+            sum_hessians: total_hessian,
+            ancestor_features: Vec::new(),
+        });
+
+        let mut num_leaves = 1;
+
+        // Best-first growth loop (non-batched for era splitting - GPU kernels not yet implemented)
+        while let Some(candidate) = candidates.pop() {
+            if num_leaves >= self.max_leaves {
+                break;
+            }
+
+            // Check if candidate has valid split
+            let split_info = match &candidate.split_info {
+                Some(info) if info.is_valid() => info.clone(),
+                _ => continue,
+            };
+
+            // Check depth constraint
+            let current_node = tree.get_node(candidate.node_idx);
+            if current_node.depth >= self.max_depth {
+                continue;
+            }
+
+            // Perform the split: partition rows in-place
+            let mid = partitioner.partition_in_place(
+                dataset,
+                candidate.row_start,
+                candidate.row_end,
+                split_info.feature_idx,
+                split_info.bin_threshold,
+            );
+
+            let left_start = candidate.row_start;
+            let left_end = mid;
+            let right_start = mid;
+            let right_end = candidate.row_end;
+            let left_count = left_end - left_start;
+            let right_count = right_end - right_start;
+
+            // Create child leaf nodes
+            let left_weight = Node::compute_leaf_weight(
+                split_info.left_gradient,
+                split_info.left_hessian,
+                self.lambda,
+            );
+            let right_weight = Node::compute_leaf_weight(
+                split_info.right_gradient,
+                split_info.right_hessian,
+                self.lambda,
+            );
+
+            let child_depth = current_node.depth + 1;
+
+            let left_node = Node::leaf(
+                left_weight * self.learning_rate,
+                child_depth,
+                left_count,
+                split_info.left_gradient,
+                split_info.left_hessian,
+            );
+            let right_node = Node::leaf(
+                right_weight * self.learning_rate,
+                child_depth,
+                right_count,
+                split_info.right_gradient,
+                split_info.right_hessian,
+            );
+
+            let left_idx = tree.add_node(left_node);
+            let right_idx = tree.add_node(right_node);
+
+            // Get the actual split value from bin boundaries
+            let split_value = dataset.get_split_value(
+                split_info.feature_idx,
+                split_info.bin_threshold,
+            );
+
+            // Convert current leaf to internal node
+            let current_node = tree.get_node_mut(candidate.node_idx);
+            current_node.node_type = crate::tree::NodeType::Internal {
+                feature_idx: split_info.feature_idx,
+                bin_threshold: split_info.bin_threshold,
+                split_value,
+                left_child: left_idx,
+                right_child: right_idx,
+            };
+
+            num_leaves += 1;
+
+            // Skip histogram building if we've hit the leaf limit
+            if num_leaves >= self.max_leaves {
+                break;
+            }
+
+            // Extract parent era histograms
+            let (parent_era_histograms, parent_per_era_totals) = match candidate.histograms.unwrap() {
+                NodeHistogramStorage::Era { histograms, per_era_totals } => (histograms, per_era_totals),
+                NodeHistogramStorage::Standard(_) => unreachable!("Standard histograms in era path"),
+            };
+
+            // Determine smaller child for histogram subtraction trick
+            let (smaller_start, smaller_end, smaller_idx, larger_start, larger_end, larger_idx, smaller_g, smaller_h, larger_g, larger_h) =
+                if left_count <= right_count {
+                    (
+                        left_start, left_end, left_idx,
+                        right_start, right_end, right_idx,
+                        split_info.left_gradient, split_info.left_hessian,
+                        split_info.right_gradient, split_info.right_hessian,
+                    )
+                } else {
+                    (
+                        right_start, right_end, right_idx,
+                        left_start, left_end, left_idx,
+                        split_info.right_gradient, split_info.right_hessian,
+                        split_info.left_gradient, split_info.left_hessian,
+                    )
+                };
+
+            // Build smaller child era histograms using backend
+            let smaller_era_histograms = self.build_era_histograms(
+                dataset,
+                partitioner.get_rows(smaller_start, smaller_end),
+                &grad_hess,
+            );
+
+            // Compute larger child via subtraction trick
+            let larger_era_histograms = self.compute_era_sibling(&parent_era_histograms, &smaller_era_histograms);
+
+            // Compute per-era totals for children
+            let smaller_per_era_totals = self.compute_per_era_totals(
+                dataset,
+                partitioner.get_rows(smaller_start, smaller_end),
+                gradients,
+                hessians,
+            );
+            let larger_per_era_totals = Self::compute_era_totals_sibling(
+                &parent_per_era_totals,
+                &smaller_per_era_totals,
+            );
+
+            // Compute child ancestor features
+            let mut child_ancestors = candidate.ancestor_features;
+            child_ancestors.push(split_info.feature_idx);
+
+            // Compute effective feature mask for children
+            let child_feature_mask = self.compute_effective_feature_mask(
+                &child_ancestors,
+                feature_mask.as_deref(),
+                num_features,
+            );
+
+            // Find splits for children using era-aware method
+            let smaller_split = split_finder.find_best_split_with_eras_and_features(
+                &smaller_era_histograms,
+                &smaller_per_era_totals,
+                child_feature_mask.as_deref(),
+            );
+            let larger_split = split_finder.find_best_split_with_eras_and_features(
+                &larger_era_histograms,
+                &larger_per_era_totals,
+                child_feature_mask.as_deref(),
+            );
+
+            candidates.push(SplitCandidate {
+                node_idx: smaller_idx,
+                row_start: smaller_start,
+                row_end: smaller_end,
+                histograms: Some(NodeHistogramStorage::Era {
+                    histograms: smaller_era_histograms,
+                    per_era_totals: smaller_per_era_totals,
+                }),
+                split_info: smaller_split,
+                sum_gradients: smaller_g,
+                sum_hessians: smaller_h,
+                ancestor_features: child_ancestors.clone(),
+            });
+
+            candidates.push(SplitCandidate {
+                node_idx: larger_idx,
+                row_start: larger_start,
+                row_end: larger_end,
+                histograms: Some(NodeHistogramStorage::Era {
+                    histograms: larger_era_histograms,
+                    per_era_totals: larger_per_era_totals,
+                }),
+                split_info: larger_split,
+                sum_gradients: larger_g,
+                sum_hessians: larger_h,
+                ancestor_features: child_ancestors,
+            });
         }
 
         tree
@@ -875,7 +1285,7 @@ impl TreeGrower {
             node_idx: 0,
             row_start: 0,
             row_end: num_rows,
-            histograms: Some(root_histograms),
+            histograms: Some(NodeHistogramStorage::Standard(root_histograms)),
             split_info: root_split,
             sum_gradients: total_gradient,
             sum_hessians: total_hessian,
@@ -1038,9 +1448,15 @@ impl TreeGrower {
             for (state, smaller_hists) in batch_states.into_iter().zip(all_smaller_histograms.into_iter()) {
                 let smaller_histograms = NodeHistograms::from_vec(smaller_hists);
 
+                // Extract parent histograms (must be Standard variant in grow_fused path)
+                let parent_hists = match state.parent_histograms {
+                    NodeHistogramStorage::Standard(h) => h,
+                    NodeHistogramStorage::Era { .. } => unreachable!("Era histograms in grow_fused path"),
+                };
+
                 let larger_histograms = NodeHistograms::from_vec(
                     self.backend().build_histograms_sibling(
-                        &state.parent_histograms.histograms,
+                        &parent_hists.histograms,
                         &smaller_histograms.histograms,
                     ),
                 );
@@ -1076,7 +1492,7 @@ impl TreeGrower {
                     node_idx: state.smaller_idx,
                     row_start: state.smaller_start,
                     row_end: state.smaller_end,
-                    histograms: Some(smaller_histograms),
+                    histograms: Some(NodeHistogramStorage::Standard(smaller_histograms)),
                     split_info: smaller_split,
                     sum_gradients: state.smaller_g,
                     sum_hessians: state.smaller_h,
@@ -1087,7 +1503,7 @@ impl TreeGrower {
                     node_idx: state.larger_idx,
                     row_start: state.larger_start,
                     row_end: state.larger_end,
-                    histograms: Some(larger_histograms),
+                    histograms: Some(NodeHistogramStorage::Standard(larger_histograms)),
                     split_info: larger_split,
                     sum_gradients: state.larger_g,
                     sum_hessians: state.larger_h,

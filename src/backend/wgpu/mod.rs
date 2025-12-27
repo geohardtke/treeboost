@@ -368,6 +368,46 @@ impl HistogramBackend for WgpuBackend {
         // Use the optimized GPU batched implementation
         WgpuBackend::build_histograms_batched(self, bins, grad_hess, batches)
     }
+
+    fn build_era_histograms(
+        &self,
+        bins: &dyn BinStorage,
+        grad_hess: &[(f32, f32)],
+        row_indices: &[usize],
+        era_indices: &[u16],
+        num_eras: usize,
+    ) -> Vec<Vec<Histogram>> {
+        let num_rows = bins.num_rows();
+        let num_features = bins.num_features();
+
+        // Get row-major bins (converting if necessary)
+        let bins_row_major: std::borrow::Cow<[u8]> = match bins.as_row_major() {
+            Some(data) => std::borrow::Cow::Borrowed(data),
+            None => {
+                // Convert column-major to row-major
+                let mut row_major = vec![0u8; num_rows * num_features];
+                for f in 0..num_features {
+                    if let Some(col) = bins.feature_column(f) {
+                        for r in 0..num_rows {
+                            row_major[r * num_features + f] = col[r];
+                        }
+                    }
+                }
+                std::borrow::Cow::Owned(row_major)
+            }
+        };
+
+        // Use GPU kernel for era histogram building
+        self.kernel.build_era_histograms(
+            &bins_row_major,
+            grad_hess,
+            row_indices,
+            era_indices,
+            num_rows,
+            num_features,
+            num_eras,
+        )
+    }
 }
 
 #[cfg(test)]

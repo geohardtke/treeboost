@@ -209,4 +209,46 @@ pub trait HistogramBackend: Send + Sync {
             .map(|row_indices| self.build_histograms(bins, grad_hess, row_indices))
             .collect()
     }
+
+    /// Build era-stratified histograms for Directional Era Splitting (DES).
+    ///
+    /// Returns histograms indexed as `[era][feature]`, enabling directional
+    /// agreement checks across eras during split finding.
+    ///
+    /// # Arguments
+    /// * `bins` - Binned feature data
+    /// * `grad_hess` - Interleaved (gradient, hessian) pairs for each row
+    /// * `row_indices` - Which rows belong to this node
+    /// * `era_indices` - Era index for each row in the full dataset
+    /// * `num_eras` - Total number of unique eras
+    ///
+    /// # Returns
+    /// A 2D vector of histograms: `[num_eras][num_features]`
+    ///
+    /// # Default Implementation
+    /// Falls back to CPU-based era histogram building.
+    fn build_era_histograms(
+        &self,
+        bins: &dyn BinStorage,
+        grad_hess: &[(f32, f32)],
+        row_indices: &[usize],
+        era_indices: &[u16],
+        num_eras: usize,
+    ) -> Vec<Vec<Histogram>> {
+        // Default: CPU-based era histogram building
+        let num_features = bins.num_features();
+        let mut result = vec![vec![Histogram::new(); num_features]; num_eras];
+
+        for &row in row_indices {
+            let era = era_indices[row] as usize;
+            let (g, h) = grad_hess[row];
+
+            for f in 0..num_features {
+                let bin = bins.get_bin(row, f);
+                result[era][f].accumulate(bin, g, h);
+            }
+        }
+
+        result
+    }
 }

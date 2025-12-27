@@ -138,6 +138,22 @@ pub struct GBDTConfig {
     /// Feature interaction groups: each inner Vec is a group of features that can interact
     /// Features not in any group can interact with all features
     pub interaction_groups: Vec<Vec<usize>>,
+
+    // Era-based splitting (Directional Era Splitting / DES)
+    /// Enable era-based split finding for robust/invariant learning (default: false)
+    ///
+    /// When enabled, only accepts splits where ALL eras agree on the split direction.
+    /// This filters out spurious correlations that work in some eras but not others,
+    /// learning only invariant patterns that generalize across time periods/environments.
+    ///
+    /// Use cases:
+    /// - Financial ML (market regimes shift over time)
+    /// - Time series with distribution shift
+    /// - Multi-environment/multi-site data
+    /// - Numerai-style competitions with era labels
+    ///
+    /// Requires passing `era_indices` to the training method.
+    pub era_splitting: bool,
 }
 
 impl Default for GBDTConfig {
@@ -198,6 +214,9 @@ impl Default for GBDTConfig {
 
             // Interaction constraints
             interaction_groups: Vec::new(),
+
+            // Era-based splitting (disabled by default)
+            era_splitting: false,
         }
     }
 }
@@ -472,6 +491,28 @@ impl GBDTConfig {
     /// ```
     pub fn with_interaction_groups(mut self, groups: Vec<Vec<usize>>) -> Self {
         self.interaction_groups = groups;
+        self
+    }
+
+    /// Enable era-based split finding (Directional Era Splitting)
+    ///
+    /// When enabled, only accepts splits where ALL eras agree on the split direction.
+    /// This filters out spurious correlations that work in some eras but not others.
+    ///
+    /// Requires passing `era_indices` to the training method.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use treeboost::GBDTConfig;
+    ///
+    /// let config = GBDTConfig::new()
+    ///     .with_era_splitting(true);
+    ///
+    /// // Then train with era indices:
+    /// // let model = GBDTModel::train_with_eras(&features, num_features, &targets, &era_indices, config)?;
+    /// ```
+    pub fn with_era_splitting(mut self, enabled: bool) -> Self {
+        self.era_splitting = enabled;
         self
     }
 

@@ -177,4 +177,24 @@ impl HistogramBackend for CudaBackend {
             bins.num_features(),
         )
     }
+
+    fn build_era_histograms(
+        &self,
+        bins: &dyn crate::backend::traits::BinStorage,
+        grad_hess: &[(f32, f32)],
+        row_indices: &[usize],
+        era_indices: &[u16],
+        num_eras: usize,
+    ) -> Vec<Vec<Histogram>> {
+        let bins_row_major = bins.as_row_major().expect("CUDA requires row-major bins");
+        self.histogram_kernel.lock().unwrap().build_era_histograms(
+            bins_row_major,
+            grad_hess,
+            row_indices,
+            era_indices,
+            bins.num_rows(),
+            bins.num_features(),
+            num_eras,
+        )
+    }
 }

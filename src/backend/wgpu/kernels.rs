@@ -128,6 +128,8 @@ struct BufferPool {
     grad_hess: Option<PooledBuffer>,
     indices: Option<PooledBuffer>,
     batch_info: Option<PooledBuffer>, // Batch descriptors for batched mode
+    era_indices: Option<PooledBuffer>, // Era indices for DES
+    era_indices_cache_key: Option<CacheKey>,
     // Output histogram buffers
     hist_grad: Option<PooledBuffer>,
     hist_hess: Option<PooledBuffer>,
@@ -149,6 +151,8 @@ impl BufferPool {
             grad_hess: None,
             indices: None,
             batch_info: None,
+            era_indices: None,
+            era_indices_cache_key: None,
             hist_grad: None,
             hist_hess: None,
             hist_count: None,
@@ -175,6 +179,10 @@ pub struct HistogramKernel {
     pipeline_dense_4bit: ComputePipeline,
     pipeline_zero_4bit: ComputePipeline,
     bind_group_layout_dense_4bit: BindGroupLayout,
+    // Era histogram pipelines (for Directional Era Splitting)
+    pipeline_era: ComputePipeline,
+    pipeline_zero_era: ComputePipeline,
+    bind_group_layout_era: BindGroupLayout,
     /// Buffer pool for reusing allocations (Mutex for thread safety)
     buffer_pool: Mutex<BufferPool>,
     /// Whether subgroup operations are available on hardware
@@ -243,6 +251,23 @@ impl HistogramKernel {
 
         let bind_group_layout_dense_4bit = pipeline_dense_4bit.get_bind_group_layout(0);
 
+        // Create era histogram pipelines (for Directional Era Splitting)
+        let shader_source_era = include_str!("shaders/histogram_era.wgsl");
+
+        let pipeline_era = device.create_compute_pipeline(
+            "histogram_era_pipeline",
+            shader_source_era,
+            "histogram_era",
+        );
+
+        let pipeline_zero_era = device.create_compute_pipeline(
+            "zero_histograms_era_pipeline",
+            shader_source_era,
+            "zero_histograms_era",
+        );
+
+        let bind_group_layout_era = pipeline_era.get_bind_group_layout(0);
+
         // Check for subgroup support and create optimized pipelines if available
         // Note: Even if the device reports SUBGROUP support, the WGSL compiler may not
         // support the `enable subgroups;` extension yet (depends on wgpu/naga version).
@@ -295,6 +320,9 @@ impl HistogramKernel {
             pipeline_dense_4bit,
             pipeline_zero_4bit,
             bind_group_layout_dense_4bit,
+            pipeline_era,
+            pipeline_zero_era,
+            bind_group_layout_era,
             buffer_pool: Mutex::new(BufferPool::new()),
             subgroups_supported,
             use_subgroups: std::sync::atomic::AtomicBool::new(false), // Disabled by default
@@ -1621,6 +1649,301 @@ impl HistogramKernel {
             }
 
             all_histograms.push(batch_histograms);
+        }
+
+        all_histograms
+    }
+
+    /// Build era-stratified histograms for Directional Era Splitting (DES).
+    ///
+    /// Returns histograms indexed as `[era][feature]`.
+    ///
+    /// # Arguments
+    /// * `bins_row_major` - Bin values in row-major order [row][feature]
+    /// * `grad_hess` - Interleaved gradients and hessians [(g0,h0), (g1,h1), ...]
+    /// * `row_indices` - Row indices to process (empty = use all rows)
+    /// * `era_indices` - Era index for each row in the full dataset
+    /// * `num_rows` - Total number of rows
+    /// * `num_features` - Number of features
+    /// * `num_eras` - Number of unique eras
+    ///
+    /// # Returns
+    /// 2D vector of histograms: `[num_eras][num_features]`
+    pub fn build_era_histograms(
+        &self,
+        bins_row_major: &[u8],
+        grad_hess: &[(f32, f32)],
+        row_indices: &[usize],
+        era_indices: &[u16],
+        num_rows: usize,
+        num_features: usize,
+        num_eras: usize,
+    ) -> Vec<Vec<Histogram>> {
+        let dev = &self.device;
+
+        // Quantize gradients/hessians to fixed-point i16 and pack into u32
+        let grad_hess_packed: Vec<u32> = grad_hess
+            .iter()
+            .map(|(g, h)| {
+                let grad_i16 = ((*g * FIXED_POINT_SCALE).clamp(-32767.0, 32767.0)) as i16;
+                let hess_i16 = ((*h * FIXED_POINT_SCALE).clamp(-32767.0, 32767.0)) as i16;
+                (grad_i16 as u16 as u32) | ((hess_i16 as u16 as u32) << 16)
+            })
+            .collect();
+
+        // Convert row indices to u32
+        let indices_u32: Vec<u32> = row_indices.iter().map(|&i| i as u32).collect();
+
+        // Pack era indices (u16) into u32 (2 per u32)
+        let era_packed: Vec<u32> = era_indices
+            .chunks(2)
+            .map(|chunk| {
+                let e0 = chunk[0] as u32;
+                let e1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+                e0 | (e1 << 16)
+            })
+            .collect();
+
+        // Pack bins
+        let bins_aligned = bins_row_major.len() % 4 == 0;
+        let bins_packed_owned: Vec<u32>;
+        let bins_packed: &[u32] = if bins_aligned {
+            bytemuck::cast_slice(bins_row_major)
+        } else {
+            bins_packed_owned = pack_bins_u32(bins_row_major);
+            &bins_packed_owned
+        };
+
+        // Calculate buffer sizes
+        let bins_size = (bins_packed.len() * 4) as u64;
+        let grad_hess_size = (grad_hess_packed.len() * 4) as u64;
+        let indices_size = if indices_u32.is_empty() { 4u64 } else { (indices_u32.len() * 4) as u64 };
+        let era_size = (era_packed.len() * 4) as u64;
+        let hist_size = (num_eras * num_features * 256 * 4) as u64;
+
+        // Create uniform buffer with parameters (reusing HistogramParams with num_eras in num_batches field)
+        let params = HistogramParams {
+            num_rows: num_rows as u32,
+            num_features: num_features as u32,
+            num_indices: indices_u32.len() as u32,
+            num_batches: num_eras as u32, // Repurposed as num_eras for era shader
+        };
+
+        // Lock buffer pool and ensure all buffers exist
+        let mut pool = self.buffer_pool.lock().unwrap();
+
+        // Params buffer
+        if pool.params.is_none() {
+            pool.params = Some(dev.create_uniform_buffer(
+                "params_buffer",
+                std::mem::size_of::<HistogramParams>() as u64,
+            ));
+        }
+
+        // Ensure input buffers
+        if Self::ensure_storage_buffer(dev, &mut pool.bins, "bins_buffer", bins_size, false) {
+            pool.bins_cache_key = None;
+        }
+        Self::ensure_storage_buffer(dev, &mut pool.grad_hess, "grad_hess_buffer", grad_hess_size, false);
+        Self::ensure_storage_buffer(dev, &mut pool.indices, "indices_buffer", indices_size, false);
+        if Self::ensure_storage_buffer(dev, &mut pool.era_indices, "era_indices_buffer", era_size, false) {
+            pool.era_indices_cache_key = None;
+        }
+
+        // Ensure output histogram buffers (sized for all eras)
+        Self::ensure_storage_buffer(dev, &mut pool.hist_grad, "hist_grad", hist_size, true);
+        Self::ensure_storage_buffer(dev, &mut pool.hist_hess, "hist_hess", hist_size, true);
+        Self::ensure_storage_buffer(dev, &mut pool.hist_count, "hist_count", hist_size, true);
+
+        // Ensure staging buffers
+        Self::ensure_staging_buffer(dev, &mut pool.staging_grad, "staging_grad", hist_size);
+        Self::ensure_staging_buffer(dev, &mut pool.staging_hess, "staging_hess", hist_size);
+        Self::ensure_staging_buffer(dev, &mut pool.staging_count, "staging_count", hist_size);
+
+        // Upload data
+        dev.write_buffer(pool.params.as_ref().unwrap(), &[params]);
+
+        // Bins: check cache
+        let bins_key = CacheKey::from_slice(bins_row_major);
+        if pool.bins_cache_key != Some(bins_key) {
+            dev.write_buffer(&pool.bins.as_ref().unwrap().buffer, bins_packed);
+            pool.bins_cache_key = Some(bins_key);
+        }
+
+        dev.write_buffer(&pool.grad_hess.as_ref().unwrap().buffer, &grad_hess_packed);
+
+        if !indices_u32.is_empty() {
+            dev.write_buffer(&pool.indices.as_ref().unwrap().buffer, &indices_u32);
+        }
+
+        // Era indices: check cache
+        let era_key = CacheKey::from_slice(era_indices);
+        if pool.era_indices_cache_key != Some(era_key) {
+            dev.write_buffer(&pool.era_indices.as_ref().unwrap().buffer, &era_packed);
+            pool.era_indices_cache_key = Some(era_key);
+        }
+
+        // Create bind groups for era histogram kernel
+        let bind_group_zero = dev.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("zero_bind_group_era"),
+            layout: &self.pipeline_zero_era.get_bind_group_layout(0),
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: pool.params.as_ref().unwrap().as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 5,
+                    resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 6,
+                    resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let bind_group_era = dev.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("histogram_bind_group_era"),
+            layout: &self.bind_group_layout_era,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: pool.params.as_ref().unwrap().as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: pool.bins.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: pool.grad_hess.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: pool.indices.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 5,
+                    resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 6,
+                    resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 7,
+                    resource: pool.era_indices.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Execute kernels
+        let mut encoder = dev.create_encoder("histogram_era_encoder");
+
+        // Zero histograms first (for all eras)
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("zero_pass_era"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline_zero_era);
+            pass.set_bind_group(0, &bind_group_zero, &[]);
+            let total_bins = (num_eras * num_features * 256) as u32;
+            let workgroups = (total_bins + 255) / 256;
+            pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+
+        // Run era histogram kernel
+        // Dispatch: (num_features, num_eras, 1)
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("histogram_era_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline_era);
+            pass.set_bind_group(0, &bind_group_era, &[]);
+            pass.dispatch_workgroups(num_features as u32, num_eras as u32, 1);
+        }
+
+        // Copy results to staging buffers
+        encoder.copy_buffer_to_buffer(
+            &pool.hist_grad.as_ref().unwrap().buffer,
+            0,
+            &pool.staging_grad.as_ref().unwrap().buffer,
+            0,
+            hist_size,
+        );
+        encoder.copy_buffer_to_buffer(
+            &pool.hist_hess.as_ref().unwrap().buffer,
+            0,
+            &pool.staging_hess.as_ref().unwrap().buffer,
+            0,
+            hist_size,
+        );
+        encoder.copy_buffer_to_buffer(
+            &pool.hist_count.as_ref().unwrap().buffer,
+            0,
+            &pool.staging_count.as_ref().unwrap().buffer,
+            0,
+            hist_size,
+        );
+
+        // Submit and wait
+        dev.submit_and_wait(encoder);
+
+        // Read back results (as i32 fixed-point)
+        let total_hist_entries = num_eras * num_features * 256;
+        let mut grad_data = vec![0i32; total_hist_entries];
+        let mut hess_data = vec![0i32; total_hist_entries];
+        let mut count_data = vec![0u32; total_hist_entries];
+
+        dev.read_buffer(&pool.staging_grad.as_ref().unwrap().buffer, &mut grad_data);
+        dev.read_buffer(&pool.staging_hess.as_ref().unwrap().buffer, &mut hess_data);
+        dev.read_buffer(&pool.staging_count.as_ref().unwrap().buffer, &mut count_data);
+
+        // Drop pool borrow
+        drop(pool);
+
+        // Convert to Histogram structs with dequantization - [era][feature]
+        // Output layout: [era * num_features * 256 + feature * 256 + bin]
+        let hist_stride = num_features * 256;
+        let mut all_histograms = Vec::with_capacity(num_eras);
+
+        for era in 0..num_eras {
+            let era_offset = era * hist_stride;
+            let mut era_histograms = Vec::with_capacity(num_features);
+
+            for f in 0..num_features {
+                let mut hist = Histogram::new();
+                let feature_offset = era_offset + f * 256;
+
+                for bin in 0..256 {
+                    let idx = feature_offset + bin;
+                    // Dequantize from fixed-point i32 back to f32
+                    let sum_grad = grad_data[idx] as f32 * FIXED_POINT_SCALE_INV;
+                    let sum_hess = hess_data[idx] as f32 * FIXED_POINT_SCALE_INV;
+                    let count = count_data[idx];
+
+                    if count > 0 {
+                        hist.accumulate(bin as u8, sum_grad, sum_hess);
+                        let entry = hist.get_mut(bin as u8);
+                        entry.count = count;
+                    }
+                }
+
+                era_histograms.push(hist);
+            }
+
+            all_histograms.push(era_histograms);
         }
 
         all_histograms

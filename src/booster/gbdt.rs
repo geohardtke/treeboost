@@ -138,6 +138,129 @@ impl GBDTModel {
         Self::train_binned(&dataset, config)
     }
 
+    /// Train a GBDT model with Directional Era Splitting (DES)
+    ///
+    /// Era splitting filters out spurious correlations by requiring all eras
+    /// to agree on split direction. This is useful for time-series or financial
+    /// data where patterns may not generalize across time periods.
+    ///
+    /// # Arguments
+    /// * `features` - Row-major feature matrix: `features[row * num_features + feature]`
+    /// * `num_features` - Number of features (columns)
+    /// * `targets` - Target values, one per row
+    /// * `era_indices` - Era index (0-based) for each row
+    /// * `config` - Training configuration (era_splitting must be enabled)
+    /// * `feature_names` - Optional feature names
+    ///
+    /// # Example
+    /// ```ignore
+    /// let features = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // 2 rows × 3 features
+    /// let targets = vec![0.5, 1.5];
+    /// let era_indices = vec![0, 1]; // Row 0 in era 0, row 1 in era 1
+    /// let config = GBDTConfig::new()
+    ///     .with_num_rounds(100)
+    ///     .with_era_splitting(true);
+    /// let model = GBDTModel::train_with_eras(&features, 3, &targets, &era_indices, config, None)?;
+    /// ```
+    pub fn train_with_eras(
+        features: &[f32],
+        num_features: usize,
+        targets: &[f32],
+        era_indices: &[u16],
+        config: GBDTConfig,
+        feature_names: Option<Vec<String>>,
+    ) -> Result<Self> {
+        let num_rows = if num_features > 0 {
+            features.len() / num_features
+        } else {
+            0
+        };
+
+        if num_rows == 0 || num_features == 0 {
+            return Err(TreeBoostError::Config("Empty dataset".to_string()));
+        }
+
+        if features.len() != num_rows * num_features {
+            return Err(TreeBoostError::Config(format!(
+                "Feature array length {} doesn't match num_rows * num_features ({} * {} = {})",
+                features.len(),
+                num_rows,
+                num_features,
+                num_rows * num_features
+            )));
+        }
+
+        if targets.len() != num_rows {
+            return Err(TreeBoostError::Config(format!(
+                "Target length {} doesn't match num_rows {}",
+                targets.len(),
+                num_rows
+            )));
+        }
+
+        if era_indices.len() != num_rows {
+            return Err(TreeBoostError::Config(format!(
+                "era_indices length {} doesn't match num_rows {}",
+                era_indices.len(),
+                num_rows
+            )));
+        }
+
+        if !config.era_splitting {
+            return Err(TreeBoostError::Config(
+                "era_splitting must be enabled in config when using train_with_eras".to_string(),
+            ));
+        }
+
+        // Create binner
+        let binner = QuantileBinner::new(config.num_bins);
+
+        // Parallel binning: process each feature column in parallel
+        let binned_results: Vec<(Vec<u8>, FeatureInfo)> = (0..num_features)
+            .into_par_iter()
+            .map(|f| {
+                // Extract column (row-major to column values)
+                let column: Vec<f64> = (0..num_rows)
+                    .map(|r| features[r * num_features + f] as f64)
+                    .collect();
+
+                // Compute boundaries and bin
+                let boundaries = binner.compute_boundaries(&column);
+                let binned = binner.bin_column(&column, &boundaries);
+
+                // Create feature info
+                let name = feature_names
+                    .as_ref()
+                    .and_then(|names| names.get(f).cloned())
+                    .unwrap_or_else(|| format!("feature_{}", f));
+
+                let info = FeatureInfo {
+                    name,
+                    feature_type: FeatureType::Numeric,
+                    num_bins: (boundaries.len() + 1).min(255) as u8,
+                    bin_boundaries: boundaries,
+                };
+
+                (binned, info)
+            })
+            .collect();
+
+        // Combine results into column-major storage
+        let mut binned_data = Vec::with_capacity(num_rows * num_features);
+        let mut feature_info = Vec::with_capacity(num_features);
+
+        for (binned_col, info) in binned_results {
+            binned_data.extend(binned_col);
+            feature_info.push(info);
+        }
+
+        // Create BinnedDataset with era indices
+        let mut dataset = BinnedDataset::new(num_rows, binned_data, targets.to_vec(), feature_info);
+        dataset.set_era_indices(era_indices.to_vec());
+
+        Self::train_binned(&dataset, config)
+    }
+
     /// Train a GBDT model from pre-binned data (low-level API)
     ///
     /// Use this when you have already binned your data (e.g., for repeated training
@@ -193,7 +316,8 @@ impl GBDTModel {
             .with_monotonic_constraints(config.monotonic_constraints.clone())
             .with_interaction_constraints(interaction_constraints)
             .with_backend(config.backend_type)
-            .with_gpu_subgroups(config.use_gpu_subgroups);
+            .with_gpu_subgroups(config.use_gpu_subgroups)
+            .with_era_splitting(config.era_splitting);
 
         let mut trees = Vec::with_capacity(config.num_rounds);
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
@@ -1191,5 +1315,86 @@ mod tests {
         // Predictions should still work
         let predictions = model.predict(&dataset);
         assert_eq!(predictions.len(), 500);
+    }
+
+    #[test]
+    fn test_train_with_era_splitting() {
+        let num_rows = 600;
+        let num_eras = 3;
+
+        // Create dataset with era indices
+        let mut dataset = create_regression_dataset(num_rows, 0.1);
+
+        // Assign era indices (0, 1, 2) in round-robin fashion
+        let era_indices: Vec<u16> = (0..num_rows).map(|i| (i % num_eras) as u16).collect();
+        dataset.set_era_indices(era_indices);
+
+        // Train with era splitting enabled
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(3)
+            .with_learning_rate(0.1)
+            .with_era_splitting(true);
+
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
+
+        // Model should train successfully with era splitting
+        assert!(model.num_trees() > 0);
+
+        // Predictions should still work
+        let predictions = model.predict(&dataset);
+        assert_eq!(predictions.len(), num_rows);
+    }
+
+    #[test]
+    fn test_train_with_eras_high_level_api() {
+        let num_rows = 600;
+        let num_features = 5;
+        let num_eras = 3;
+
+        // Create random features (row-major)
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let features: Vec<f32> = (0..num_rows * num_features)
+            .map(|_| rand::Rng::gen_range(&mut rng, 0.0..1.0))
+            .collect();
+
+        // Create targets based on first two features
+        let targets: Vec<f32> = (0..num_rows)
+            .map(|i| {
+                let f0 = features[i * num_features];
+                let f1 = features[i * num_features + 1];
+                f0 * 2.0 + f1 * 3.0 + rand::Rng::gen_range(&mut rng, -0.1..0.1)
+            })
+            .collect();
+
+        // Era indices in round-robin fashion
+        let era_indices: Vec<u16> = (0..num_rows).map(|i| (i % num_eras) as u16).collect();
+
+        // Train with era splitting via high-level API
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(3)
+            .with_learning_rate(0.1)
+            .with_era_splitting(true);
+
+        let model = GBDTModel::train_with_eras(
+            &features,
+            num_features,
+            &targets,
+            &era_indices,
+            config,
+            None,
+        )
+        .unwrap();
+
+        // Model should train successfully
+        assert!(model.num_trees() > 0);
+        assert_eq!(model.num_features(), num_features);
+
+        // Predictions should work (convert to f64 for predict_raw)
+        let features_f64: Vec<f64> = features.iter().map(|&v| v as f64).collect();
+        let predictions = model.predict_raw(&features_f64);
+        assert_eq!(predictions.len(), num_rows);
     }
 }
