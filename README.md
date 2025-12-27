@@ -364,6 +364,16 @@ treeboost train ... --subsample 0.8 --colsample 0.8
 - Ensure you're using the same TreeBoost version for save/load
 - The `.rkyv` file is tied to the binary layout; recompiling TreeBoost may break compatibility
 
+## Acknowledgments
+
+TreeBoost builds on the collective knowledge of the GBDT community. We acknowledge the following projects that shaped our design and implementation:
+
+- **[XGBoost](https://github.com/dmlc/xgboost)** — Industry-standard GBDT with GPU support; inspired our histogram-based approach and Full GPU mode architecture.
+- **[LightGBM](https://github.com/Mottl/lightgbm)** — Leaf-wise growth strategy and histogram optimization techniques.
+- **[CatBoost](https://github.com/catboost/catboost/)** — Ordered target encoding for categorical features and conformal prediction intervals.
+- **[Forust](https://github.com/jinlow/forust)** — Pure-Rust GBDT implementation; motivated our focus on Rust-first performance.
+- **[WarpGBM](https://github.com/jefferythewind/warpgbm/tree/main/warpgbm)** — GPU-accelerated histogram building patterns.
+
 ## License
 
 Apache License 2.0
