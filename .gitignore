@@ -40,6 +40,7 @@ callgrind.out.*
 
 # Sample data - all ignored (generate locally with scripts/generate_samples.py)
 samples/
+examples/local
 
 # Logs
 *.log

@@ -71,7 +71,12 @@ wgpu = { version = "27", optional = true }
 pollster = { version = "0.4", optional = true }
 
 # CUDA driver bindings (optional - for cuda feature)
-cudarc = { version = "=0.18.2", optional = true, default-features = false, features = ["driver", "nvrtc", "dynamic-linking", "cuda-version-from-build-system"] }
+cudarc = { version = "=0.18.2", optional = true, default-features = false, features = [
+  "driver",
+  "nvrtc",
+  "dynamic-linking",
+  "cuda-version-from-build-system",
+] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -102,24 +107,3 @@ opt-level = 3
 [profile.bench]
 lto = "thin"
 codegen-units = 1
-
-# GPU examples require the gpu feature
-[[example]]
-name = "4bit_benchmark"
-required-features = ["gpu"]
-
-[[example]]
-name = "subgroup_benchmark"
-required-features = ["gpu"]
-
-[[example]]
-name = "register_cache_benchmark"
-required-features = ["gpu"]
-
-[[example]]
-name = "workgroup_size_benchmark"
-required-features = ["gpu"]
-
-[[example]]
-name = "full_gpu_benchmark"
-required-features = ["gpu"]
