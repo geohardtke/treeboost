@@ -60,8 +60,13 @@ pub use config::{
 pub use metrics::Metric;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
+use rayon::prelude::*;
+
+use crate::backend::BackendType;
 use crate::booster::{GBDTConfig, GBDTModel};
 use crate::dataset::{split_holdout, split_kfold, BinnedDataset};
 use crate::{Result, TreeBoostError};
@@ -197,8 +202,8 @@ pub struct AutoTuner {
     history: SearchHistory,
     /// Progress callback
     callback: Option<ProgressCallback>,
-    /// Next trial ID
-    next_trial_id: usize,
+    /// Next trial ID (atomic for parallel evaluation)
+    next_trial_id: AtomicUsize,
 }
 
 impl AutoTuner {
@@ -212,7 +217,7 @@ impl AutoTuner {
             base_config,
             history: SearchHistory::new(),
             callback: None,
-            next_trial_id: 0,
+            next_trial_id: AtomicUsize::new(0),
         }
     }
 
@@ -243,6 +248,12 @@ impl AutoTuner {
     /// Enable or disable parallel trial evaluation
     pub fn with_parallel(mut self, enabled: bool) -> Self {
         self.config.parallel_trials = enabled;
+        self
+    }
+
+    /// Set the random seed for reproducibility
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.config.seed = seed;
         self
     }
 
@@ -279,6 +290,7 @@ impl AutoTuner {
         })?;
 
         let total_trials = self.config.estimated_trials();
+        let use_parallel = self.config.parallel_trials && !self.is_gpu_backend();
 
         if self.config.verbose {
             println!("Starting AutoTuner...");
@@ -287,9 +299,14 @@ impl AutoTuner {
             println!("  Estimated trials: {}", total_trials);
             println!("  Grid strategy: {:?}", self.config.grid_strategy);
             println!("  Eval strategy: {:?}", self.config.eval_strategy);
+            println!(
+                "  Parallel: {} (backend: {:?})",
+                if use_parallel { "enabled" } else { "disabled" },
+                self.base_config.backend_type
+            );
         }
 
-        let mut current_trial = 0;
+        let current_trial = AtomicUsize::new(0);
 
         for iteration in 0..self.config.n_iterations {
             let spread = self.config.spread_for_iteration(iteration);
@@ -309,17 +326,17 @@ impl AutoTuner {
                 println!("  Testing {} candidates...", candidates.len());
             }
 
-            // Evaluate all candidates
-            for params in candidates {
-                current_trial += 1;
+            // Evaluate all candidates (parallel or sequential based on backend)
+            let results = self.evaluate_candidates(
+                dataset,
+                candidates,
+                iteration,
+                &current_trial,
+                total_trials,
+            );
 
-                let result = self.evaluate_single(dataset, &params, iteration)?;
-
-                // Call progress callback
-                if let Some(ref callback) = self.callback {
-                    callback(&result, current_trial, total_trials);
-                }
-
+            // Add all results to history and log new best
+            for result in results {
                 // Log if best so far
                 if self.config.verbose {
                     let is_best = self
@@ -332,8 +349,8 @@ impl AutoTuner {
                         println!(
                             "  -> New best! val_metric={:.6} (depth={}, lr={:.4})",
                             result.val_metric,
-                            params.get("max_depth").unwrap_or(&0.0),
-                            params.get("learning_rate").unwrap_or(&0.0)
+                            result.params.get("max_depth").unwrap_or(&0.0),
+                            result.params.get("learning_rate").unwrap_or(&0.0)
                         );
                     }
                 }
@@ -545,47 +562,119 @@ impl AutoTuner {
         }
     }
 
-    /// Generate Latin Hypercube Sampling grid (placeholder)
+    /// Generate Latin Hypercube Sampling grid
+    ///
+    /// LHS ensures good space-filling by dividing each parameter's range into n equal strata
+    /// and sampling exactly once from each stratum. This provides better coverage than
+    /// pure random sampling with the same number of samples.
     fn generate_lhs_grid(&self, spread: f32, n_samples: usize) -> Vec<HashMap<String, f32>> {
-        // TODO: Implement proper LHS
-        // For now, fall back to random sampling
-        self.generate_random_grid(spread, n_samples)
-    }
+        use rand::seq::SliceRandom;
+        use rand::{Rng, SeedableRng};
+        use rand::rngs::StdRng;
 
-    /// Generate random sampling grid
-    fn generate_random_grid(&self, spread: f32, n_samples: usize) -> Vec<HashMap<String, f32>> {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        if n_samples == 0 {
+            return Vec::new();
+        }
 
+        let mut rng = StdRng::seed_from_u64(self.config.seed);
         let params = self.config.space.params();
-        let mut candidates = Vec::with_capacity(n_samples);
+        let n_params = params.len();
 
-        for i in 0..n_samples {
+        if n_params == 0 {
+            return vec![HashMap::new(); n_samples];
+        }
+
+        // Create permutation for each parameter dimension
+        // Each column gets a shuffled list of strata indices [0, 1, ..., n_samples-1]
+        let mut strata_permutations: Vec<Vec<usize>> = Vec::with_capacity(n_params);
+        for _ in 0..n_params {
+            let mut perm: Vec<usize> = (0..n_samples).collect();
+            perm.shuffle(&mut rng);
+            strata_permutations.push(perm);
+        }
+
+        // Generate samples
+        let mut candidates = Vec::with_capacity(n_samples);
+        for sample_idx in 0..n_samples {
             let mut candidate = HashMap::new();
 
-            for param in params {
-                // Simple deterministic pseudo-random based on seed + sample + param name
-                let mut hasher = DefaultHasher::new();
-                self.config.seed.hash(&mut hasher);
-                i.hash(&mut hasher);
-                param.name.hash(&mut hasher);
-                let hash = hasher.finish();
-                let rand = (hash as f32) / (u64::MAX as f32);
+            for (param_idx, param) in params.iter().enumerate() {
+                let stratum = strata_permutations[param_idx][sample_idx];
 
+                // Compute the effective bounds based on spread around center
                 let center = param.center;
                 let (min, max) = (param.bounds.min_value(), param.bounds.max_value());
                 let range = max - min;
                 let half_span = range * spread / 2.0;
-
                 let low = (center - half_span).max(min);
                 let high = (center + half_span).min(max);
 
+                // Sample uniformly within this stratum
+                // Stratum boundaries: [stratum/n_samples, (stratum+1)/n_samples] of the [low, high] range
+                let stratum_low = stratum as f32 / n_samples as f32;
+                let stratum_high = (stratum + 1) as f32 / n_samples as f32;
+                let u: f32 = rng.gen_range(stratum_low..stratum_high);
+
                 let value = if param.bounds.is_log_scale() {
-                    let log_low = low.ln();
-                    let log_high = high.ln();
-                    (log_low + rand * (log_high - log_low)).exp()
+                    // Log-uniform sampling within stratum
+                    let log_low = low.max(1e-10).ln();
+                    let log_high = high.max(1e-10).ln();
+                    (log_low + u * (log_high - log_low)).exp()
                 } else {
-                    low + rand * (high - low)
+                    // Linear interpolation within stratum
+                    low + u * (high - low)
+                };
+
+                candidate.insert(param.name.clone(), param.bounds.clamp(value));
+            }
+
+            candidates.push(candidate);
+        }
+
+        candidates
+    }
+
+    /// Generate random sampling grid with proper deterministic PRNG
+    fn generate_random_grid(&self, spread: f32, n_samples: usize) -> Vec<HashMap<String, f32>> {
+        use rand::{Rng, SeedableRng};
+        use rand::rngs::StdRng;
+
+        if n_samples == 0 {
+            return Vec::new();
+        }
+
+        let mut rng = StdRng::seed_from_u64(self.config.seed);
+        let params = self.config.space.params();
+
+        if params.is_empty() {
+            return vec![HashMap::new(); n_samples];
+        }
+
+        let mut candidates = Vec::with_capacity(n_samples);
+
+        for _ in 0..n_samples {
+            let mut candidate = HashMap::new();
+
+            for param in params {
+                // Compute the effective bounds based on spread around center
+                let center = param.center;
+                let (min, max) = (param.bounds.min_value(), param.bounds.max_value());
+                let range = max - min;
+                let half_span = range * spread / 2.0;
+                let low = (center - half_span).max(min);
+                let high = (center + half_span).min(max);
+
+                // Sample uniformly in [0, 1)
+                let u: f32 = rng.gen();
+
+                let value = if param.bounds.is_log_scale() {
+                    // Log-uniform sampling
+                    let log_low = low.max(1e-10).ln();
+                    let log_high = high.max(1e-10).ln();
+                    (log_low + u * (log_high - log_low)).exp()
+                } else {
+                    // Linear interpolation
+                    low + u * (high - low)
                 };
 
                 candidate.insert(param.name.clone(), param.bounds.clamp(value));
@@ -598,14 +687,15 @@ impl AutoTuner {
     }
 
     /// Evaluate a single candidate configuration
+    ///
+    /// Thread-safe: uses atomic operations for trial ID assignment
     fn evaluate_single(
-        &mut self,
+        &self,
         dataset: &BinnedDataset,
         params: &HashMap<String, f32>,
         iteration: usize,
     ) -> Result<TrialResult> {
-        let trial_id = self.next_trial_id;
-        self.next_trial_id += 1;
+        let trial_id = self.next_trial_id.fetch_add(1, Ordering::SeqCst);
 
         let start = Instant::now();
 
@@ -728,6 +818,105 @@ impl AutoTuner {
             LossType::MultiClassLogLoss { num_classes } => {
                 Metric::MultiClassLogLoss { n_classes: *num_classes }
             }
+        }
+    }
+
+    /// Check if the backend requires sequential execution
+    ///
+    /// GPU backends (WGPU, CUDA, ROCm, Metal) cannot run multiple contexts
+    /// concurrently on a single device, so trials must run sequentially.
+    /// CPU backends (Scalar, AVX-512, SVE2) can run in parallel.
+    fn is_gpu_backend(&self) -> bool {
+        match self.base_config.backend_type {
+            // GPU backends: force sequential to avoid OOM/contention
+            BackendType::Auto => true, // Auto may resolve to GPU, be conservative
+            BackendType::Wgpu => true,
+            BackendType::Cuda => true,
+            BackendType::Rocm => true,
+            BackendType::Metal => true,
+            // CPU backends: safe for parallel
+            BackendType::Scalar => false,
+            BackendType::Avx512 => false,
+            BackendType::Sve2 => false,
+        }
+    }
+
+    /// Evaluate candidates using parallel or sequential strategy
+    ///
+    /// For CPU backends, uses Rayon for parallel evaluation.
+    /// For GPU backends, evaluates sequentially to avoid contention.
+    fn evaluate_candidates(
+        &self,
+        dataset: &BinnedDataset,
+        candidates: Vec<HashMap<String, f32>>,
+        iteration: usize,
+        current_trial: &AtomicUsize,
+        total_trials: usize,
+    ) -> Vec<TrialResult> {
+        let use_parallel = self.config.parallel_trials && !self.is_gpu_backend();
+
+        if use_parallel {
+            // Parallel evaluation for CPU backends
+            // n_parallel of 0 means "auto" (use all available threads)
+            let n_parallel = if self.config.n_parallel == 0 {
+                rayon::current_num_threads()
+            } else {
+                self.config.n_parallel
+            };
+
+            // Create a thread pool with limited parallelism if specified
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(n_parallel)
+                .build()
+                .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+
+            let results = Mutex::new(Vec::with_capacity(candidates.len()));
+            let callback = &self.callback;
+
+            pool.install(|| {
+                candidates.par_iter().for_each(|params| {
+                    match self.evaluate_single(dataset, params, iteration) {
+                        Ok(result) => {
+                            let trial_num = current_trial.fetch_add(1, Ordering::SeqCst) + 1;
+
+                            // Call callback (if set)
+                            if let Some(ref cb) = callback {
+                                cb(&result, trial_num, total_trials);
+                            }
+
+                            results.lock().unwrap().push(result);
+                        }
+                        Err(e) => {
+                            eprintln!("Trial failed: {}", e);
+                        }
+                    }
+                });
+            });
+
+            results.into_inner().unwrap()
+        } else {
+            // Sequential evaluation for GPU backends or when parallel disabled
+            let mut results = Vec::with_capacity(candidates.len());
+
+            for params in candidates {
+                match self.evaluate_single(dataset, &params, iteration) {
+                    Ok(result) => {
+                        let trial_num = current_trial.fetch_add(1, Ordering::SeqCst) + 1;
+
+                        // Call callback
+                        if let Some(ref callback) = self.callback {
+                            callback(&result, trial_num, total_trials);
+                        }
+
+                        results.push(result);
+                    }
+                    Err(e) => {
+                        eprintln!("Trial failed: {}", e);
+                    }
+                }
+            }
+
+            results
         }
     }
 
@@ -944,5 +1133,318 @@ mod tests {
             let key = format!("{:?}", candidate);
             assert!(seen.insert(key), "Grid should have no duplicate candidates");
         }
+    }
+
+    #[test]
+    fn test_lhs_determinism() {
+        // Same seed should produce identical samples
+        let space = ParameterSpace::new()
+            .with_param("learning_rate", ParamBounds::log_continuous(0.01, 0.5), 0.1)
+            .with_param("max_depth", ParamBounds::discrete(2, 12), 6.0);
+
+        let tuner1 = AutoTuner::new(GBDTConfig::default())
+            .with_space(space.clone())
+            .with_seed(42);
+
+        let tuner2 = AutoTuner::new(GBDTConfig::default())
+            .with_space(space)
+            .with_seed(42);
+
+        let grid1 = tuner1.generate_lhs_grid(0.5, 10);
+        let grid2 = tuner2.generate_lhs_grid(0.5, 10);
+
+        assert_eq!(grid1.len(), grid2.len());
+        for (c1, c2) in grid1.iter().zip(grid2.iter()) {
+            for key in c1.keys() {
+                assert!(
+                    (c1[key] - c2[key]).abs() < 1e-6,
+                    "LHS should be deterministic with same seed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_lhs_sample_count() {
+        let space = ParameterSpace::new()
+            .with_param("learning_rate", ParamBounds::continuous(0.01, 0.5), 0.1)
+            .with_param("subsample", ParamBounds::continuous(0.5, 1.0), 0.8);
+
+        let tuner = AutoTuner::new(GBDTConfig::default())
+            .with_space(space)
+            .with_seed(123);
+
+        // Request 20 samples
+        let grid = tuner.generate_lhs_grid(1.0, 20);
+        assert_eq!(grid.len(), 20, "LHS should return exactly n_samples");
+
+        // Edge case: 0 samples
+        let empty = tuner.generate_lhs_grid(1.0, 0);
+        assert!(empty.is_empty(), "LHS with n_samples=0 should be empty");
+    }
+
+    #[test]
+    fn test_lhs_bounds_respected() {
+        let space = ParameterSpace::new()
+            .with_param("learning_rate", ParamBounds::continuous(0.01, 0.5), 0.1)
+            .with_param("max_depth", ParamBounds::discrete(2, 12), 6.0);
+
+        let tuner = AutoTuner::new(GBDTConfig::default())
+            .with_space(space)
+            .with_seed(999);
+
+        let grid = tuner.generate_lhs_grid(1.0, 50);
+
+        for candidate in &grid {
+            let lr = candidate["learning_rate"];
+            assert!(
+                lr >= 0.01 && lr <= 0.5,
+                "learning_rate {} out of bounds [0.01, 0.5]",
+                lr
+            );
+
+            let depth = candidate["max_depth"];
+            assert!(
+                depth >= 2.0 && depth <= 12.0,
+                "max_depth {} out of bounds [2, 12]",
+                depth
+            );
+        }
+    }
+
+    #[test]
+    fn test_lhs_stratification() {
+        // LHS should have good space-filling property
+        // Each stratum should be sampled exactly once
+        let space = ParameterSpace::new()
+            .with_param("x", ParamBounds::continuous(0.0, 1.0), 0.5);
+
+        let tuner = AutoTuner::new(GBDTConfig::default())
+            .with_space(space)
+            .with_seed(12345);
+
+        let n_samples = 10;
+        let grid = tuner.generate_lhs_grid(1.0, n_samples);
+
+        // Extract values and check stratum coverage
+        let values: Vec<f32> = grid.iter().map(|c| c["x"]).collect();
+
+        // Count how many samples fall into each stratum
+        let mut stratum_counts = vec![0; n_samples];
+        for &v in &values {
+            let stratum = (v * n_samples as f32).floor() as usize;
+            let stratum = stratum.min(n_samples - 1); // Handle edge case of v = 1.0
+            stratum_counts[stratum] += 1;
+        }
+
+        // Each stratum should have exactly one sample
+        for (i, &count) in stratum_counts.iter().enumerate() {
+            assert_eq!(
+                count, 1,
+                "Stratum {} should have exactly 1 sample, got {}",
+                i, count
+            );
+        }
+    }
+
+    #[test]
+    fn test_random_determinism() {
+        let space = ParameterSpace::new()
+            .with_param("learning_rate", ParamBounds::log_continuous(0.01, 0.5), 0.1)
+            .with_param("lambda", ParamBounds::continuous(0.0, 10.0), 1.0);
+
+        let tuner1 = AutoTuner::new(GBDTConfig::default())
+            .with_space(space.clone())
+            .with_seed(42);
+
+        let tuner2 = AutoTuner::new(GBDTConfig::default())
+            .with_space(space)
+            .with_seed(42);
+
+        let grid1 = tuner1.generate_random_grid(0.5, 15);
+        let grid2 = tuner2.generate_random_grid(0.5, 15);
+
+        assert_eq!(grid1.len(), grid2.len());
+        for (c1, c2) in grid1.iter().zip(grid2.iter()) {
+            for key in c1.keys() {
+                assert!(
+                    (c1[key] - c2[key]).abs() < 1e-6,
+                    "Random sampling should be deterministic with same seed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_random_sample_count() {
+        let space = ParameterSpace::minimal();
+        let tuner = AutoTuner::new(GBDTConfig::default())
+            .with_space(space)
+            .with_seed(777);
+
+        let grid = tuner.generate_random_grid(1.0, 25);
+        assert_eq!(grid.len(), 25, "Random should return exactly n_samples");
+
+        let empty = tuner.generate_random_grid(1.0, 0);
+        assert!(empty.is_empty(), "Random with n_samples=0 should be empty");
+    }
+
+    #[test]
+    fn test_random_bounds_respected() {
+        let space = ParameterSpace::new()
+            .with_param("subsample", ParamBounds::continuous(0.5, 1.0), 0.8)
+            .with_param("entropy_weight", ParamBounds::continuous(0.0, 0.5), 0.1);
+
+        let tuner = AutoTuner::new(GBDTConfig::default())
+            .with_space(space)
+            .with_seed(888);
+
+        let grid = tuner.generate_random_grid(1.0, 100);
+
+        for candidate in &grid {
+            let ss = candidate["subsample"];
+            assert!(
+                ss >= 0.5 && ss <= 1.0,
+                "subsample {} out of bounds [0.5, 1.0]",
+                ss
+            );
+
+            let ew = candidate["entropy_weight"];
+            assert!(
+                ew >= 0.0 && ew <= 0.5,
+                "entropy_weight {} out of bounds [0.0, 0.5]",
+                ew
+            );
+        }
+    }
+
+    #[test]
+    fn test_different_seeds_produce_different_results() {
+        let space = ParameterSpace::minimal();
+
+        let tuner1 = AutoTuner::new(GBDTConfig::default())
+            .with_space(space.clone())
+            .with_seed(1);
+
+        let tuner2 = AutoTuner::new(GBDTConfig::default())
+            .with_space(space)
+            .with_seed(2);
+
+        let grid1 = tuner1.generate_lhs_grid(1.0, 5);
+        let grid2 = tuner2.generate_lhs_grid(1.0, 5);
+
+        // At least one value should differ
+        let mut all_same = true;
+        for (c1, c2) in grid1.iter().zip(grid2.iter()) {
+            for key in c1.keys() {
+                if (c1[key] - c2[key]).abs() > 1e-6 {
+                    all_same = false;
+                    break;
+                }
+            }
+        }
+        assert!(!all_same, "Different seeds should produce different results");
+    }
+
+    #[test]
+    fn test_log_scale_sampling() {
+        // Verify log-scale parameters are sampled uniformly in log space
+        let space = ParameterSpace::new()
+            .with_param("learning_rate", ParamBounds::log_continuous(0.001, 1.0), 0.1);
+
+        let tuner = AutoTuner::new(GBDTConfig::default())
+            .with_space(space)
+            .with_seed(42);
+
+        let grid = tuner.generate_random_grid(1.0, 1000);
+        let values: Vec<f32> = grid.iter().map(|c| c["learning_rate"]).collect();
+
+        // Count how many are below vs above geometric mean
+        let geo_mean = (0.001_f32 * 1.0).sqrt(); // ~0.0316
+        let below = values.iter().filter(|&&v| v < geo_mean).count();
+        let above = values.iter().filter(|&&v| v >= geo_mean).count();
+
+        // Should be roughly 50/50 in log space
+        let ratio = below as f32 / (below + above) as f32;
+        assert!(
+            ratio > 0.4 && ratio < 0.6,
+            "Log-scale sampling should be balanced: ratio = {}",
+            ratio
+        );
+    }
+
+    #[test]
+    fn test_spread_affects_range() {
+        let space = ParameterSpace::new()
+            .with_param("x", ParamBounds::continuous(0.0, 1.0), 0.5);
+
+        let tuner = AutoTuner::new(GBDTConfig::default())
+            .with_space(space)
+            .with_seed(42);
+
+        // Wide spread
+        let wide = tuner.generate_random_grid(1.0, 100);
+        let wide_range: f32 = wide.iter().map(|c| c["x"]).fold(0.0_f32, |a, b| a.max(b))
+            - wide.iter().map(|c| c["x"]).fold(1.0_f32, |a, b| a.min(b));
+
+        // Narrow spread
+        let narrow = tuner.generate_random_grid(0.1, 100);
+        let narrow_range: f32 = narrow.iter().map(|c| c["x"]).fold(0.0_f32, |a, b| a.max(b))
+            - narrow.iter().map(|c| c["x"]).fold(1.0_f32, |a, b| a.min(b));
+
+        assert!(
+            wide_range > narrow_range,
+            "Larger spread should produce wider range: wide={}, narrow={}",
+            wide_range, narrow_range
+        );
+    }
+
+    #[test]
+    fn test_is_gpu_backend() {
+        // Test GPU backends are detected
+        let mut config = GBDTConfig::default();
+
+        config.backend_type = BackendType::Auto;
+        let tuner = AutoTuner::new(config.clone());
+        assert!(tuner.is_gpu_backend(), "Auto should be treated as GPU (conservative)");
+
+        config.backend_type = BackendType::Wgpu;
+        let tuner = AutoTuner::new(config.clone());
+        assert!(tuner.is_gpu_backend(), "WGPU is a GPU backend");
+
+        config.backend_type = BackendType::Cuda;
+        let tuner = AutoTuner::new(config.clone());
+        assert!(tuner.is_gpu_backend(), "CUDA is a GPU backend");
+
+        // Test CPU backends are not GPU
+        config.backend_type = BackendType::Scalar;
+        let tuner = AutoTuner::new(config.clone());
+        assert!(!tuner.is_gpu_backend(), "Scalar is a CPU backend");
+
+        config.backend_type = BackendType::Avx512;
+        let tuner = AutoTuner::new(config.clone());
+        assert!(!tuner.is_gpu_backend(), "AVX-512 is a CPU backend");
+
+        config.backend_type = BackendType::Sve2;
+        let tuner = AutoTuner::new(config);
+        assert!(!tuner.is_gpu_backend(), "SVE2 is a CPU backend");
+    }
+
+    #[test]
+    fn test_parallel_config_respected() {
+        // Test that parallel_trials setting is respected
+        let mut config = GBDTConfig::default();
+        config.backend_type = BackendType::Scalar; // CPU backend
+
+        let tuner_config = TunerConfig::new()
+            .with_parallel(true)
+            .with_n_parallel(4);
+
+        let tuner = AutoTuner::new(config)
+            .with_config(tuner_config);
+
+        // Verify settings are applied
+        assert!(tuner.config().parallel_trials);
+        assert_eq!(tuner.config().n_parallel, 4);
     }
 }
