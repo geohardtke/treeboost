@@ -1,5 +1,7 @@
 # TreeBoost
 
+![TreeBoost](images/treeboost.jpeg)
+
 > **High-performance GBDT for Rust. GPU-accelerated by default. Production-ready.**
 
 TreeBoost is a gradient boosted decision tree engine in pure Rust with automatic multi-backend hardware acceleration. Supports WGPU (all GPUs: NVIDIA, AMD, Intel, Apple), AVX-512, SVE2, with optimized scalar fallback. Works out of the box with zero configuration.
