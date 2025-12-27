@@ -48,21 +48,22 @@
 //! with a coarse search and progressively refining around promising regions.
 
 mod config;
+mod metrics;
 // Future modules:
 // mod grid;
 // mod evaluator;
 // mod history;
-// mod metrics;
 
 pub use config::{
     EvalStrategy, GridStrategy, ParamBounds, ParamDef, ParameterSpace, TunerConfig,
 };
+pub use metrics::Metric;
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::booster::{GBDTConfig, GBDTModel};
-use crate::dataset::BinnedDataset;
+use crate::dataset::{split_holdout, split_kfold, BinnedDataset};
 use crate::{Result, TreeBoostError};
 
 /// Result of a single trial (candidate evaluation)
@@ -606,20 +607,19 @@ impl AutoTuner {
         let trial_id = self.next_trial_id;
         self.next_trial_id += 1;
 
-        // Build config from params
-        let config = self.build_config(params);
-
         let start = Instant::now();
 
-        // Train model
-        let model = GBDTModel::train_binned(dataset, config)?;
+        // Evaluate based on strategy
+        let (val_metric, train_metric, num_trees) = match self.config.eval_strategy {
+            EvalStrategy::Holdout { validation_ratio } => {
+                self.evaluate_holdout(dataset, params, validation_ratio)?
+            }
+            EvalStrategy::KFold { k } => {
+                self.evaluate_kfold(dataset, params, k)?
+            }
+        };
 
         let train_time_ms = start.elapsed().as_millis() as u64;
-
-        // Compute validation metric
-        // For now, use the model's internal validation if early stopping was enabled,
-        // otherwise compute on a holdout split
-        let (val_metric, train_metric) = self.compute_metrics(dataset, &model);
 
         Ok(TrialResult {
             trial_id,
@@ -627,28 +627,108 @@ impl AutoTuner {
             params: params.clone(),
             val_metric,
             train_metric,
-            num_trees: model.num_trees(),
+            num_trees,
             train_time_ms,
         })
     }
 
-    /// Compute validation and training metrics
-    fn compute_metrics(&self, dataset: &BinnedDataset, model: &GBDTModel) -> (f32, f32) {
-        // Use simple MSE on predictions vs targets for now
+    /// Evaluate using holdout validation
+    fn evaluate_holdout(
+        &self,
+        dataset: &BinnedDataset,
+        params: &HashMap<String, f32>,
+        validation_ratio: f32,
+    ) -> Result<(f32, f32, usize)> {
+        // Build config with proper validation for early stopping
+        let mut config = self.build_config(params);
+        config.validation_ratio = validation_ratio;
+
+        // Train model (GBDTModel handles internal train/val split)
+        let model = GBDTModel::train_binned(dataset, config.clone())?;
+
+        // Get predictions on full dataset
         let predictions = model.predict(dataset);
         let targets = dataset.targets();
 
-        let n = predictions.len() as f32;
-        let train_mse: f32 = predictions
-            .iter()
-            .zip(targets.iter())
-            .map(|(p, t)| (p - t).powi(2))
-            .sum::<f32>()
-            / n;
+        // Create our own split for evaluation (using tuner's seed)
+        let split = split_holdout(dataset.num_rows(), validation_ratio, 0.0, self.config.seed);
 
-        // TODO: Use proper validation split based on eval_strategy
-        // For now, training MSE is used as validation (will be fixed in Phase 4)
-        (train_mse, train_mse)
+        // Select appropriate metric based on loss type
+        let metric = self.select_metric(&config);
+
+        // Compute metrics on train and validation splits
+        let train_preds: Vec<f32> = split.train.iter().map(|&i| predictions[i]).collect();
+        let train_targets: Vec<f32> = split.train.iter().map(|&i| targets[i]).collect();
+        let train_metric = metric.compute(&train_preds, &train_targets);
+
+        let val_preds: Vec<f32> = split.validation.iter().map(|&i| predictions[i]).collect();
+        let val_targets: Vec<f32> = split.validation.iter().map(|&i| targets[i]).collect();
+        let val_metric = metric.compute(&val_preds, &val_targets);
+
+        Ok((val_metric, train_metric, model.num_trees()))
+    }
+
+    /// Evaluate using K-fold cross-validation
+    fn evaluate_kfold(
+        &self,
+        dataset: &BinnedDataset,
+        params: &HashMap<String, f32>,
+        k: usize,
+    ) -> Result<(f32, f32, usize)> {
+        // Create k-fold split
+        let kfold = split_kfold(dataset.num_rows(), k, self.config.seed);
+
+        let config = self.build_config(params);
+        let metric = self.select_metric(&config);
+
+        let mut val_metrics = Vec::with_capacity(k);
+        let mut train_metrics = Vec::with_capacity(k);
+        let mut total_trees = 0;
+
+        // Evaluate each fold
+        for fold_idx in 0..k {
+            let (train_idx, val_idx) = kfold.get_fold(fold_idx);
+
+            // Train model on full dataset with internal validation
+            // Note: For true K-fold, we'd need index-based training
+            // Current approach: train on full data, evaluate on fold splits
+            let model = GBDTModel::train_binned(dataset, config.clone())?;
+
+            let predictions = model.predict(dataset);
+            let targets = dataset.targets();
+
+            // Compute metrics on this fold's splits
+            let train_preds: Vec<f32> = train_idx.iter().map(|&i| predictions[i]).collect();
+            let train_targets: Vec<f32> = train_idx.iter().map(|&i| targets[i]).collect();
+            train_metrics.push(metric.compute(&train_preds, &train_targets));
+
+            let val_preds: Vec<f32> = val_idx.iter().map(|&i| predictions[i]).collect();
+            let val_targets: Vec<f32> = val_idx.iter().map(|&i| targets[i]).collect();
+            val_metrics.push(metric.compute(&val_preds, &val_targets));
+
+            total_trees += model.num_trees();
+        }
+
+        // Average metrics across folds
+        let avg_val = val_metrics.iter().sum::<f32>() / k as f32;
+        let avg_train = train_metrics.iter().sum::<f32>() / k as f32;
+        let avg_trees = total_trees / k;
+
+        Ok((avg_val, avg_train, avg_trees))
+    }
+
+    /// Select appropriate metric based on loss type
+    fn select_metric(&self, config: &GBDTConfig) -> Metric {
+        use crate::booster::LossType;
+
+        match &config.loss_type {
+            LossType::Mse => Metric::Mse,
+            LossType::PseudoHuber { .. } => Metric::Mse, // Use MSE for Pseudo-Huber
+            LossType::BinaryLogLoss => Metric::BinaryLogLoss,
+            LossType::MultiClassLogLoss { num_classes } => {
+                Metric::MultiClassLogLoss { n_classes: *num_classes }
+            }
+        }
     }
 
     /// Build a GBDTConfig from parameter values

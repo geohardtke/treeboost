@@ -16,6 +16,7 @@ mod loader;
 pub mod packed;
 mod pipeline;
 mod reorder;
+pub mod split;
 
 pub use binned::{BinEntry, BinnedDataset, FeatureInfo, FeatureType, SparseColumn, DEFAULT_BIN, SPARSITY_THRESHOLD};
 pub use binner::{DatasetBinner, QuantileBinner, DEFAULT_NUM_BINS, MAX_BINS};
@@ -28,3 +29,4 @@ pub use pipeline::{CategoricalEncodingState, DataPipeline, PipelineConfig, Pipel
 pub use reorder::{
     reorder_dataset, AccessTracker, ColumnPermutation, OrderingStrategy, ReorderBuilder,
 };
+pub use split::{split_holdout, split_kfold, HoldoutSplit, KFoldSplit};

@@ -190,6 +190,10 @@ pub struct GBDTConfig {
     ///
     /// Requires passing `era_indices` to the training method.
     pub era_splitting: bool,
+
+    // Random seed for reproducibility
+    /// Random seed for train/validation splitting and subsampling
+    pub seed: u64,
 }
 
 impl Default for GBDTConfig {
@@ -253,6 +257,9 @@ impl Default for GBDTConfig {
 
             // Era-based splitting (disabled by default)
             era_splitting: false,
+
+            // Random seed (matches legacy hardcoded value for backwards compatibility)
+            seed: 123,
         }
     }
 }
@@ -574,6 +581,14 @@ impl GBDTConfig {
     /// ```
     pub fn with_era_splitting(mut self, enabled: bool) -> Self {
         self.era_splitting = enabled;
+        self
+    }
+
+    /// Set random seed for reproducibility
+    ///
+    /// Controls train/validation splitting and subsampling randomization.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
         self
     }
 

@@ -3,7 +3,7 @@
 #[cfg(any(feature = "cuda", feature = "gpu"))]
 use crate::backend::{BackendType, GpuMode};
 use crate::booster::GBDTConfig;
-use crate::dataset::{BinnedDataset, ColumnPermutation, FeatureInfo, FeatureType, QuantileBinner};
+use crate::dataset::{split_holdout, BinnedDataset, ColumnPermutation, FeatureInfo, FeatureType, QuantileBinner};
 use crate::loss::{sigmoid, softmax, MultiClassLogLoss};
 use crate::tree::{InteractionConstraints, Tree, TreeGrower};
 use crate::{Result, TreeBoostError};
@@ -296,12 +296,14 @@ impl GBDTModel {
         let targets = dataset.targets();
 
         // Split data for validation (early stopping) and conformal calibration
+        let split = split_holdout(
+            dataset.num_rows(),
+            config.validation_ratio,
+            config.calibration_ratio,
+            config.seed,
+        );
         let (train_indices, validation_indices, calibration_indices) =
-            Self::split_for_training(
-                dataset.num_rows(),
-                config.validation_ratio,
-                config.calibration_ratio,
-            );
+            (split.train, split.validation, split.calibration);
 
         // Compute base prediction from training data only
         let train_targets: Vec<f32> = train_indices.iter().map(|&i| targets[i]).collect();
@@ -642,11 +644,14 @@ impl GBDTModel {
         let multiclass_loss = MultiClassLogLoss::new(num_classes);
 
         // Split data for validation and calibration
-        let (train_indices, validation_indices, _calibration_indices) = Self::split_for_training(
+        let split = split_holdout(
             dataset.num_rows(),
             config.validation_ratio,
             config.calibration_ratio,
+            config.seed,
         );
+        let (train_indices, validation_indices, _calibration_indices) =
+            (split.train, split.validation, split.calibration);
 
         // Compute initial predictions per class from training data
         let train_targets: Vec<f32> = train_indices.iter().map(|&i| targets[i]).collect();
@@ -800,49 +805,6 @@ impl GBDTModel {
         }
 
         importances
-    }
-
-    /// Split data indices for training, validation, and calibration
-    ///
-    /// Returns (train_indices, validation_indices, calibration_indices)
-    ///
-    /// Note: After random selection, indices are sorted for cache-friendly sequential access.
-    /// This gives ~47% speedup in training while maintaining random train/val/calib split.
-    fn split_for_training(
-        num_rows: usize,
-        validation_ratio: f32,
-        calibration_ratio: f32,
-    ) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(123);
-        let mut indices: Vec<usize> = (0..num_rows).collect();
-        indices.shuffle(&mut rng);
-
-        // First split off calibration set
-        let n_calibration = if calibration_ratio > 0.0 {
-            ((num_rows as f32) * calibration_ratio).ceil() as usize
-        } else {
-            0
-        };
-        let mut calibration: Vec<usize> = indices.drain(..n_calibration).collect();
-
-        // Then split off validation set from remaining
-        let n_validation = if validation_ratio > 0.0 {
-            ((indices.len() as f32) * validation_ratio / (1.0 - calibration_ratio)).ceil() as usize
-        } else {
-            0
-        };
-        let mut validation: Vec<usize> = indices.drain(..n_validation).collect();
-
-        // Remaining is training set
-        let mut train = indices;
-
-        // Sort all index vectors for cache-friendly sequential access
-        // This maintains random selection but enables sequential memory access patterns
-        train.sort_unstable();
-        validation.sort_unstable();
-        calibration.sort_unstable();
-
-        (train, validation, calibration)
     }
 
     /// GOSS (Gradient-based One-Side Sampling) with buffer reuse
