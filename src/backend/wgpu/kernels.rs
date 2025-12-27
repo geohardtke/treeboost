@@ -175,9 +175,6 @@ pub struct HistogramKernel {
     pipeline_dense_4bit: ComputePipeline,
     pipeline_zero_4bit: ComputePipeline,
     bind_group_layout_dense_4bit: BindGroupLayout,
-    pipeline_batched_4bit: ComputePipeline,
-    pipeline_zero_batched_4bit: ComputePipeline,
-    bind_group_layout_batched_4bit: BindGroupLayout,
     /// Buffer pool for reusing allocations (Mutex for thread safety)
     buffer_pool: Mutex<BufferPool>,
     /// Whether subgroup operations are available on hardware
@@ -244,20 +241,7 @@ impl HistogramKernel {
             "zero_histograms_4bit",
         );
 
-        let pipeline_batched_4bit = device.create_compute_pipeline(
-            "histogram_batched_4bit_pipeline",
-            shader_source_4bit,
-            "histogram_batched_4bit",
-        );
-
-        let pipeline_zero_batched_4bit = device.create_compute_pipeline(
-            "zero_histograms_batched_4bit_pipeline",
-            shader_source_4bit,
-            "zero_histograms_batched_4bit",
-        );
-
         let bind_group_layout_dense_4bit = pipeline_dense_4bit.get_bind_group_layout(0);
-        let bind_group_layout_batched_4bit = pipeline_batched_4bit.get_bind_group_layout(0);
 
         // Check for subgroup support and create optimized pipelines if available
         // Note: Even if the device reports SUBGROUP support, the WGSL compiler may not
@@ -311,9 +295,6 @@ impl HistogramKernel {
             pipeline_dense_4bit,
             pipeline_zero_4bit,
             bind_group_layout_dense_4bit,
-            pipeline_batched_4bit,
-            pipeline_zero_batched_4bit,
-            bind_group_layout_batched_4bit,
             buffer_pool: Mutex::new(BufferPool::new()),
             subgroups_supported,
             use_subgroups: std::sync::atomic::AtomicBool::new(false), // Disabled by default

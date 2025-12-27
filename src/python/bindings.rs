@@ -30,7 +30,7 @@ use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::backend::BackendType;
+use crate::backend::{BackendType, GpuMode};
 use crate::booster::{GBDTConfig, GBDTModel, LossType};
 use crate::serialize;
 use crate::tree::MonotonicConstraint;
@@ -45,14 +45,9 @@ pub struct PyGBDTConfig {
 #[pymethods]
 impl PyGBDTConfig {
     /// Create a new configuration with default values
-    ///
-    /// Note: Python bindings enable GPU subgroups by default (unlike Rust).
     #[new]
     fn new() -> Self {
-        let mut config = GBDTConfig::default();
-        // Enable subgroups by default for Python (may help on some GPUs)
-        config.use_gpu_subgroups = true;
-        Self { inner: config }
+        Self { inner: GBDTConfig::default() }
     }
 
     // Ensemble parameters
@@ -321,43 +316,80 @@ impl PyGBDTConfig {
         self.inner.use_gpu_subgroups = value;
     }
 
-    /// Force GPU backend for histogram building (requires gpu feature)
-    ///
-    /// GPU provides 3-12x speedup for datasets with 5K+ rows.
-    /// Falls back to CPU if GPU is unavailable.
-    fn use_gpu(&mut self) {
-        self.inner.backend_type = BackendType::Wgpu;
-    }
-
-    /// Force CPU backend for histogram building
-    ///
-    /// Uses AVX2/NEON optimized scalar implementation.
-    /// Best for small datasets (<5K rows) or reproducibility.
-    fn use_cpu(&mut self) {
-        self.inner.backend_type = BackendType::Scalar;
-    }
-
-    /// Use automatic backend selection (default)
-    ///
-    /// Automatically selects GPU for large datasets (>=10K rows)
-    /// and CPU for smaller datasets where GPU overhead isn't worth it.
-    fn use_auto(&mut self) {
-        self.inner.backend_type = BackendType::Auto;
-    }
-
     /// Get current backend type as string
     #[getter]
     fn backend(&self) -> &'static str {
         match self.inner.backend_type {
             BackendType::Auto => "auto",
             BackendType::Scalar => "cpu",
-            BackendType::Wgpu => "gpu",
+            BackendType::Wgpu => "wgpu",
             BackendType::Avx512 => "avx512",
             BackendType::Sve2 => "sve2",
             BackendType::Cuda => "cuda",
             BackendType::Rocm => "rocm",
             BackendType::Metal => "metal",
         }
+    }
+
+    /// Set the backend for histogram building
+    ///
+    /// Args:
+    ///     value: One of "auto", "cpu", "gpu", "wgpu", "cuda"
+    ///         - "auto": Select best available (CUDA > WGPU > CPU)
+    ///         - "cpu": Force CPU (AVX2/NEON optimized)
+    ///         - "gpu": Select best GPU (CUDA > WGPU), same as "auto"
+    ///         - "wgpu": Force WGPU (all GPUs via Vulkan/Metal/DX12)
+    ///         - "cuda": Force CUDA (NVIDIA only, fastest)
+    ///
+    /// Example:
+    ///     config.backend = "cuda"
+    #[setter]
+    fn set_backend(&mut self, value: &str) -> PyResult<()> {
+        self.inner.backend_type = match value.to_lowercase().as_str() {
+            "auto" | "gpu" => BackendType::Auto,  // gpu = auto-select best GPU (CUDA > WGPU)
+            "cpu" | "scalar" => BackendType::Scalar,
+            "wgpu" => BackendType::Wgpu,
+            "cuda" => BackendType::Cuda,
+            "rocm" => BackendType::Rocm,
+            "metal" => BackendType::Metal,
+            _ => return Err(PyValueError::new_err(
+                "backend must be one of: 'auto', 'cpu', 'gpu', 'wgpu', 'cuda', 'rocm', 'metal'"
+            )),
+        };
+        Ok(())
+    }
+
+    /// Get current GPU mode as string
+    #[getter]
+    fn gpu_mode(&self) -> &'static str {
+        match self.inner.gpu_mode {
+            GpuMode::Auto => "auto",
+            GpuMode::Hybrid => "hybrid",
+            GpuMode::Full => "full",
+        }
+    }
+
+    /// Set the GPU execution mode
+    ///
+    /// Args:
+    ///     value: One of "auto", "hybrid", "full"
+    ///         - "auto": Select optimal mode per backend (CUDA→Full, WGPU→Hybrid)
+    ///         - "hybrid": GPU histogram + CPU partition (best-first tree growth)
+    ///         - "full": Full GPU pipeline (level-wise tree growth)
+    ///
+    /// Example:
+    ///     config.gpu_mode = "full"
+    #[setter]
+    fn set_gpu_mode(&mut self, value: &str) -> PyResult<()> {
+        self.inner.gpu_mode = match value.to_lowercase().as_str() {
+            "auto" => GpuMode::Auto,
+            "hybrid" => GpuMode::Hybrid,
+            "full" => GpuMode::Full,
+            _ => return Err(PyValueError::new_err(
+                "gpu_mode must be one of: 'auto', 'hybrid', 'full'"
+            )),
+        };
+        Ok(())
     }
 
     // Monotonic constraints
@@ -408,12 +440,13 @@ impl PyGBDTConfig {
 
     fn __repr__(&self) -> String {
         format!(
-            "GBDTConfig(num_rounds={}, learning_rate={}, max_depth={}, max_leaves={}, backend='{}')",
+            "GBDTConfig(num_rounds={}, learning_rate={}, max_depth={}, max_leaves={}, backend='{}', gpu_mode='{}')",
             self.inner.num_rounds,
             self.inner.learning_rate,
             self.inner.max_depth,
             self.inner.max_leaves,
-            self.backend()
+            self.backend(),
+            self.gpu_mode()
         )
     }
 }

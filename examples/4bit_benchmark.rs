@@ -5,7 +5,6 @@
 use std::time::{Duration, Instant};
 
 use treeboost::backend::wgpu::WgpuBackend;
-use treeboost::backend::BinStorage;
 use treeboost::backend::HistogramBackend;
 use treeboost::dataset::{BinnedDataset, FeatureInfo, FeatureType};
 
@@ -30,6 +29,7 @@ fn create_dataset(num_rows: usize, num_features: usize, max_bins: u8) -> BinnedD
     BinnedDataset::new(num_rows, features, targets, feature_info)
 }
 
+#[allow(dead_code)]
 fn benchmark<F>(name: &str, iterations: usize, mut f: F) -> Duration
 where
     F: FnMut(),

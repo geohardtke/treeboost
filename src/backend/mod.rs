@@ -4,10 +4,12 @@
 //! building operations, enabling different hardware backends:
 //!
 //! - **Scalar**: CPU implementation (AVX2/NEON loads)
-//! - **WGPU**: GPU via Vulkan/Metal/DX12 (all GPU vendors)
+//! - **WGPU**: GPU via Vulkan/Metal/DX12 (all GPU vendors, portable)
+//! - **CUDA**: Native NVIDIA GPU (extreme performance, 10-100μs dispatch)
 //! - **AVX-512**: Tensor-tile with vpconflictd (future)
 //! - **SVE2**: ARM tensor-tile with HISTCNT (future)
-//! - **Native**: CUDA, ROCm, Metal direct (future extreme optimization)
+//! - **ROCm**: AMD GPU direct (future)
+//! - **Metal**: Apple GPU direct (future)
 
 mod config;
 pub mod scalar;
@@ -16,12 +18,18 @@ mod traits;
 #[cfg(feature = "gpu")]
 pub mod wgpu;
 
-pub use config::{BackendConfig, BackendType};
+#[cfg(feature = "cuda")]
+pub mod cuda;
+
+pub use config::{BackendConfig, BackendType, GpuMode};
 pub use scalar::ScalarBackend;
 pub use traits::{BinStorage, HistogramBackend, SparseColumn, SplitCandidate, SplitConfig};
 
 #[cfg(feature = "gpu")]
 pub use wgpu::WgpuBackend;
+
+#[cfg(feature = "cuda")]
+pub use cuda::CudaBackend;
 
 /// Backend selector for choosing the best available backend.
 ///
@@ -74,7 +82,15 @@ impl BackendSelector {
 
     /// Detect the best available backend.
     fn detect_best(&self) -> Box<dyn HistogramBackend> {
-        // Priority order: GPU > AVX-512 > SVE2 > Scalar
+        // Priority order: CUDA > WGPU > AVX-512 > SVE2 > Scalar
+
+        // Try CUDA first (NVIDIA-only but fastest: 10-100μs dispatch)
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(backend) = cuda::CudaBackend::new() {
+                return Box::new(backend);
+            }
+        }
 
         // Try WGPU (covers all GPUs via Vulkan/Metal/DX12)
         #[cfg(feature = "gpu")]
@@ -126,11 +142,17 @@ impl BackendSelector {
     }
 
     fn try_cuda_or_fallback(&self) -> Box<dyn HistogramBackend> {
-        // TODO: Implement native CUDA backend
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(backend) = cuda::CudaBackend::new() {
+                return Box::new(backend);
+            }
+        }
+
         if self.config.fallback_to_scalar {
             Box::new(ScalarBackend::new())
         } else {
-            panic!("CUDA backend not yet implemented")
+            panic!("CUDA backend requested but not available (no NVIDIA GPU or 'cuda' feature disabled)")
         }
     }
 
@@ -188,10 +210,10 @@ mod tests {
         let selector = BackendSelector::new();
         // Large dataset - uses GPU if available, otherwise scalar
         let backend = selector.select(100_000);
-        // Accept either WGPU or Scalar depending on GPU availability
+        // Accept CUDA, WGPU, or Scalar depending on GPU availability
         assert!(
-            backend.name() == "WGPU" || backend.name().starts_with("Scalar"),
-            "Expected WGPU or Scalar, got: {}",
+            backend.name() == "CUDA" || backend.name() == "WGPU" || backend.name().starts_with("Scalar"),
+            "Expected CUDA, WGPU, or Scalar, got: {}",
             backend.name()
         );
     }
@@ -211,8 +233,8 @@ mod tests {
         // Uses GPU if available, otherwise falls back to scalar
         let backend = selector.select(100_000);
         assert!(
-            backend.name() == "WGPU" || backend.name().starts_with("Scalar"),
-            "Expected WGPU or Scalar, got: {}",
+            backend.name() == "CUDA" || backend.name() == "WGPU" || backend.name().starts_with("Scalar"),
+            "Expected CUDA, WGPU, or Scalar, got: {}",
             backend.name()
         );
     }

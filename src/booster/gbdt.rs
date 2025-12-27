@@ -1,5 +1,7 @@
 //! GBDT model and training
 
+#[cfg(any(feature = "cuda", feature = "gpu"))]
+use crate::backend::{BackendType, GpuMode};
 use crate::booster::GBDTConfig;
 use crate::dataset::{BinnedDataset, ColumnPermutation, FeatureInfo, FeatureType, QuantileBinner};
 use crate::tree::{InteractionConstraints, Tree, TreeGrower};
@@ -8,6 +10,12 @@ use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rayon::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
+
+#[cfg(feature = "cuda")]
+use crate::backend::cuda::FullCudaTreeBuilder;
+
+#[cfg(feature = "gpu")]
+use crate::backend::wgpu::FullGpuTreeBuilder;
 
 /// Trained GBDT model
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
@@ -184,7 +192,7 @@ impl GBDTModel {
             .with_colsample(config.colsample)
             .with_monotonic_constraints(config.monotonic_constraints.clone())
             .with_interaction_constraints(interaction_constraints)
-            .with_backend(config.backend_type.clone())
+            .with_backend(config.backend_type)
             .with_gpu_subgroups(config.use_gpu_subgroups);
 
         let mut trees = Vec::with_capacity(config.num_rounds);
@@ -212,21 +220,116 @@ impl GBDTModel {
         // Determine if we can use fused gradient+histogram (no subsampling)
         let use_fused = !config.goss_enabled && config.subsample >= 1.0;
 
+        // Determine if Full GPU mode should be used
+        // Requires: no subsampling, no GOSS, GPU backend, Full mode resolves
+        #[cfg(any(feature = "cuda", feature = "gpu"))]
+        let use_full_gpu = {
+            let resolved_mode = config.gpu_mode.resolve(config.backend_type);
+            use_fused && matches!(resolved_mode, GpuMode::Full)
+        };
+
+        // Create Full GPU builder if needed
+        #[cfg(feature = "cuda")]
+        let mut cuda_builder: Option<FullCudaTreeBuilder> = if use_full_gpu
+            && matches!(config.backend_type, BackendType::Cuda | BackendType::Auto)
+        {
+            use crate::backend::cuda::CudaDevice;
+            CudaDevice::new().map(|d| FullCudaTreeBuilder::new(std::sync::Arc::new(d)))
+        } else {
+            None
+        };
+
+        #[cfg(feature = "gpu")]
+        let mut wgpu_builder: Option<FullGpuTreeBuilder> = if use_full_gpu
+            && matches!(config.backend_type, BackendType::Wgpu)
+            && {
+                #[cfg(feature = "cuda")]
+                {
+                    cuda_builder.is_none() // Only use WGPU if CUDA not available
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    true
+                }
+            }
+        {
+            use crate::backend::wgpu::GpuDevice;
+            GpuDevice::new().map(|d| FullGpuTreeBuilder::new(std::sync::Arc::new(d)))
+        } else {
+            None
+        };
+
         for _round in 0..config.num_rounds {
-            // Grow tree - either fused or separate gradient+histogram paths
-            let tree = if use_fused {
-                // FUSED PATH: Compute gradients AND build root histogram in single pass
-                // This eliminates cache pollution for ~40-80% speedup on large datasets
-                tree_grower.grow_fused(
-                    dataset,
-                    &train_indices,
-                    targets,
-                    &predictions,
-                    loss_fn.as_ref(),
-                    &mut gradients,
-                    &mut hessians,
-                )
-            } else {
+            // Grow tree - either fused, Full GPU, or separate gradient+histogram paths
+            #[allow(unused_mut, unused_assignments)]
+            let mut tree: Option<Tree> = None;
+
+            // Try Full GPU builders first (level-wise growth, all-GPU pipeline)
+            #[cfg(feature = "cuda")]
+            if tree.is_none() {
+                if let Some(ref mut builder) = cuda_builder {
+                    // Compute gradients for this round
+                    for &idx in &train_indices {
+                        let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
+                        gradients[idx] = g;
+                        hessians[idx] = h;
+                    }
+                    tree = Some(builder.build_tree(
+                        dataset,
+                        &gradients,
+                        &hessians,
+                        &train_indices,
+                        config.max_depth,
+                        config.max_leaves,
+                        config.lambda,
+                        config.min_samples_leaf,
+                        config.min_hessian_leaf,
+                        config.min_gain,
+                        config.learning_rate,
+                    ));
+                }
+            }
+
+            #[cfg(feature = "gpu")]
+            if tree.is_none() {
+                if let Some(ref mut builder) = wgpu_builder {
+                    // Compute gradients for this round
+                    for &idx in &train_indices {
+                        let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
+                        gradients[idx] = g;
+                        hessians[idx] = h;
+                    }
+                    tree = Some(builder.build_tree(
+                        dataset,
+                        &gradients,
+                        &hessians,
+                        &train_indices,
+                        config.max_depth,
+                        config.max_leaves,
+                        config.lambda,
+                        config.min_samples_leaf,
+                        config.min_hessian_leaf,
+                        config.min_gain,
+                        config.learning_rate,
+                    ));
+                }
+            }
+
+            // Fall back to TreeGrower (Hybrid mode or CPU)
+            let tree = tree.unwrap_or_else(|| {
+                if use_fused {
+                    // FUSED PATH: Compute gradients AND build root histogram in single pass
+                    // This eliminates cache pollution for ~40-80% speedup on large datasets
+                    tree_grower.grow_fused(
+                        dataset,
+                        &train_indices,
+                        targets,
+                        &predictions,
+                        loss_fn.as_ref(),
+                        &mut gradients,
+                        &mut hessians,
+                    )
+                } else {
                 // SEPARATE PATH: Compute gradients first, then build histogram
                 // Required for GOSS (needs all gradients for sampling) and random subsampling
 
@@ -279,7 +382,8 @@ impl GBDTModel {
 
                 // Grow tree using the selected training indices
                 tree_grower.grow_with_indices(dataset, &gradients, &hessians, tree_indices)
-            };
+                }
+            });
 
             // Update predictions using tree-wise batch prediction
             // This is more cache-friendly than row-wise and avoids intermediate allocation

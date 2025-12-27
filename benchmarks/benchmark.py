@@ -208,7 +208,7 @@ def train_treeboost_cpu(
     config.parallel_prediction = True
     config.column_reordering = True
     config.packed_dataset = True
-    config.use_cpu()  # Force CPU backend
+    config.backend = "cpu"
     return GBDTModel.train(X_train, y_train, config)
 
 
@@ -219,7 +219,7 @@ def train_treeboost_gpu(
     max_depth: int,
     learning_rate: float,
 ) -> Any:
-    """Train TreeBoost model (GPU backend)."""
+    """Train TreeBoost model (GPU backend, auto-selects CUDA > WGPU)."""
     config = GBDTConfig()
     config.num_rounds = n_rounds
     config.max_depth = max_depth
@@ -228,7 +228,7 @@ def train_treeboost_gpu(
     config.parallel_prediction = True
     config.column_reordering = True
     config.packed_dataset = True
-    config.use_gpu()  # Force GPU backend
+    config.backend = "gpu"  # Auto-select best GPU (CUDA > WGPU)
     return GBDTModel.train(X_train, y_train, config)
 
 

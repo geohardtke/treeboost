@@ -1,6 +1,6 @@
 //! GBDT training configuration
 
-use crate::backend::BackendType;
+use crate::backend::{BackendType, GpuMode};
 use crate::dataset::OrderingStrategy;
 use crate::loss::{LossFunction, MseLoss, PseudoHuberLoss};
 use crate::tree::MonotonicConstraint;
@@ -110,6 +110,18 @@ pub struct GBDTConfig {
     #[rkyv(with = rkyv::with::Skip)]
     pub backend_type: BackendType,
 
+    /// GPU execution mode for GPU backends (default: Auto).
+    ///
+    /// - `Auto`: Automatically select optimal mode per backend
+    ///   - CUDA: Full (low dispatch latency makes it worthwhile)
+    ///   - WGPU: Hybrid (high dispatch latency makes Full slower)
+    /// - `Hybrid`: GPU histogram + CPU partition/split (best-first tree growth)
+    /// - `Full`: Full GPU pipeline with level-wise tree growth
+    ///
+    /// Ignored when using CPU-only backends (Scalar, AVX-512, SVE2).
+    #[rkyv(with = rkyv::with::Skip)]
+    pub gpu_mode: GpuMode,
+
     /// Enable GPU subgroup operations for histogram building (default: false)
     ///
     /// Subgroups can reduce atomic contention when multiple threads write to the same
@@ -178,6 +190,7 @@ impl Default for GBDTConfig {
 
             // Backend selection (Auto = GPU for large datasets, CPU otherwise)
             backend_type: BackendType::Auto,
+            gpu_mode: GpuMode::Auto, // Auto-select: CUDA→Full, WGPU→Hybrid
             use_gpu_subgroups: false, // Disabled by default (minimal benefit on modern NVIDIA)
 
             // Monotonic constraints
@@ -351,6 +364,34 @@ impl GBDTConfig {
     /// ```
     pub fn with_backend(mut self, backend_type: BackendType) -> Self {
         self.backend_type = backend_type;
+        self
+    }
+
+    /// Set the GPU execution mode
+    ///
+    /// # GPU Modes
+    /// - `Auto` (default): Automatically select optimal mode per backend
+    ///   - CUDA: Full (low dispatch latency)
+    ///   - WGPU: Hybrid (high dispatch latency makes Full slower)
+    /// - `Hybrid`: GPU histogram + CPU partition/split (best-first tree growth)
+    /// - `Full`: Full GPU pipeline with level-wise tree growth
+    ///
+    /// # Example
+    /// ```ignore
+    /// use treeboost::{GBDTConfig, BackendType, GpuMode};
+    ///
+    /// // Force full GPU mode for CUDA (level-wise tree growth)
+    /// let config = GBDTConfig::new()
+    ///     .with_backend(BackendType::Cuda)
+    ///     .with_gpu_mode(GpuMode::Full);
+    ///
+    /// // Force hybrid mode (best-first tree growth with GPU histograms)
+    /// let config = GBDTConfig::new()
+    ///     .with_backend(BackendType::Wgpu)
+    ///     .with_gpu_mode(GpuMode::Hybrid);
+    /// ```
+    pub fn with_gpu_mode(mut self, mode: GpuMode) -> Self {
+        self.gpu_mode = mode;
         self
     }
 

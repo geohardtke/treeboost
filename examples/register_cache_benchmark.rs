@@ -16,6 +16,7 @@ struct HistogramParams {
     num_batches: u32,
 }
 
+#[allow(dead_code)]
 struct ShaderBenchmark {
     device: wgpu::Device,
     queue: wgpu::Queue,

@@ -1,10 +1,61 @@
 //! Backend configuration types.
 
+/// GPU execution mode for GPU backends.
+///
+/// This setting controls how much work is offloaded to the GPU.
+/// Ignored when using CPU-only backends (Scalar, AVX-512, SVE2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpuMode {
+    /// Automatically select optimal mode based on backend.
+    ///
+    /// - CUDA: Uses Full mode (low dispatch latency makes it worthwhile)
+    /// - WGPU: Uses Hybrid mode (high dispatch latency makes Full slower)
+    #[default]
+    Auto,
+
+    /// GPU histogram + CPU partition/split (best-first tree growth).
+    ///
+    /// Uses GPU for the expensive histogram building, but keeps partition
+    /// and split-finding on CPU. Best-first tree growth produces higher
+    /// quality trees. Recommended for WGPU due to dispatch overhead.
+    Hybrid,
+
+    /// Full GPU: histogram + partition + split (level-wise tree growth).
+    ///
+    /// Keeps all data on GPU, minimizing PCIe transfers. Uses level-wise
+    /// tree growth which processes all nodes at each depth level together.
+    /// Recommended for CUDA where dispatch overhead is minimal.
+    Full,
+}
+
+impl GpuMode {
+    /// Resolve Auto mode to the optimal concrete mode for a given backend.
+    ///
+    /// - CUDA: Full (low dispatch latency)
+    /// - WGPU/ROCm/Metal: Hybrid (high dispatch latency)
+    pub fn resolve(self, backend: BackendType) -> GpuMode {
+        match self {
+            GpuMode::Auto => match backend {
+                BackendType::Cuda => GpuMode::Full,
+                BackendType::Wgpu | BackendType::Rocm | BackendType::Metal => GpuMode::Hybrid,
+                // Non-GPU backends don't use gpu_mode, but default to Hybrid
+                _ => GpuMode::Hybrid,
+            },
+            other => other,
+        }
+    }
+
+    /// Check if this mode uses full GPU pipeline (level-wise tree growth).
+    pub fn is_full(self, backend: BackendType) -> bool {
+        matches!(self.resolve(backend), GpuMode::Full)
+    }
+}
+
 /// Available backend types for histogram building.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BackendType {
     /// Automatically detect the best available backend.
-    /// Priority: WGPU > AVX-512 > SVE2 > Scalar
+    /// Priority: CUDA > WGPU > AVX-512 > SVE2 > Scalar
     #[default]
     Auto,
 
@@ -61,6 +112,11 @@ pub struct BackendConfig {
     /// Preferred backend type.
     pub preferred: BackendType,
 
+    /// GPU execution mode (Hybrid or Full).
+    /// Only applies to GPU backends (WGPU, CUDA, ROCm, Metal).
+    /// Default: Hybrid (GPU histogram + CPU partition/split)
+    pub gpu_mode: GpuMode,
+
     /// Whether to fall back to scalar if preferred backend is unavailable.
     pub fallback_to_scalar: bool,
 
@@ -86,6 +142,7 @@ impl Default for BackendConfig {
     fn default() -> Self {
         Self {
             preferred: BackendType::Auto,
+            gpu_mode: GpuMode::default(),
             fallback_to_scalar: true,
             tensor_tile_min_rows: 10_000,
             gpu_batch_size: 32,
@@ -95,10 +152,16 @@ impl Default for BackendConfig {
 }
 
 impl BackendConfig {
+    /// Create a new config with default settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Create config that always uses scalar backend.
     pub fn scalar() -> Self {
         Self {
             preferred: BackendType::Scalar,
+            gpu_mode: GpuMode::Hybrid,
             fallback_to_scalar: true,
             tensor_tile_min_rows: usize::MAX,
             gpu_batch_size: 32,
@@ -107,14 +170,36 @@ impl BackendConfig {
     }
 
     /// Create config that prefers GPU if available.
+    ///
+    /// Uses `GpuMode::Auto` which selects:
+    /// - CUDA: Full mode (low dispatch latency)
+    /// - WGPU: Hybrid mode (high dispatch latency)
     pub fn prefer_gpu() -> Self {
         Self {
             preferred: BackendType::Wgpu,
+            gpu_mode: GpuMode::Auto,
             fallback_to_scalar: true,
             tensor_tile_min_rows: 10_000,
             gpu_batch_size: 32,
             use_gpu_subgroups: false,
         }
+    }
+
+    /// Set the preferred backend type.
+    pub fn with_backend(mut self, backend: BackendType) -> Self {
+        self.preferred = backend;
+        self
+    }
+
+    /// Set the GPU execution mode.
+    ///
+    /// - `GpuMode::Hybrid` (default): GPU histogram + CPU partition/split
+    /// - `GpuMode::Full`: Full GPU with level-wise tree growth
+    ///
+    /// Only affects GPU backends (WGPU, CUDA, ROCm, Metal).
+    pub fn with_gpu_mode(mut self, mode: GpuMode) -> Self {
+        self.gpu_mode = mode;
+        self
     }
 
     /// Set the GPU batch size for histogram building.

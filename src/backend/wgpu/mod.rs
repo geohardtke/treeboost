@@ -3,21 +3,16 @@
 //! Provides GPU-accelerated histogram construction using WebGPU,
 //! supporting all major GPU vendors through Vulkan, Metal, and DX12.
 //!
-//! # Performance Characteristics
-//!
-//! | Dataset Size | Expected Speedup |
-//! |-------------|------------------|
-//! | 10K rows    | 0.3x (slower)    |
-//! | 100K rows   | 3-5x             |
-//! | 1M rows     | 10-20x           |
-//! | 10M rows    | 20-50x           |
-//!
-//! Breakeven point: ~50K rows
 
 pub mod device;
+pub mod full_gpu;
 pub mod kernels;
+pub mod partition;
 
+pub use device::GpuDevice;
+pub use full_gpu::FullGpuTreeBuilder;
 pub use kernels::GpuProfileData;
+pub use partition::{NodeSplit, PartitionKernel, PartitionResult};
 
 use std::sync::Arc;
 
@@ -26,7 +21,6 @@ use crate::backend::traits::{BinStorage, HistogramBackend, SplitCandidate, Split
 use crate::histogram::Histogram;
 use crate::kernel;
 
-use device::GpuDevice;
 use kernels::HistogramKernel;
 
 /// WGPU GPU backend for histogram building.
@@ -436,9 +430,7 @@ mod tests {
         let dataset = create_test_dataset(256, 4);
 
         // Generate gradients and hessians
-        let grad_hess: Vec<(f32, f32)> = (0..256)
-            .map(|i| (i as f32 * 0.1, 1.0))
-            .collect();
+        let grad_hess: Vec<(f32, f32)> = (0..256).map(|i| (i as f32 * 0.1, 1.0)).collect();
 
         // Use all rows
         let row_indices: Vec<usize> = (0..256).collect();
@@ -654,9 +646,7 @@ mod tests {
         assert!(dataset.max_bins() <= 16);
 
         // Generate gradients and hessians
-        let grad_hess: Vec<(f32, f32)> = (0..num_rows)
-            .map(|i| (i as f32 * 0.01, 1.0))
-            .collect();
+        let grad_hess: Vec<(f32, f32)> = (0..num_rows).map(|i| (i as f32 * 0.01, 1.0)).collect();
 
         // Use all rows
         let row_indices: Vec<usize> = (0..num_rows).collect();

@@ -706,7 +706,7 @@ mod tests {
     #[test]
     fn test_4bit_packing() {
         let num_rows = 4;
-        let num_features = 3; // Odd number to test padding
+        let _num_features = 3; // Odd number to test padding
 
         // Column-major: feature 0 = [1,2,3,4], feature 1 = [5,6,7,8], feature 2 = [9,10,11,12]
         // All values <= 15, so 4-bit packing is supported

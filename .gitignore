@@ -107,3 +107,4 @@ wheels/
 .installed.cfg
 *.egg
 .python-version
+.venvs

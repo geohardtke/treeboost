@@ -266,7 +266,7 @@ impl Clone for TreeGrower {
             colsample: self.colsample,
             monotonic_constraints: self.monotonic_constraints.clone(),
             interaction_constraints: self.interaction_constraints.clone(),
-            backend_type: self.backend_type.clone(),
+            backend_type: self.backend_type,
             gpu_batch_size: self.gpu_batch_size,
             use_gpu_subgroups: self.use_gpu_subgroups,
             // Reset cached backend - clone gets its own lazily initialized backend
@@ -353,6 +353,11 @@ impl TreeGrower {
         self
     }
 
+    /// Get the configured backend type
+    pub fn backend_type(&self) -> BackendType {
+        self.backend_type
+    }
+
     /// Set the GPU batch size for histogram dispatch
     ///
     /// When using GPU backend, multiple small histogram builds are batched together
@@ -381,7 +386,7 @@ impl TreeGrower {
         let mut cached = self.cached_backend.borrow_mut();
         if cached.is_none() {
             let config = BackendConfig {
-                preferred: self.backend_type.clone(),
+                preferred: self.backend_type,
                 use_gpu_subgroups: self.use_gpu_subgroups,
                 ..Default::default()
             };

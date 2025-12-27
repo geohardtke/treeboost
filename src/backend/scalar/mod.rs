@@ -38,7 +38,9 @@ impl ScalarBackend {
 
     /// Create a scalar backend with a specific thread count.
     pub fn with_threads(num_threads: usize) -> Self {
-        Self { _num_threads: num_threads }
+        Self {
+            _num_threads: num_threads,
+        }
     }
 }
 
@@ -172,6 +174,7 @@ impl HistogramBackend for ScalarBackend {
 mod tests {
     use super::*;
 
+    #[allow(dead_code)]
     struct MockBinStorage {
         bins: Vec<Vec<u8>>,
         num_rows: usize,

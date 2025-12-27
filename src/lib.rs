@@ -52,7 +52,7 @@ pub use backend::scalar::kernel;
 mod python;
 
 // Re-exports for convenience
-pub use backend::{BackendConfig, BackendSelector, BackendType, HistogramBackend};
+pub use backend::{BackendConfig, BackendSelector, BackendType, GpuMode, HistogramBackend};
 pub use booster::{GBDTConfig, GBDTModel};
 pub use dataset::{BinnedDataset, FeatureInfo, FeatureType, QuantileBinner};
 pub use histogram::HistogramBuilder;

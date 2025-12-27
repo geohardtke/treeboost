@@ -1,0 +1,622 @@
+//! CUDA histogram kernel implementation.
+
+use super::device::CudaDevice;
+use crate::histogram::Histogram;
+use cudarc::driver::{CudaFunction, CudaModule, CudaSlice, LaunchConfig, PushKernelArg};
+use cudarc::nvrtc::compile_ptx;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
+/// Cache key for bins data (hash-based).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CacheKey(u64);
+
+impl CacheKey {
+    pub(crate) fn from_slice(data: &[u8]) -> Self {
+        let mut hasher = DefaultHasher::new();
+        data.len().hash(&mut hasher);
+        // Hash first, middle, and last chunks for speed
+        if !data.is_empty() {
+            let chunk_size = 1024.min(data.len());
+            data[..chunk_size].hash(&mut hasher);
+            if data.len() > chunk_size * 2 {
+                let mid = data.len() / 2;
+                data[mid..mid + chunk_size.min(data.len() - mid)].hash(&mut hasher);
+            }
+            if data.len() > chunk_size {
+                data[data.len() - chunk_size..].hash(&mut hasher);
+            }
+        }
+        CacheKey(hasher.finish())
+    }
+}
+
+/// CUDA source for histogram building kernel.
+/// Uses 2D grid: grid.x = features, grid.y = row_tiles
+/// Based on WarpGBM's tiled approach for better GPU utilization.
+const HISTOGRAM_KERNEL_SOURCE: &str = r#"
+extern "C" __global__ void build_histogram(
+    const unsigned char* __restrict__ bins,      // Row-major bins [num_rows * num_features]
+    const float* __restrict__ gradients,         // Gradients [num_rows]
+    const float* __restrict__ hessians,          // Hessians [num_rows]
+    const unsigned int* __restrict__ row_indices,
+    float* __restrict__ grad_hist,               // Output [num_features * 256]
+    float* __restrict__ hess_hist,               // Output [num_features * 256]
+    unsigned int* __restrict__ count_hist,       // Output [num_features * 256]
+    unsigned int num_rows,
+    unsigned int num_features,
+    unsigned int num_indices
+) {
+    // 2D grid: blockIdx.x = feature, blockIdx.y = row tile
+    unsigned int feature_idx = blockIdx.x;
+    if (feature_idx >= num_features) return;
+
+    // Calculate row range for this tile
+    unsigned int rows_per_tile = blockDim.x;
+    unsigned int tile_start = blockIdx.y * rows_per_tile;
+    unsigned int my_row = tile_start + threadIdx.x;
+
+    // Shared memory for local histogram accumulation
+    extern __shared__ char shared_mem[];
+    float* sh_grad = (float*)shared_mem;
+    float* sh_hess = sh_grad + 256;
+    unsigned int* sh_count = (unsigned int*)(sh_hess + 256);
+
+    // Initialize shared memory
+    for (int i = threadIdx.x; i < 256; i += blockDim.x) {
+        sh_grad[i] = 0.0f;
+        sh_hess[i] = 0.0f;
+        sh_count[i] = 0;
+    }
+    __syncthreads();
+
+    // Process one row per thread in this tile
+    if (my_row < num_indices) {
+        unsigned int row = row_indices[my_row];
+        unsigned int bin = bins[row * num_features + feature_idx];
+
+        float grad = gradients[row];
+        float hess = hessians[row];
+
+        // Atomic add to shared memory
+        atomicAdd(&sh_grad[bin], grad);
+        atomicAdd(&sh_hess[bin], hess);
+        atomicAdd(&sh_count[bin], 1u);
+    }
+    __syncthreads();
+
+    // Write shared memory to global memory (atomic for multi-tile reduction)
+    float* feat_grad = grad_hist + feature_idx * 256;
+    float* feat_hess = hess_hist + feature_idx * 256;
+    unsigned int* feat_count = count_hist + feature_idx * 256;
+
+    for (int b = threadIdx.x; b < 256; b += blockDim.x) {
+        if (sh_grad[b] != 0.0f) atomicAdd(&feat_grad[b], sh_grad[b]);
+        if (sh_hess[b] != 0.0f) atomicAdd(&feat_hess[b], sh_hess[b]);
+        if (sh_count[b] != 0) atomicAdd(&feat_count[b], sh_count[b]);
+    }
+}
+
+extern "C" __global__ void zero_histograms(
+    float* __restrict__ grad_hist,
+    float* __restrict__ hess_hist,
+    unsigned int* __restrict__ count_hist,
+    unsigned int total_bins
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total_bins) {
+        grad_hist[idx] = 0.0f;
+        hess_hist[idx] = 0.0f;
+        count_hist[idx] = 0;
+    }
+}
+
+// Batched histogram: build histograms for multiple nodes in one launch
+// Grid: (num_features, num_nodes * max_tiles_per_node)
+// Each block processes one tile of one node's rows for one feature
+extern "C" __global__ void build_histogram_batched(
+    const unsigned char* __restrict__ bins,      // Row-major bins [total_rows * num_features]
+    const float* __restrict__ gradients,         // Gradients [total_rows]
+    const float* __restrict__ hessians,          // Hessians [total_rows]
+    const unsigned int* __restrict__ row_indices,// All row indices concatenated
+    const unsigned int* __restrict__ node_starts,// Start offset in row_indices for each node
+    const unsigned int* __restrict__ node_counts,// Number of rows for each node
+    float* __restrict__ grad_hist,               // Output [num_nodes * num_features * 256]
+    float* __restrict__ hess_hist,               // Output [num_nodes * num_features * 256]
+    unsigned int* __restrict__ count_hist,       // Output [num_nodes * num_features * 256]
+    unsigned int num_features,
+    unsigned int num_nodes,
+    unsigned int max_tiles_per_node
+) {
+    // blockIdx.x = feature_idx
+    // blockIdx.y = node_idx * max_tiles_per_node + tile_idx
+    unsigned int feature_idx = blockIdx.x;
+    if (feature_idx >= num_features) return;
+
+    unsigned int node_idx = blockIdx.y / max_tiles_per_node;
+    unsigned int tile_idx = blockIdx.y % max_tiles_per_node;
+    if (node_idx >= num_nodes) return;
+
+    unsigned int node_start = node_starts[node_idx];
+    unsigned int node_count = node_counts[node_idx];
+
+    unsigned int rows_per_tile = blockDim.x;
+    unsigned int tile_start = tile_idx * rows_per_tile;
+    unsigned int my_local_row = tile_start + threadIdx.x;
+
+    // Shared memory for local histogram
+    extern __shared__ char shared_mem[];
+    float* sh_grad = (float*)shared_mem;
+    float* sh_hess = sh_grad + 256;
+    unsigned int* sh_count = (unsigned int*)(sh_hess + 256);
+
+    // Initialize shared memory
+    for (int i = threadIdx.x; i < 256; i += blockDim.x) {
+        sh_grad[i] = 0.0f;
+        sh_hess[i] = 0.0f;
+        sh_count[i] = 0;
+    }
+    __syncthreads();
+
+    // Process one row per thread if within bounds
+    if (my_local_row < node_count) {
+        unsigned int row = row_indices[node_start + my_local_row];
+        unsigned int bin = bins[row * num_features + feature_idx];
+        float grad = gradients[row];
+        float hess = hessians[row];
+
+        atomicAdd(&sh_grad[bin], grad);
+        atomicAdd(&sh_hess[bin], hess);
+        atomicAdd(&sh_count[bin], 1u);
+    }
+    __syncthreads();
+
+    // Write to global memory - output indexed by [node_idx][feature_idx][bin]
+    unsigned int hist_base = (node_idx * num_features + feature_idx) * 256;
+    float* feat_grad = grad_hist + hist_base;
+    float* feat_hess = hess_hist + hist_base;
+    unsigned int* feat_count = count_hist + hist_base;
+
+    for (int b = threadIdx.x; b < 256; b += blockDim.x) {
+        if (sh_grad[b] != 0.0f) atomicAdd(&feat_grad[b], sh_grad[b]);
+        if (sh_hess[b] != 0.0f) atomicAdd(&feat_hess[b], sh_hess[b]);
+        if (sh_count[b] != 0) atomicAdd(&feat_count[b], sh_count[b]);
+    }
+}
+"#;
+
+/// Threads per block for histogram kernel
+const THREADS_PER_BLOCK: u32 = 256;
+
+/// Node descriptor for GPU-resident batched histogram building.
+/// Describes a range of indices in the GPU indices buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct NodeRange {
+    pub start: u32,
+    pub count: u32,
+}
+
+/// CUDA histogram kernel executor.
+pub struct HistogramKernel {
+    device: Arc<CudaDevice>,
+    module: Option<Arc<CudaModule>>,
+    build_histogram_fn: Option<CudaFunction>,
+    build_histogram_batched_fn: Option<CudaFunction>,
+    zero_histograms_fn: Option<CudaFunction>,
+
+    // Cached GPU buffers
+    cached_bins: Option<CudaSlice<u8>>,
+    cached_bins_key: Option<CacheKey>,
+    cached_gradients: Option<CudaSlice<f32>>,
+    cached_hessians: Option<CudaSlice<f32>>,
+    cached_grad_hess_key: Option<CacheKey>,
+    // Output histograms (separate for f32 atomics)
+    cached_grad_hist: Option<CudaSlice<f32>>,
+    cached_hess_hist: Option<CudaSlice<f32>>,
+    cached_count_hist: Option<CudaSlice<u32>>,
+    cached_output_len: usize,
+    // Batched histogram output (larger buffer for multiple nodes)
+    cached_batched_grad_hist: Option<CudaSlice<f32>>,
+    cached_batched_hess_hist: Option<CudaSlice<f32>>,
+    cached_batched_count_hist: Option<CudaSlice<u32>>,
+    cached_batched_output_len: usize,
+}
+
+impl HistogramKernel {
+    /// Create a new histogram kernel.
+    pub fn new(device: Arc<CudaDevice>) -> Self {
+        Self {
+            device,
+            module: None,
+            build_histogram_fn: None,
+            build_histogram_batched_fn: None,
+            zero_histograms_fn: None,
+            cached_bins: None,
+            cached_bins_key: None,
+            cached_gradients: None,
+            cached_hessians: None,
+            cached_grad_hess_key: None,
+            cached_grad_hist: None,
+            cached_hess_hist: None,
+            cached_count_hist: None,
+            cached_output_len: 0,
+            cached_batched_grad_hist: None,
+            cached_batched_hess_hist: None,
+            cached_batched_count_hist: None,
+            cached_batched_output_len: 0,
+        }
+    }
+
+    /// Ensure the kernel is compiled and loaded.
+    fn ensure_initialized(&mut self) {
+        if self.module.is_some() {
+            return;
+        }
+
+        let ptx = compile_ptx(HISTOGRAM_KERNEL_SOURCE).expect("Failed to compile CUDA kernel");
+        let module = self.device.load_module(ptx);
+
+        self.build_histogram_fn = Some(CudaDevice::load_function(&module, "build_histogram"));
+        self.build_histogram_batched_fn = Some(CudaDevice::load_function(&module, "build_histogram_batched"));
+        self.zero_histograms_fn = Some(CudaDevice::load_function(&module, "zero_histograms"));
+        self.module = Some(module);
+    }
+
+    /// Get the device reference.
+    pub fn device(&self) -> &Arc<CudaDevice> {
+        &self.device
+    }
+
+    /// Ensure bins are cached on GPU.
+    pub fn ensure_bins_cached(&mut self, bins: &[u8]) {
+        let bins_key = CacheKey::from_slice(bins);
+        if self.cached_bins_key != Some(bins_key) || self.cached_bins.is_none() {
+            self.cached_bins = Some(self.device.htod_copy(bins));
+            self.cached_bins_key = Some(bins_key);
+        }
+    }
+
+    /// Ensure gradients and hessians are cached on GPU.
+    pub fn ensure_grad_hess_cached(&mut self, gradients: &[f32], hessians: &[f32]) {
+        let grad_key = {
+            let mut hasher = DefaultHasher::new();
+            gradients.len().hash(&mut hasher);
+            if !gradients.is_empty() {
+                gradients[0].to_bits().hash(&mut hasher);
+                if gradients.len() > 1 {
+                    gradients[gradients.len() / 2].to_bits().hash(&mut hasher);
+                }
+            }
+            CacheKey(hasher.finish())
+        };
+
+        if self.cached_grad_hess_key != Some(grad_key)
+            || self.cached_gradients.is_none()
+            || self.cached_hessians.is_none()
+        {
+            self.cached_gradients = Some(self.device.htod_copy(gradients));
+            self.cached_hessians = Some(self.device.htod_copy(hessians));
+            self.cached_grad_hess_key = Some(grad_key);
+        }
+    }
+
+    /// Get cached bins buffer (for partition kernel).
+    pub fn cached_bins(&self) -> Option<&CudaSlice<u8>> {
+        self.cached_bins.as_ref()
+    }
+
+    /// Build histograms for all features using 2D tiled kernel.
+    pub fn build_histograms(
+        &mut self,
+        bins: &[u8],
+        grad_hess: &[(f32, f32)],
+        row_indices: &[usize],
+        num_rows: usize,
+        num_features: usize,
+    ) -> Vec<Histogram> {
+        self.ensure_initialized();
+
+        if row_indices.is_empty() {
+            return (0..num_features).map(|_| Histogram::new()).collect();
+        }
+
+        let num_indices = row_indices.len();
+
+        // Separate gradients and hessians for f32 atomics
+        let gradients: Vec<f32> = grad_hess.iter().map(|(g, _)| *g).collect();
+        let hessians: Vec<f32> = grad_hess.iter().map(|(_, h)| *h).collect();
+
+        // Convert row indices to u32
+        let indices_u32: Vec<u32> = row_indices.iter().map(|&i| i as u32).collect();
+
+        // Upload bins (with caching)
+        let bins_key = CacheKey::from_slice(bins);
+        if self.cached_bins_key != Some(bins_key) || self.cached_bins.is_none() {
+            self.cached_bins = Some(self.device.htod_copy(bins));
+            self.cached_bins_key = Some(bins_key);
+        }
+
+        // Upload gradients/hessians (with caching - don't change within a tree)
+        // Use a simple hash of first few values as cache key
+        let grad_key = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&gradients.len(), &mut hasher);
+            if !gradients.is_empty() {
+                std::hash::Hash::hash(&gradients[0].to_bits(), &mut hasher);
+                if gradients.len() > 1 {
+                    std::hash::Hash::hash(&gradients[gradients.len() / 2].to_bits(), &mut hasher);
+                }
+            }
+            CacheKey(std::hash::Hasher::finish(&hasher))
+        };
+
+        if self.cached_grad_hess_key != Some(grad_key)
+            || self.cached_gradients.is_none()
+            || self.cached_hessians.is_none()
+        {
+            self.cached_gradients = Some(self.device.htod_copy(&gradients));
+            self.cached_hessians = Some(self.device.htod_copy(&hessians));
+            self.cached_grad_hess_key = Some(grad_key);
+        }
+
+        // Upload indices (always needed fresh)
+        let d_indices = self.device.htod_copy(&indices_u32);
+
+        // Allocate output buffers (reuse if same size)
+        let output_bins = num_features * 256;
+        if self.cached_output_len != output_bins
+            || self.cached_grad_hist.is_none()
+            || self.cached_hess_hist.is_none()
+            || self.cached_count_hist.is_none()
+        {
+            self.cached_grad_hist = Some(self.device.alloc_zeros(output_bins));
+            self.cached_hess_hist = Some(self.device.alloc_zeros(output_bins));
+            self.cached_count_hist = Some(self.device.alloc_zeros(output_bins));
+            self.cached_output_len = output_bins;
+        }
+
+        let stream = self.device.stream();
+
+        // Zero output histograms
+        let zero_blocks = ((output_bins + 255) / 256) as u32;
+        let zero_config = LaunchConfig {
+            block_dim: (256, 1, 1),
+            grid_dim: (zero_blocks, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            let d_grad_hist = self.cached_grad_hist.as_mut().unwrap();
+            let d_hess_hist = self.cached_hess_hist.as_mut().unwrap();
+            let d_count_hist = self.cached_count_hist.as_mut().unwrap();
+            stream
+                .launch_builder(self.zero_histograms_fn.as_ref().unwrap())
+                .arg(d_grad_hist)
+                .arg(d_hess_hist)
+                .arg(d_count_hist)
+                .arg(&(output_bins as u32))
+                .launch(zero_config)
+                .expect("Failed to launch zero_histograms kernel");
+        }
+
+        // Calculate 2D grid dimensions
+        // grid.x = num_features, grid.y = row_tiles
+        let rows_per_tile = THREADS_PER_BLOCK;
+        let row_tiles = ((num_indices as u32) + rows_per_tile - 1) / rows_per_tile;
+
+        // Shared memory: 256 * (f32 + f32 + u32) = 256 * 12 = 3072 bytes
+        let shared_mem_bytes = 256 * (4 + 4 + 4);
+
+        let config = LaunchConfig {
+            block_dim: (THREADS_PER_BLOCK, 1, 1),
+            grid_dim: (num_features as u32, row_tiles, 1),
+            shared_mem_bytes,
+        };
+
+        unsafe {
+            let d_bins = self.cached_bins.as_ref().unwrap();
+            let d_gradients = self.cached_gradients.as_ref().unwrap();
+            let d_hessians = self.cached_hessians.as_ref().unwrap();
+            let d_grad_hist = self.cached_grad_hist.as_mut().unwrap();
+            let d_hess_hist = self.cached_hess_hist.as_mut().unwrap();
+            let d_count_hist = self.cached_count_hist.as_mut().unwrap();
+
+            stream
+                .launch_builder(self.build_histogram_fn.as_ref().unwrap())
+                .arg(d_bins)
+                .arg(d_gradients)
+                .arg(d_hessians)
+                .arg(&d_indices)
+                .arg(d_grad_hist)
+                .arg(d_hess_hist)
+                .arg(d_count_hist)
+                .arg(&(num_rows as u32))
+                .arg(&(num_features as u32))
+                .arg(&(num_indices as u32))
+                .launch(config)
+                .expect("Failed to launch build_histogram kernel");
+        }
+
+        self.device.synchronize();
+
+        // Read back results
+        let grad_hist = self.device.dtoh_copy(self.cached_grad_hist.as_ref().unwrap());
+        let hess_hist = self.device.dtoh_copy(self.cached_hess_hist.as_ref().unwrap());
+        let count_hist = self.device.dtoh_copy(self.cached_count_hist.as_ref().unwrap());
+
+        // Convert to Histogram structs
+        (0..num_features)
+            .map(|f| {
+                let base = f * 256;
+                let mut grads = [0.0f32; 256];
+                let mut hess = [0.0f32; 256];
+                let mut counts = [0u32; 256];
+
+                for bin in 0..256 {
+                    grads[bin] = grad_hist[base + bin];
+                    hess[bin] = hess_hist[base + bin];
+                    counts[bin] = count_hist[base + bin];
+                }
+
+                Histogram::from_raw_arrays(&grads, &hess, &counts)
+            })
+            .collect()
+    }
+
+    /// Build histograms for multiple batches.
+    pub fn build_histograms_batched(
+        &mut self,
+        bins: &[u8],
+        grad_hess: &[(f32, f32)],
+        batches: &[&[usize]],
+        num_rows: usize,
+        num_features: usize,
+    ) -> Vec<Vec<Histogram>> {
+        // For now, fall back to sequential builds
+        // TODO: Implement true batched kernel dispatch
+        batches
+            .iter()
+            .map(|indices| self.build_histograms(bins, grad_hess, indices, num_rows, num_features))
+            .collect()
+    }
+
+    /// Build histograms for multiple nodes using GPU-resident indices buffer.
+    /// This is the key method for CUDA Full mode - no per-level PCIe transfers.
+    ///
+    /// # Arguments
+    /// * `d_indices` - GPU buffer containing all row indices
+    /// * `node_ranges` - Describes start/count in d_indices for each node (NodeRange struct)
+    /// * `num_features` - Number of features
+    ///
+    /// # Returns
+    /// Vec of histograms for each node, each node has num_features histograms
+    pub fn build_histograms_gpu(
+        &mut self,
+        d_indices: &CudaSlice<u32>,
+        node_ranges: &[NodeRange],
+        num_features: usize,
+    ) -> Vec<Vec<Histogram>> {
+        self.ensure_initialized();
+
+        if node_ranges.is_empty() {
+            return Vec::new();
+        }
+
+        let num_nodes = node_ranges.len();
+        let max_node_count = node_ranges.iter().map(|n| n.count as usize).max().unwrap_or(0);
+
+        if max_node_count == 0 {
+            return (0..num_nodes)
+                .map(|_| (0..num_features).map(|_| Histogram::new()).collect())
+                .collect();
+        }
+
+        // Prepare node metadata
+        let node_starts: Vec<u32> = node_ranges.iter().map(|n| n.start).collect();
+        let node_counts: Vec<u32> = node_ranges.iter().map(|n| n.count).collect();
+
+        let d_node_starts = self.device.htod_copy(&node_starts);
+        let d_node_counts = self.device.htod_copy(&node_counts);
+
+        // Allocate output buffers (num_nodes * num_features * 256)
+        let output_size = num_nodes * num_features * 256;
+        if self.cached_batched_output_len < output_size
+            || self.cached_batched_grad_hist.is_none()
+            || self.cached_batched_hess_hist.is_none()
+            || self.cached_batched_count_hist.is_none()
+        {
+            self.cached_batched_grad_hist = Some(self.device.alloc_zeros(output_size));
+            self.cached_batched_hess_hist = Some(self.device.alloc_zeros(output_size));
+            self.cached_batched_count_hist = Some(self.device.alloc_zeros(output_size));
+            self.cached_batched_output_len = output_size;
+        }
+
+        let stream = self.device.stream();
+
+        // Zero output histograms
+        let zero_blocks = ((output_size + 255) / 256) as u32;
+        let zero_config = LaunchConfig {
+            block_dim: (256, 1, 1),
+            grid_dim: (zero_blocks, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            let d_grad_hist = self.cached_batched_grad_hist.as_mut().unwrap();
+            let d_hess_hist = self.cached_batched_hess_hist.as_mut().unwrap();
+            let d_count_hist = self.cached_batched_count_hist.as_mut().unwrap();
+            stream
+                .launch_builder(self.zero_histograms_fn.as_ref().unwrap())
+                .arg(d_grad_hist)
+                .arg(d_hess_hist)
+                .arg(d_count_hist)
+                .arg(&(output_size as u32))
+                .launch(zero_config)
+                .expect("Failed to launch zero_histograms kernel");
+        }
+
+        // Grid: (num_features, num_nodes * tiles_per_node)
+        let tiles_per_node = ((max_node_count as u32) + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        let shared_mem_bytes = 256 * (4 + 4 + 4);
+
+        let config = LaunchConfig {
+            block_dim: (THREADS_PER_BLOCK, 1, 1),
+            grid_dim: (num_features as u32, (num_nodes as u32) * tiles_per_node, 1),
+            shared_mem_bytes,
+        };
+
+        unsafe {
+            let d_bins = self.cached_bins.as_ref().expect("bins must be cached first");
+            let d_gradients = self.cached_gradients.as_ref().expect("gradients must be cached first");
+            let d_hessians = self.cached_hessians.as_ref().expect("hessians must be cached first");
+            let d_grad_hist = self.cached_batched_grad_hist.as_mut().unwrap();
+            let d_hess_hist = self.cached_batched_hess_hist.as_mut().unwrap();
+            let d_count_hist = self.cached_batched_count_hist.as_mut().unwrap();
+
+            stream
+                .launch_builder(self.build_histogram_batched_fn.as_ref().unwrap())
+                .arg(d_bins)
+                .arg(d_gradients)
+                .arg(d_hessians)
+                .arg(d_indices)
+                .arg(&d_node_starts)
+                .arg(&d_node_counts)
+                .arg(d_grad_hist)
+                .arg(d_hess_hist)
+                .arg(d_count_hist)
+                .arg(&(num_features as u32))
+                .arg(&(num_nodes as u32))
+                .arg(&tiles_per_node)
+                .launch(config)
+                .expect("Failed to launch build_histogram_batched kernel");
+        }
+
+        self.device.synchronize();
+
+        // Read back results
+        let grad_hist = self.device.dtoh_copy(self.cached_batched_grad_hist.as_ref().unwrap());
+        let hess_hist = self.device.dtoh_copy(self.cached_batched_hess_hist.as_ref().unwrap());
+        let count_hist = self.device.dtoh_copy(self.cached_batched_count_hist.as_ref().unwrap());
+
+        // Convert to Histogram structs - layout is [node][feature][bin]
+        (0..num_nodes)
+            .map(|node_idx| {
+                (0..num_features)
+                    .map(|f| {
+                        let base = (node_idx * num_features + f) * 256;
+                        let mut grads = [0.0f32; 256];
+                        let mut hess = [0.0f32; 256];
+                        let mut counts = [0u32; 256];
+
+                        for bin in 0..256 {
+                            grads[bin] = grad_hist[base + bin];
+                            hess[bin] = hess_hist[base + bin];
+                            counts[bin] = count_hist[base + bin];
+                        }
+
+                        Histogram::from_raw_arrays(&grads, &hess, &counts)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+}

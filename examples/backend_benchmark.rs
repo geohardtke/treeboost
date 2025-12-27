@@ -1,125 +1,82 @@
-//! Comprehensive benchmark comparing WGPU (GPU) vs Scalar (CPU) histogram backends.
+//! Comprehensive benchmark comparing all backends: CPU, WGPU, and CUDA.
 //!
-//! This benchmark measures:
-//! - Histogram build throughput at various dataset sizes
-//! - GPU vs CPU crossover point
-//! - Per-operation timing breakdown
-//! - Correctness verification
+//! Compares:
+//! - Full CPU (scalar backend, best-first with histogram subtraction)
+//! - WGPU Hybrid (GPU histogram + CPU partition, best-first)
+//! - WGPU Full (GPU histogram + GPU partition, level-wise)
+//! - CUDA Hybrid (GPU histogram + CPU partition, best-first)
+//! - CUDA Full (GPU histogram + GPU partition, level-wise)
 //!
 //! Run with:
+//!   cargo run --release --example backend_benchmark
 //!   cargo run --release --features gpu --example backend_benchmark
-//!   cargo run --release --features gpu --example backend_benchmark -- --backend wgpu
-//!   cargo run --release --features gpu --example backend_benchmark -- --backend scalar
-//!   cargo run --release --features gpu --example backend_benchmark -- --rows 100000 --features 50
+//!   cargo run --release --features cuda --example backend_benchmark
+//!   cargo run --release --features "gpu cuda" --example backend_benchmark
 
 use std::time::{Duration, Instant};
 
-use treeboost::backend::{BackendConfig, BackendSelector, HistogramBackend};
-use treeboost::{BinnedDataset, FeatureInfo, FeatureType};
+use treeboost::backend::BackendType;
+use treeboost::dataset::{BinnedDataset, FeatureInfo, FeatureType};
+use treeboost::tree::TreeGrower;
 
-/// Command line arguments
-struct Args {
-    backend: Option<String>,
-    num_rows: Option<usize>,
-    num_features: Option<usize>,
-    iterations: Option<usize>,
-    compare: bool,
+#[cfg(feature = "gpu")]
+use std::sync::Arc;
+#[cfg(feature = "gpu")]
+use treeboost::backend::wgpu::{FullGpuTreeBuilder as WgpuFullBuilder, GpuDevice as WgpuDevice};
+
+#[cfg(feature = "cuda")]
+use std::sync::Arc as CudaArc;
+#[cfg(feature = "cuda")]
+use treeboost::backend::cuda::{CudaDevice, FullCudaTreeBuilder};
+
+/// Benchmark result for a single configuration
+#[derive(Clone)]
+#[allow(dead_code)]
+struct BenchResult {
+    name: String,
+    rows: usize,
+    features: usize,
+    time_ms: f64,
+    trees_per_sec: f64,
 }
 
-impl Args {
-    fn parse() -> Self {
-        let args: Vec<String> = std::env::args().collect();
-        let mut result = Args {
-            backend: None,
-            num_rows: None,
-            num_features: None,
-            iterations: None,
-            compare: true,
-        };
-
-        let mut i = 1;
-        while i < args.len() {
-            match args[i].as_str() {
-                "--backend" | "-b" => {
-                    if i + 1 < args.len() {
-                        result.backend = Some(args[i + 1].clone());
-                        result.compare = false;
-                        i += 1;
-                    }
-                }
-                "--rows" | "-r" => {
-                    if i + 1 < args.len() {
-                        result.num_rows = args[i + 1].parse().ok();
-                        i += 1;
-                    }
-                }
-                "--features" | "-f" => {
-                    if i + 1 < args.len() {
-                        result.num_features = args[i + 1].parse().ok();
-                        i += 1;
-                    }
-                }
-                "--iterations" | "-i" => {
-                    if i + 1 < args.len() {
-                        result.iterations = args[i + 1].parse().ok();
-                        i += 1;
-                    }
-                }
-                "--compare" | "-c" => {
-                    result.compare = true;
-                }
-                "--help" | "-h" => {
-                    print_help();
-                    std::process::exit(0);
-                }
-                _ => {}
-            }
-            i += 1;
+impl BenchResult {
+    fn new(name: &str, rows: usize, features: usize, duration: Duration, num_trees: usize) -> Self {
+        let time_ms = duration.as_secs_f64() * 1000.0 / num_trees as f64;
+        let trees_per_sec = num_trees as f64 / duration.as_secs_f64();
+        Self {
+            name: name.to_string(),
+            rows,
+            features,
+            time_ms,
+            trees_per_sec,
         }
-        result
     }
 }
 
-fn print_help() {
-    println!(
-        r#"Backend Benchmark - Compare WGPU vs Scalar histogram building
+/// Create test dataset with deterministic values
+fn create_dataset(num_rows: usize, num_features: usize) -> BinnedDataset {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
-USAGE:
-    cargo run --release --features gpu --example backend_benchmark [OPTIONS]
-
-OPTIONS:
-    -b, --backend <NAME>     Use specific backend: 'wgpu' or 'scalar'
-    -r, --rows <NUM>         Number of rows (default: runs multiple sizes)
-    -f, --features <NUM>     Number of features (default: 50)
-    -i, --iterations <NUM>   Benchmark iterations (default: auto-scaled)
-    -c, --compare            Compare both backends (default if no --backend)
-    -h, --help               Print this help
-
-EXAMPLES:
-    # Full comparison across dataset sizes
-    cargo run --release --features gpu --example backend_benchmark
-
-    # Benchmark specific backend
-    cargo run --release --features gpu --example backend_benchmark -- --backend wgpu
-
-    # Custom dataset size
-    cargo run --release --features gpu --example backend_benchmark -- -r 100000 -f 100
-"#
-    );
-}
-
-/// Create a test dataset with deterministic bin values
-fn create_test_dataset(num_rows: usize, num_features: usize) -> BinnedDataset {
     let mut features = Vec::with_capacity(num_rows * num_features);
     for f in 0..num_features {
         for r in 0..num_rows {
-            // Deterministic pattern that uses all 256 bins
-            features.push(((r * 7 + f * 13) % 256) as u8);
+            let mut hasher = DefaultHasher::new();
+            (r, f).hash(&mut hasher);
+            features.push((hasher.finish() % 256) as u8);
         }
     }
 
-    let targets: Vec<f32> = (0..num_rows).map(|i| i as f32).collect();
-    let feature_info = (0..num_features)
+    let targets: Vec<f32> = (0..num_rows)
+        .map(|i| {
+            let mut hasher = DefaultHasher::new();
+            i.hash(&mut hasher);
+            (hasher.finish() as f32 / u64::MAX as f32) * 10.0 - 5.0
+        })
+        .collect();
+
+    let feature_info: Vec<FeatureInfo> = (0..num_features)
         .map(|i| FeatureInfo {
             name: format!("f{}", i),
             feature_type: FeatureType::Numeric,
@@ -131,448 +88,549 @@ fn create_test_dataset(num_rows: usize, num_features: usize) -> BinnedDataset {
     BinnedDataset::new(num_rows, features, targets, feature_info)
 }
 
-/// Create gradients and hessians for benchmarking
-fn create_grad_hess(num_rows: usize) -> Vec<(f32, f32)> {
-    (0..num_rows)
+/// Create gradients and hessians that encourage splitting
+fn create_grad_hess(num_rows: usize) -> (Vec<f32>, Vec<f32>) {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let gradients: Vec<f32> = (0..num_rows)
         .map(|i| {
-            let g = ((i as f32 * 0.1).sin() * 5.0) as f32;
-            let h = 1.0 + (i % 10) as f32 * 0.1;
-            (g, h)
+            let mut hasher = DefaultHasher::new();
+            (i, "grad").hash(&mut hasher);
+            (hasher.finish() as f32 / u64::MAX as f32) * 2.0 - 1.0
         })
-        .collect()
+        .collect();
+
+    let hessians: Vec<f32> = vec![1.0; num_rows];
+
+    (gradients, hessians)
 }
 
-/// Timing result for a single benchmark run
-#[derive(Clone)]
-struct BenchResult {
-    backend_name: String,
-    num_rows: usize,
-    num_features: usize,
-    iterations: usize,
-    total_time: Duration,
-    per_iter_ms: f64,
-    throughput_mcells_ms: f64,
-}
-
-impl BenchResult {
-    fn print(&self) {
-        println!(
-            "  {:12} | {:>8.3} ms/iter | {:>8.2} M cells/ms | {:>6} iters",
-            self.backend_name, self.per_iter_ms, self.throughput_mcells_ms, self.iterations
-        );
-    }
-}
-
-/// Run benchmark for a specific backend
-fn benchmark_backend(
-    backend: &dyn HistogramBackend,
+/// Benchmark Full CPU (scalar backend with TreeGrower)
+fn bench_full_cpu(
     dataset: &BinnedDataset,
-    grad_hess: &[(f32, f32)],
-    row_indices: &[usize],
+    gradients: &[f32],
+    hessians: &[f32],
+    max_depth: usize,
+    warmup: usize,
     iterations: usize,
-) -> BenchResult {
-    let num_rows = row_indices.len();
-    let num_features = dataset.num_features();
+) -> Duration {
+    let grower = TreeGrower::new()
+        .with_max_depth(max_depth)
+        .with_max_leaves(1 << max_depth)
+        .with_min_samples_leaf(10)
+        .with_backend(BackendType::Scalar);
 
     // Warmup
-    for _ in 0..3.min(iterations) {
-        let hists = backend.build_histograms(dataset, grad_hess, row_indices);
-        std::hint::black_box(&hists);
+    for _ in 0..warmup {
+        let _ = grower.grow(dataset, gradients, hessians);
     }
 
-    // Timed run
+    // Benchmark
     let start = Instant::now();
     for _ in 0..iterations {
-        let hists = backend.build_histograms(dataset, grad_hess, row_indices);
-        std::hint::black_box(&hists);
+        let tree = grower.grow(dataset, gradients, hessians);
+        std::hint::black_box(&tree);
     }
-    let total_time = start.elapsed();
-
-    let per_iter_ms = total_time.as_secs_f64() * 1000.0 / iterations as f64;
-    let cells = num_rows * num_features;
-    let throughput_mcells_ms = cells as f64 / per_iter_ms / 1_000_000.0;
-
-    BenchResult {
-        backend_name: backend.name().to_string(),
-        num_rows,
-        num_features,
-        iterations,
-        total_time,
-        per_iter_ms,
-        throughput_mcells_ms,
-    }
+    start.elapsed()
 }
 
-/// Verify that both backends produce equivalent results
-fn verify_correctness(
-    scalar: &dyn HistogramBackend,
-    wgpu: &dyn HistogramBackend,
+/// Benchmark WGPU Hybrid (GPU histogram + CPU partition, best-first)
+#[cfg(feature = "gpu")]
+fn bench_wgpu_hybrid(
     dataset: &BinnedDataset,
-    grad_hess: &[(f32, f32)],
-    row_indices: &[usize],
-) -> bool {
-    let scalar_hists = scalar.build_histograms(dataset, grad_hess, row_indices);
-    let wgpu_hists = wgpu.build_histograms(dataset, grad_hess, row_indices);
-
-    if scalar_hists.len() != wgpu_hists.len() {
-        println!("  ERROR: Histogram count mismatch");
-        return false;
+    gradients: &[f32],
+    hessians: &[f32],
+    max_depth: usize,
+    warmup: usize,
+    iterations: usize,
+) -> Option<Duration> {
+    // Check if WGPU is available
+    if treeboost::backend::WgpuBackend::new().is_none() {
+        return None;
     }
 
-    let mut max_grad_diff = 0.0f32;
-    let mut max_hess_diff = 0.0f32;
-    let mut count_matches = true;
+    let grower = TreeGrower::new()
+        .with_max_depth(max_depth)
+        .with_max_leaves(1 << max_depth)
+        .with_min_samples_leaf(10)
+        .with_backend(BackendType::Wgpu)
+        .with_gpu_batch_size(32);
 
-    for (f, (sh, wh)) in scalar_hists.iter().zip(wgpu_hists.iter()).enumerate() {
-        let (sg, shess, sc) = sh.totals();
-        let (wg, whess, wc) = wh.totals();
-
-        if sc != wc {
-            println!("  ERROR: Feature {} count mismatch: scalar={}, wgpu={}", f, sc, wc);
-            count_matches = false;
-        }
-
-        max_grad_diff = max_grad_diff.max((sg - wg).abs());
-        max_hess_diff = max_hess_diff.max((shess - whess).abs());
+    // Warmup
+    for _ in 0..warmup {
+        let _ = grower.grow(dataset, gradients, hessians);
     }
 
-    if !count_matches {
-        return false;
+    // Benchmark
+    let start = Instant::now();
+    for _ in 0..iterations {
+        let tree = grower.grow(dataset, gradients, hessians);
+        std::hint::black_box(&tree);
     }
+    Some(start.elapsed())
+}
 
-    // Allow small floating point differences from GPU atomics
-    let grad_tolerance = 0.01;
-    let hess_tolerance = 0.01;
+/// Benchmark WGPU Full GPU (level-wise)
+#[cfg(feature = "gpu")]
+fn bench_wgpu_full(
+    device: Arc<WgpuDevice>,
+    dataset: &BinnedDataset,
+    gradients: &[f32],
+    hessians: &[f32],
+    max_depth: usize,
+    warmup: usize,
+    iterations: usize,
+) -> Duration {
+    let mut builder = WgpuFullBuilder::new(device);
 
-    if max_grad_diff > grad_tolerance || max_hess_diff > hess_tolerance {
-        println!(
-            "  WARNING: Float differences exceed tolerance (grad: {:.6}, hess: {:.6})",
-            max_grad_diff, max_hess_diff
+    let row_indices: Vec<usize> = (0..dataset.num_rows()).collect();
+    let max_leaves = 1 << max_depth;
+    let lambda = 1.0f32;
+    let min_samples_leaf = 10usize;
+    let min_hessian_leaf = 1.0f32;
+    let min_gain = 0.0f32;
+    let learning_rate = 0.1f32;
+
+    // Warmup
+    for _ in 0..warmup {
+        let _ = builder.build_tree(
+            dataset,
+            gradients,
+            hessians,
+            &row_indices,
+            max_depth,
+            max_leaves,
+            lambda,
+            min_samples_leaf,
+            min_hessian_leaf,
+            min_gain,
+            learning_rate,
         );
     }
 
-    true
+    // Benchmark
+    let start = Instant::now();
+    for _ in 0..iterations {
+        let tree = builder.build_tree(
+            dataset,
+            gradients,
+            hessians,
+            &row_indices,
+            max_depth,
+            max_leaves,
+            lambda,
+            min_samples_leaf,
+            min_hessian_leaf,
+            min_gain,
+            learning_rate,
+        );
+        std::hint::black_box(&tree);
+    }
+    start.elapsed()
 }
 
-/// Detailed timing breakdown for a single histogram build
-fn timing_breakdown(
-    backend: &dyn HistogramBackend,
+/// Benchmark CUDA Hybrid (GPU histogram + CPU partition, best-first)
+#[cfg(feature = "cuda")]
+fn bench_cuda_hybrid(
     dataset: &BinnedDataset,
-    grad_hess: &[(f32, f32)],
-    row_indices: &[usize],
-) {
-    let num_rows = row_indices.len();
-    let num_features = dataset.num_features();
-
-    println!("\n  Timing Breakdown for {} ({} rows × {} features):",
-             backend.name(), num_rows, num_features);
-    println!("  {}", "-".repeat(50));
-
-    // Time row-major conversion (for GPU)
-    if backend.is_tensor_tile() {
-        let start = Instant::now();
-        let _ = dataset.as_row_major();
-        let convert_time = start.elapsed();
-        println!("    Row-major conversion:  {:>8.3} ms", convert_time.as_secs_f64() * 1000.0);
+    gradients: &[f32],
+    hessians: &[f32],
+    max_depth: usize,
+    warmup: usize,
+    iterations: usize,
+) -> Option<Duration> {
+    // Check if CUDA is available
+    if treeboost::backend::CudaBackend::new().is_none() {
+        return None;
     }
 
-    // Time histogram build (multiple runs for average)
-    let runs = 10;
-    let mut times = Vec::with_capacity(runs);
+    let grower = TreeGrower::new()
+        .with_max_depth(max_depth)
+        .with_max_leaves(1 << max_depth)
+        .with_min_samples_leaf(10)
+        .with_backend(BackendType::Cuda)
+        .with_gpu_batch_size(32);
 
-    for _ in 0..runs {
-        let start = Instant::now();
-        let hists = backend.build_histograms(dataset, grad_hess, row_indices);
-        std::hint::black_box(&hists);
-        times.push(start.elapsed());
+    // Warmup
+    for _ in 0..warmup {
+        let _ = grower.grow(dataset, gradients, hessians);
     }
 
-    let avg_ms = times.iter().map(|d| d.as_secs_f64()).sum::<f64>() / runs as f64 * 1000.0;
-    let min_ms = times.iter().map(|d| d.as_secs_f64()).fold(f64::MAX, f64::min) * 1000.0;
-    let max_ms = times.iter().map(|d| d.as_secs_f64()).fold(0.0, f64::max) * 1000.0;
-
-    println!("    Histogram build:       {:>8.3} ms (avg over {} runs)", avg_ms, runs);
-    println!("      Min: {:>8.3} ms  Max: {:>8.3} ms", min_ms, max_ms);
-
-    let cells = num_rows * num_features;
-    let throughput = cells as f64 / avg_ms / 1_000_000.0;
-    println!("    Throughput:            {:>8.2} M cells/ms", throughput);
+    // Benchmark
+    let start = Instant::now();
+    for _ in 0..iterations {
+        let tree = grower.grow(dataset, gradients, hessians);
+        std::hint::black_box(&tree);
+    }
+    Some(start.elapsed())
 }
 
-fn main() {
-    let args = Args::parse();
+/// Benchmark CUDA Full GPU (level-wise)
+#[cfg(feature = "cuda")]
+fn bench_cuda_full(
+    device: CudaArc<CudaDevice>,
+    dataset: &BinnedDataset,
+    gradients: &[f32],
+    hessians: &[f32],
+    max_depth: usize,
+    warmup: usize,
+    iterations: usize,
+) -> Duration {
+    let mut builder = FullCudaTreeBuilder::new(device);
 
-    println!("╔═══════════════════════════════════════════════════════════════════╗");
-    println!("║           TreeBoost Backend Benchmark (GPU vs CPU)                ║");
-    println!("╚═══════════════════════════════════════════════════════════════════╝");
+    let row_indices: Vec<usize> = (0..dataset.num_rows()).collect();
+    let max_leaves = 1 << max_depth;
+    let lambda = 1.0f32;
+    let min_samples_leaf = 10usize;
+    let min_hessian_leaf = 1.0f32;
+    let min_gain = 0.0f32;
+    let learning_rate = 0.1f32;
+
+    // Warmup
+    for _ in 0..warmup {
+        let _ = builder.build_tree(
+            dataset,
+            gradients,
+            hessians,
+            &row_indices,
+            max_depth,
+            max_leaves,
+            lambda,
+            min_samples_leaf,
+            min_hessian_leaf,
+            min_gain,
+            learning_rate,
+        );
+    }
+
+    // Benchmark
+    let start = Instant::now();
+    for _ in 0..iterations {
+        let tree = builder.build_tree(
+            dataset,
+            gradients,
+            hessians,
+            &row_indices,
+            max_depth,
+            max_leaves,
+            lambda,
+            min_samples_leaf,
+            min_hessian_leaf,
+            min_gain,
+            learning_rate,
+        );
+        std::hint::black_box(&tree);
+    }
+    start.elapsed()
+}
+
+fn print_header() {
+    println!("╔══════════════════════════════════════════════════════════════════════════════╗");
+    println!("║              TreeBoost Backend Benchmark (CPU vs GPU)                        ║");
+    println!("╠══════════════════════════════════════════════════════════════════════════════╣");
+    println!("║  Modes:                                                                      ║");
+    println!("║    - Hybrid: GPU histogram + CPU partition (best-first, subtraction trick)  ║");
+    println!("║    - Full:   GPU histogram + GPU partition (level-wise, minimal PCIe)       ║");
+    println!("╚══════════════════════════════════════════════════════════════════════════════╝");
     println!();
+}
 
-    // System info
+fn print_system_info() {
+    println!("System Information:");
     #[cfg(target_arch = "x86_64")]
     {
-        println!("System Information:");
         println!("  Architecture: x86_64");
         println!("  AVX2:         {}", if is_x86_feature_detected!("avx2") { "Yes" } else { "No" });
         println!("  AVX-512:      {}", if is_x86_feature_detected!("avx512f") { "Yes" } else { "No" });
     }
+    #[cfg(target_arch = "aarch64")]
+    println!("  Architecture: aarch64");
+    println!();
+}
 
-    // Create backends
-    let scalar_config = BackendConfig::scalar();
-    let scalar_selector = BackendSelector::with_config(scalar_config);
-    let scalar_backend = scalar_selector.select(1_000_000);
+fn main() {
+    print_header();
+    print_system_info();
 
-    #[cfg(feature = "gpu")]
-    let wgpu_backend = {
-        use treeboost::backend::WgpuBackend;
-        WgpuBackend::new()
-    };
-
-    #[cfg(not(feature = "gpu"))]
-    let wgpu_backend: Option<Box<dyn HistogramBackend>> = None;
-
-    println!("\nBackend Status:");
-    println!("  Scalar: {} (always available)", scalar_backend.name());
+    // Detect available backends
+    println!("Backend Availability:");
+    println!("  Scalar (CPU):  Always available");
 
     #[cfg(feature = "gpu")]
-    {
-        match &wgpu_backend {
-            Some(b) => {
-                println!("  WGPU:   {} ({})", b.name(), b.device_name());
+    let wgpu_device = {
+        match WgpuDevice::new() {
+            Some(d) => {
+                println!("  WGPU:          {} ({:?})", d.name(), d.backend());
+                Some(Arc::new(d))
             }
             None => {
-                println!("  WGPU:   Not available (no GPU detected)");
+                println!("  WGPU:          Not available (no GPU detected)");
+                None
             }
         }
+    };
+    #[cfg(not(feature = "gpu"))]
+    {
+        println!("  WGPU:          Not compiled (use --features gpu)");
+        let wgpu_device: Option<()> = None;
+        let _ = wgpu_device;
     }
 
-    #[cfg(not(feature = "gpu"))]
-    println!("  WGPU:   Not compiled (enable with --features gpu)");
+    #[cfg(feature = "cuda")]
+    let cuda_device = {
+        match CudaDevice::new() {
+            Some(d) => {
+                println!("  CUDA:          {}", d.name());
+                Some(CudaArc::new(d))
+            }
+            None => {
+                println!("  CUDA:          Not available (no NVIDIA GPU or driver)");
+                None
+            }
+        }
+    };
+    #[cfg(not(feature = "cuda"))]
+    {
+        println!("  CUDA:          Not compiled (use --features cuda)");
+        let cuda_device: Option<()> = None;
+        let _ = cuda_device;
+    }
 
     println!();
 
-    // Determine which backends to benchmark
-    let bench_scalar = args.backend.is_none() || args.backend.as_deref() == Some("scalar");
-    let bench_wgpu = (args.backend.is_none() || args.backend.as_deref() == Some("wgpu"))
-        && wgpu_backend.is_some();
-
-    if !bench_scalar && !bench_wgpu {
-        println!("ERROR: No backends available for benchmarking");
-        if args.backend.as_deref() == Some("wgpu") && wgpu_backend.is_none() {
-            #[cfg(feature = "gpu")]
-            println!("       WGPU backend requested but no GPU detected");
-            #[cfg(not(feature = "gpu"))]
-            println!("       WGPU backend requires --features gpu");
-        }
-        std::process::exit(1);
-    }
-
-    // Dataset configurations for comparison
-    let configs: Vec<(usize, usize, usize)> = if let Some(rows) = args.num_rows {
-        let features = args.num_features.unwrap_or(50);
-        let iters = args.iterations.unwrap_or_else(|| {
-            // Auto-scale iterations based on dataset size
-            match rows {
-                r if r < 10_000 => 200,
-                r if r < 100_000 => 50,
-                r if r < 1_000_000 => 20,
-                _ => 10,
-            }
-        });
-        vec![(rows, features, iters)]
-    } else {
-        // Default: sweep across sizes to find crossover point
-        vec![
-            (1_000, 50, 500),      // 1K rows - scalar wins
-            (5_000, 50, 200),      // 5K rows
-            (10_000, 50, 100),     // 10K rows
-            (25_000, 50, 50),      // 25K rows
-            (50_000, 50, 30),      // 50K rows
-            (100_000, 50, 20),     // 100K rows - GPU starts winning
-            (250_000, 50, 10),     // 250K rows
-            (500_000, 50, 5),      // 500K rows
-            (1_000_000, 50, 3),    // 1M rows - GPU dominates
-        ]
-    };
+    // Benchmark configurations
+    let configs = [
+        (50_000, 20, 2, 10),   // (rows, features, warmup, iterations)
+        (100_000, 20, 2, 10),
+        (200_000, 20, 2, 8),
+        (500_000, 20, 2, 5),
+    ];
+    let max_depth = 6;
 
     // Run benchmarks
-    println!("═══════════════════════════════════════════════════════════════════");
-    println!("  Benchmark Results");
-    println!("═══════════════════════════════════════════════════════════════════");
+    println!("═══════════════════════════════════════════════════════════════════════════════");
+    println!("  Benchmark Results (tree building, depth={})", max_depth);
+    println!("═══════════════════════════════════════════════════════════════════════════════");
+    println!();
 
-    let mut all_results: Vec<(usize, Option<BenchResult>, Option<BenchResult>)> = Vec::new();
-
-    for &(num_rows, num_features, iterations) in &configs {
-        println!("\n┌─ {} rows × {} features ({} cells)",
-                 num_rows, num_features, num_rows * num_features);
-        println!("│");
-
-        // Create dataset
-        let dataset = create_test_dataset(num_rows, num_features);
-        let grad_hess = create_grad_hess(num_rows);
-        let row_indices: Vec<usize> = (0..num_rows).collect();
-
-        let mut scalar_result: Option<BenchResult> = None;
-        let mut wgpu_result: Option<BenchResult> = None;
-
-        // Benchmark scalar
-        if bench_scalar {
-            let result = benchmark_backend(
-                scalar_backend.as_ref(),
-                &dataset,
-                &grad_hess,
-                &row_indices,
-                iterations,
-            );
-            print!("│ ");
-            result.print();
-            scalar_result = Some(result);
-        }
-
-        // Benchmark WGPU
-        #[cfg(feature = "gpu")]
-        if bench_wgpu {
-            if let Some(ref wgpu) = wgpu_backend {
-                let result = benchmark_backend(
-                    wgpu as &dyn HistogramBackend,
-                    &dataset,
-                    &grad_hess,
-                    &row_indices,
-                    iterations,
-                );
-                print!("│ ");
-                result.print();
-                wgpu_result = Some(result);
-            }
-        }
-
-        // Compare if both available
-        if let (Some(ref s), Some(ref w)) = (&scalar_result, &wgpu_result) {
-            let speedup = s.per_iter_ms / w.per_iter_ms;
-            let winner = if speedup > 1.0 { "WGPU" } else { "Scalar" };
-            println!("│");
-            if speedup > 1.0 {
-                println!("│  Speedup: {:.2}x faster with {}", speedup, winner);
-            } else {
-                println!("│  Speedup: {:.2}x faster with {}", 1.0 / speedup, winner);
-            }
-        }
-
-        println!("└─");
-
-        all_results.push((num_rows, scalar_result, wgpu_result));
+    // Table header
+    print!("{:>10} │", "Rows");
+    print!(" {:>12}", "CPU");
+    #[cfg(feature = "gpu")]
+    if wgpu_device.is_some() {
+        print!(" │ {:>12} │ {:>12}", "WGPU Hybrid", "WGPU Full");
     }
+    #[cfg(feature = "cuda")]
+    if cuda_device.is_some() {
+        print!(" │ {:>12} │ {:>12}", "CUDA Hybrid", "CUDA Full");
+    }
+    println!();
 
-    // Summary table
-    if args.compare && all_results.iter().all(|(_, s, w)| s.is_some() && w.is_some()) {
-        println!("\n═══════════════════════════════════════════════════════════════════");
-        println!("  Summary: GPU vs CPU Crossover Analysis");
-        println!("═══════════════════════════════════════════════════════════════════");
-        println!();
-        println!(
-            "  {:>10} │ {:>12} │ {:>12} │ {:>10} │ Winner",
-            "Rows", "Scalar (ms)", "WGPU (ms)", "Speedup"
-        );
-        println!("  {}", "─".repeat(65));
+    print!("{:>10} │", "");
+    print!(" {:>12}", "(ms/tree)");
+    #[cfg(feature = "gpu")]
+    if wgpu_device.is_some() {
+        print!(" │ {:>12} │ {:>12}", "(ms/tree)", "(ms/tree)");
+    }
+    #[cfg(feature = "cuda")]
+    if cuda_device.is_some() {
+        print!(" │ {:>12} │ {:>12}", "(ms/tree)", "(ms/tree)");
+    }
+    println!();
 
-        let mut crossover_found = false;
-        let mut prev_winner = "";
+    println!("{}", "─".repeat(90));
 
-        for (rows, scalar, wgpu) in &all_results {
-            if let (Some(s), Some(w)) = (scalar, wgpu) {
-                let speedup = s.per_iter_ms / w.per_iter_ms;
-                let winner = if speedup > 1.0 { "WGPU" } else { "Scalar" };
+    let mut all_results: Vec<Vec<Option<BenchResult>>> = Vec::new();
 
-                if !crossover_found && !prev_winner.is_empty() && prev_winner != winner {
-                    println!("  {:>10} │ {:>12} │ {:>12} │ {:>10} │ ← CROSSOVER",
-                             "", "", "", "");
-                    crossover_found = true;
+    for &(num_rows, num_features, warmup, iterations) in &configs {
+        let dataset = create_dataset(num_rows, num_features);
+        let (gradients, hessians) = create_grad_hess(num_rows);
+
+        let mut row_results: Vec<Option<BenchResult>> = Vec::new();
+
+        // CPU benchmark
+        let cpu_time = bench_full_cpu(&dataset, &gradients, &hessians, max_depth, warmup, iterations);
+        let cpu_result = BenchResult::new("CPU", num_rows, num_features, cpu_time, iterations);
+
+        print!("{:>10} │", num_rows);
+        print!(" {:>12.2}", cpu_result.time_ms);
+        row_results.push(Some(cpu_result));
+
+        // WGPU benchmarks
+        #[cfg(feature = "gpu")]
+        {
+            if let Some(ref device) = wgpu_device {
+                // WGPU Hybrid
+                if let Some(wgpu_hybrid_time) = bench_wgpu_hybrid(&dataset, &gradients, &hessians, max_depth, warmup, iterations) {
+                    let result = BenchResult::new("WGPU Hybrid", num_rows, num_features, wgpu_hybrid_time, iterations);
+                    print!(" │ {:>12.2}", result.time_ms);
+                    row_results.push(Some(result));
+                } else {
+                    print!(" │ {:>12}", "N/A");
+                    row_results.push(None);
                 }
 
-                println!(
-                    "  {:>10} │ {:>12.3} │ {:>12.3} │ {:>9.2}x │ {}",
-                    rows, s.per_iter_ms, w.per_iter_ms, speedup, winner
+                // WGPU Full
+                let wgpu_full_time = bench_wgpu_full(
+                    Arc::clone(device),
+                    &dataset,
+                    &gradients,
+                    &hessians,
+                    max_depth,
+                    warmup,
+                    iterations,
                 );
+                let result = BenchResult::new("WGPU Full", num_rows, num_features, wgpu_full_time, iterations);
+                print!(" │ {:>12.2}", result.time_ms);
+                row_results.push(Some(result));
+            }
+        }
 
-                prev_winner = winner;
+        // CUDA benchmarks
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(ref device) = cuda_device {
+                // CUDA Hybrid
+                if let Some(cuda_hybrid_time) = bench_cuda_hybrid(&dataset, &gradients, &hessians, max_depth, warmup, iterations) {
+                    let result = BenchResult::new("CUDA Hybrid", num_rows, num_features, cuda_hybrid_time, iterations);
+                    print!(" │ {:>12.2}", result.time_ms);
+                    row_results.push(Some(result));
+                } else {
+                    print!(" │ {:>12}", "N/A");
+                    row_results.push(None);
+                }
+
+                // CUDA Full
+                let cuda_full_time = bench_cuda_full(
+                    CudaArc::clone(device),
+                    &dataset,
+                    &gradients,
+                    &hessians,
+                    max_depth,
+                    warmup,
+                    iterations,
+                );
+                let result = BenchResult::new("CUDA Full", num_rows, num_features, cuda_full_time, iterations);
+                print!(" │ {:>12.2}", result.time_ms);
+                row_results.push(Some(result));
             }
         }
 
         println!();
-        println!("  Interpretation:");
-        println!("    - Speedup > 1.0 means GPU is faster");
-        println!("    - GPU overhead dominates for small datasets");
-        println!("    - GPU wins when compute time > transfer overhead");
+        all_results.push(row_results);
     }
 
-    // Correctness verification
+    // Print speedup summary
+    println!();
+    println!("═══════════════════════════════════════════════════════════════════════════════");
+    println!("  Speedup vs CPU (higher is better)");
+    println!("═══════════════════════════════════════════════════════════════════════════════");
+    println!();
+
+    print!("{:>10} │", "Rows");
     #[cfg(feature = "gpu")]
-    if args.compare {
-        if let Some(ref wgpu) = wgpu_backend {
-            println!("\n═══════════════════════════════════════════════════════════════════");
-            println!("  Correctness Verification");
-            println!("═══════════════════════════════════════════════════════════════════");
-
-            // Test with a medium dataset
-            let dataset = create_test_dataset(10_000, 20);
-            let grad_hess = create_grad_hess(10_000);
-            let row_indices: Vec<usize> = (0..10_000).collect();
-
-            let correct = verify_correctness(
-                scalar_backend.as_ref(),
-                wgpu as &dyn HistogramBackend,
-                &dataset,
-                &grad_hess,
-                &row_indices,
-            );
-
-            if correct {
-                println!("  ✓ WGPU and Scalar backends produce equivalent results");
-            } else {
-                println!("  ✗ MISMATCH detected between backends!");
-            }
-
-            // Also test with row indices
-            let partial_indices: Vec<usize> = (0..5_000).collect();
-            let correct_partial = verify_correctness(
-                scalar_backend.as_ref(),
-                wgpu as &dyn HistogramBackend,
-                &dataset,
-                &grad_hess,
-                &partial_indices,
-            );
-
-            if correct_partial {
-                println!("  ✓ Row index handling verified (subset of rows)");
-            } else {
-                println!("  ✗ Row index handling differs between backends!");
-            }
-        }
+    if wgpu_device.is_some() {
+        print!(" {:>12} │ {:>12}", "WGPU Hybrid", "WGPU Full");
     }
+    #[cfg(feature = "cuda")]
+    if cuda_device.is_some() {
+        print!(" │ {:>12} │ {:>12}", "CUDA Hybrid", "CUDA Full");
+    }
+    println!();
+    println!("{}", "─".repeat(70));
 
-    // Detailed timing breakdown
-    if configs.len() == 1 {
-        let (num_rows, num_features, _) = configs[0];
-        let dataset = create_test_dataset(num_rows, num_features);
-        let grad_hess = create_grad_hess(num_rows);
-        let row_indices: Vec<usize> = (0..num_rows).collect();
+    for (i, &(num_rows, _, _, _)) in configs.iter().enumerate() {
+        let row = &all_results[i];
+        let cpu_time = row[0].as_ref().map(|r| r.time_ms).unwrap_or(1.0);
 
-        println!("\n═══════════════════════════════════════════════════════════════════");
-        println!("  Detailed Timing Breakdown");
-        println!("═══════════════════════════════════════════════════════════════════");
+        print!("{:>10} │", num_rows);
 
-        if bench_scalar {
-            timing_breakdown(scalar_backend.as_ref(), &dataset, &grad_hess, &row_indices);
-        }
-
+        let mut idx = 1;
         #[cfg(feature = "gpu")]
-        if bench_wgpu {
-            if let Some(ref wgpu) = wgpu_backend {
-                timing_breakdown(wgpu as &dyn HistogramBackend, &dataset, &grad_hess, &row_indices);
+        if wgpu_device.is_some() {
+            // WGPU Hybrid speedup
+            if let Some(ref result) = row.get(idx).and_then(|r| r.as_ref()) {
+                let speedup = cpu_time / result.time_ms;
+                print!(" {:>11.2}x", speedup);
+            } else {
+                print!(" {:>12}", "N/A");
             }
+            idx += 1;
+
+            // WGPU Full speedup
+            if let Some(ref result) = row.get(idx).and_then(|r| r.as_ref()) {
+                let speedup = cpu_time / result.time_ms;
+                print!(" │ {:>11.2}x", speedup);
+            } else {
+                print!(" │ {:>12}", "N/A");
+            }
+            idx += 1;
+        }
+
+        #[cfg(feature = "cuda")]
+        if cuda_device.is_some() {
+            // CUDA Hybrid speedup
+            if let Some(ref result) = row.get(idx).and_then(|r| r.as_ref()) {
+                let speedup = cpu_time / result.time_ms;
+                print!(" │ {:>11.2}x", speedup);
+            } else {
+                print!(" │ {:>12}", "N/A");
+            }
+            idx += 1;
+
+            // CUDA Full speedup
+            if let Some(ref result) = row.get(idx).and_then(|r| r.as_ref()) {
+                let speedup = cpu_time / result.time_ms;
+                print!(" │ {:>11.2}x", speedup);
+            } else {
+                print!(" │ {:>12}", "N/A");
+            }
+            let _ = idx;
+        }
+
+        println!();
+    }
+
+    // CUDA vs WGPU comparison if both available
+    #[cfg(all(feature = "gpu", feature = "cuda"))]
+    if wgpu_device.is_some() && cuda_device.is_some() {
+        println!();
+        println!("═══════════════════════════════════════════════════════════════════════════════");
+        println!("  CUDA vs WGPU (speedup, >1 means CUDA is faster)");
+        println!("═══════════════════════════════════════════════════════════════════════════════");
+        println!();
+        println!("{:>10} │ {:>15} │ {:>15}", "Rows", "Hybrid", "Full");
+        println!("{}", "─".repeat(50));
+
+        for (i, &(num_rows, _, _, _)) in configs.iter().enumerate() {
+            let row = &all_results[i];
+            print!("{:>10} │", num_rows);
+
+            // Hybrid comparison (indices: 1=WGPU Hybrid, 3=CUDA Hybrid)
+            if let (Some(Some(wgpu)), Some(Some(cuda))) = (row.get(1), row.get(3)) {
+                let speedup = wgpu.time_ms / cuda.time_ms;
+                print!(" {:>14.2}x", speedup);
+            } else {
+                print!(" {:>15}", "N/A");
+            }
+
+            // Full comparison (indices: 2=WGPU Full, 4=CUDA Full)
+            if let (Some(Some(wgpu)), Some(Some(cuda))) = (row.get(2), row.get(4)) {
+                let speedup = wgpu.time_ms / cuda.time_ms;
+                print!(" │ {:>14.2}x", speedup);
+            } else {
+                print!(" │ {:>15}", "N/A");
+            }
+
+            println!();
         }
     }
 
-    println!("\n═══════════════════════════════════════════════════════════════════");
-    println!("  Benchmark Complete");
-    println!("═══════════════════════════════════════════════════════════════════");
+    println!();
+    println!("═══════════════════════════════════════════════════════════════════════════════");
+    println!("  Legend:");
+    println!("    Hybrid = GPU histogram + CPU partition (best-first growth)");
+    println!("    Full   = GPU histogram + GPU partition (level-wise growth)");
+    println!("═══════════════════════════════════════════════════════════════════════════════");
 }

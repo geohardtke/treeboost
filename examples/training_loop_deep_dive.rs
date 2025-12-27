@@ -58,6 +58,7 @@ fn section_header(title: &str) {
 }
 
 /// Format duration as microseconds or milliseconds depending on magnitude
+#[allow(dead_code)]
 fn fmt_duration(d: Duration) -> String {
     let us = d.as_nanos() as f64 / 1000.0;
     if us < 1000.0 {
@@ -68,6 +69,7 @@ fn fmt_duration(d: Duration) -> String {
 }
 
 /// Format duration with percentage of total
+#[allow(dead_code)]
 fn fmt_duration_pct(d: Duration, total: Duration) -> String {
     let pct = d.as_secs_f64() / total.as_secs_f64() * 100.0;
     format!("{} ({:>5.1}%)", fmt_duration(d), pct)
