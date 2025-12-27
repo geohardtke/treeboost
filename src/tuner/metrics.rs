@@ -6,9 +6,10 @@
 use crate::loss::LossFunction;
 
 /// Metric types for evaluating model performance
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Metric {
     /// Mean Squared Error (regression)
+    #[default]
     Mse,
     /// Root Mean Squared Error (regression)
     Rmse,
@@ -20,12 +21,6 @@ pub enum Metric {
     MultiClassLogLoss { n_classes: usize },
     /// Accuracy (classification)
     Accuracy { threshold: f32 },
-}
-
-impl Default for Metric {
-    fn default() -> Self {
-        Metric::Mse
-    }
 }
 
 impl Metric {

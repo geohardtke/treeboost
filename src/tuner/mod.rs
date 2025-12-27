@@ -523,7 +523,7 @@ impl AutoTuner {
 
                 // Round to step boundaries
                 let low = (low / step) * step;
-                let high = ((high + step - 1) / step) * step;
+                let high = high.div_ceil(*step) * step;
 
                 let mut values: Vec<f32> = (low..=high)
                     .step_by(*step)
@@ -593,8 +593,9 @@ impl AutoTuner {
             strata_permutations.push(perm);
         }
 
-        // Generate samples
+        // Generate samples - iterate by sample index, accessing each param's permutation
         let mut candidates = Vec::with_capacity(n_samples);
+        #[allow(clippy::needless_range_loop)]
         for sample_idx in 0..n_samples {
             let mut candidate = HashMap::new();
 
