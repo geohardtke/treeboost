@@ -4,6 +4,7 @@
 use crate::backend::{BackendType, GpuMode};
 use crate::booster::GBDTConfig;
 use crate::dataset::{BinnedDataset, ColumnPermutation, FeatureInfo, FeatureType, QuantileBinner};
+use crate::loss::{sigmoid, softmax, MultiClassLogLoss};
 use crate::tree::{InteractionConstraints, Tree, TreeGrower};
 use crate::{Result, TreeBoostError};
 use rand::seq::SliceRandom;
@@ -22,10 +23,26 @@ use crate::backend::wgpu::FullGpuTreeBuilder;
 pub struct GBDTModel {
     /// Training configuration
     config: GBDTConfig,
-    /// Base prediction (initial value)
+    /// Base prediction (initial value) - for regression and binary classification
     base_prediction: f32,
+    /// Base predictions per class (for multi-class classification)
+    /// Empty for regression/binary classification
+    base_predictions_multiclass: Vec<f32>,
     /// Ensemble of trees
+    ///
+    /// ## Storage Order
+    ///
+    /// **Regression/Binary**: One tree per round, stored sequentially.
+    /// - `trees[round]` = tree for round `round`
+    ///
+    /// **Multi-class (K classes)**: K trees per round (one per class), stored round-major.
+    /// - `trees[round * K + class_idx]` = tree for round `round`, class `class_idx`
+    /// - Example with 3 classes, 2 rounds: `[r0_c0, r0_c1, r0_c2, r1_c0, r1_c1, r1_c2]`
+    ///
+    /// Total trees = `num_rounds` (regression/binary) or `num_rounds * K` (multi-class)
     trees: Vec<Tree>,
+    /// Number of classes (for multi-class classification, 0 otherwise)
+    num_classes: usize,
     /// Conformal quantile for prediction intervals (if calibrated)
     conformal_q: Option<f32>,
     /// Feature info from training (bin boundaries for consistent prediction)
@@ -268,6 +285,11 @@ impl GBDTModel {
     ///
     /// For most use cases, prefer `train()` which handles binning automatically.
     pub fn train_binned(dataset: &BinnedDataset, config: GBDTConfig) -> Result<Self> {
+        // Dispatch to multi-class training if using multi-class loss
+        if let Some(num_classes) = config.loss_type.num_classes() {
+            return Self::train_binned_multiclass(dataset, config, num_classes);
+        }
+
         config.validate().map_err(TreeBoostError::Config)?;
 
         let loss_fn = config.loss_type.create();
@@ -596,8 +618,162 @@ impl GBDTModel {
         Ok(Self {
             config,
             base_prediction,
+            base_predictions_multiclass: Vec::new(),
             trees,
+            num_classes: 0,
             conformal_q,
+            feature_info: dataset.all_feature_info().to_vec(),
+            column_permutation,
+        })
+    }
+
+    /// Train a multi-class classification model from pre-binned data
+    ///
+    /// This trains K trees per round (one per class) and combines predictions
+    /// via softmax for final class probabilities.
+    fn train_binned_multiclass(
+        dataset: &BinnedDataset,
+        config: GBDTConfig,
+        num_classes: usize,
+    ) -> Result<Self> {
+        config.validate().map_err(TreeBoostError::Config)?;
+
+        let targets = dataset.targets();
+        let multiclass_loss = MultiClassLogLoss::new(num_classes);
+
+        // Split data for validation and calibration
+        let (train_indices, validation_indices, _calibration_indices) = Self::split_for_training(
+            dataset.num_rows(),
+            config.validation_ratio,
+            config.calibration_ratio,
+        );
+
+        // Compute initial predictions per class from training data
+        let train_targets: Vec<f32> = train_indices.iter().map(|&i| targets[i]).collect();
+        let base_predictions = multiclass_loss.initial_predictions(&train_targets);
+
+        // Initialize predictions for all rows: predictions[row * num_classes + class]
+        let num_rows = dataset.num_rows();
+        let mut predictions: Vec<f32> = Vec::with_capacity(num_rows * num_classes);
+        for _ in 0..num_rows {
+            predictions.extend_from_slice(&base_predictions);
+        }
+
+        // Gradient and hessian buffers (per sample, used for one class at a time)
+        let mut gradients = vec![0.0f32; num_rows];
+        let mut hessians = vec![0.0f32; num_rows];
+
+        // Build interaction constraints
+        let interaction_constraints = if config.interaction_groups.is_empty() {
+            InteractionConstraints::new()
+        } else {
+            InteractionConstraints::from_groups(
+                config.interaction_groups.clone(),
+                dataset.num_features(),
+            )
+        };
+
+        // Create tree grower
+        let tree_grower = TreeGrower::new()
+            .with_max_depth(config.max_depth)
+            .with_max_leaves(config.max_leaves)
+            .with_lambda(config.lambda)
+            .with_min_samples_leaf(config.min_samples_leaf)
+            .with_min_hessian_leaf(config.min_hessian_leaf)
+            .with_entropy_weight(config.entropy_weight)
+            .with_min_gain(config.min_gain)
+            .with_learning_rate(config.learning_rate)
+            .with_colsample(config.colsample)
+            .with_monotonic_constraints(config.monotonic_constraints.clone())
+            .with_interaction_constraints(interaction_constraints)
+            .with_backend(config.backend_type)
+            .with_gpu_subgroups(config.use_gpu_subgroups)
+            .with_era_splitting(config.era_splitting);
+
+        // Trees stored as: [round0_class0, round0_class1, ..., round0_classK, round1_class0, ...]
+        let mut trees = Vec::with_capacity(config.num_rounds * num_classes);
+
+        // Early stopping state
+        let early_stopping_enabled =
+            config.early_stopping_rounds > 0 && !validation_indices.is_empty();
+        let mut best_val_loss = f32::MAX;
+        let mut rounds_without_improvement = 0;
+        let mut best_num_rounds = 0;
+
+        for round in 0..config.num_rounds {
+            // Train K trees for this round (one per class)
+            for class_idx in 0..num_classes {
+                // Compute gradients and hessians for this class using batch method
+                multiclass_loss.compute_gradients_batch(
+                    class_idx,
+                    targets,
+                    &predictions,
+                    &train_indices,
+                    &mut gradients,
+                    &mut hessians,
+                );
+
+                // Grow tree for this class
+                let tree = tree_grower.grow_with_indices(dataset, &gradients, &hessians, &train_indices);
+
+                // Update predictions for this class
+                for idx in 0..num_rows {
+                    let delta = tree.predict(|f| dataset.get_bin(idx, f));
+                    predictions[idx * num_classes + class_idx] += delta;
+                }
+
+                trees.push(tree);
+            }
+
+            // Early stopping check on validation set
+            if early_stopping_enabled {
+                // Compute multi-class log loss on validation set
+                let mut val_loss = 0.0f32;
+                for &idx in &validation_indices {
+                    let target_class = targets[idx] as usize;
+                    let row_preds = &predictions[idx * num_classes..(idx + 1) * num_classes];
+                    let probs = softmax(row_preds);
+                    // Negative log likelihood for true class
+                    val_loss -= probs[target_class].max(1e-15).ln();
+                }
+                val_loss /= validation_indices.len() as f32;
+
+                if val_loss < best_val_loss {
+                    best_val_loss = val_loss;
+                    best_num_rounds = round + 1;
+                    rounds_without_improvement = 0;
+                } else {
+                    rounds_without_improvement += 1;
+                    if rounds_without_improvement >= config.early_stopping_rounds {
+                        // Truncate to best number of rounds (K trees per round)
+                        trees.truncate(best_num_rounds * num_classes);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Truncate if early stopping finished all rounds but best was earlier
+        if early_stopping_enabled && best_num_rounds > 0 && best_num_rounds * num_classes < trees.len()
+        {
+            trees.truncate(best_num_rounds * num_classes);
+        }
+
+        // Compute column permutation if enabled
+        let column_permutation = if config.column_reordering && !trees.is_empty() {
+            let importances = Self::compute_importances_from_trees(&trees, dataset.num_features());
+            Some(ColumnPermutation::from_importances(&importances))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            config,
+            base_prediction: 0.0, // Not used for multi-class
+            base_predictions_multiclass: base_predictions,
+            trees,
+            num_classes,
+            conformal_q: None, // Conformal not supported for multi-class yet
             feature_info: dataset.all_feature_info().to_vec(),
             column_permutation,
         })
@@ -868,6 +1044,163 @@ impl GBDTModel {
     }
 
     // ============================================================================
+    // Classification prediction methods
+    // ============================================================================
+
+    /// Predict class probabilities for binary classification
+    ///
+    /// Applies sigmoid to raw predictions to get probabilities in [0, 1].
+    /// Only meaningful when trained with `with_binary_logloss()`.
+    ///
+    /// # Returns
+    /// Vector of probabilities (probability of class 1)
+    pub fn predict_proba(&self, dataset: &BinnedDataset) -> Vec<f32> {
+        let raw = self.predict(dataset);
+        raw.iter().map(|&r| sigmoid(r)).collect()
+    }
+
+    /// Predict class labels for binary classification
+    ///
+    /// Applies sigmoid to raw predictions and thresholds at 0.5 (or custom threshold).
+    /// Only meaningful when trained with `with_binary_logloss()`.
+    ///
+    /// # Arguments
+    /// * `dataset` - The binned dataset to predict on
+    /// * `threshold` - Classification threshold (default 0.5)
+    ///
+    /// # Returns
+    /// Vector of class labels (0 or 1)
+    pub fn predict_class(&self, dataset: &BinnedDataset, threshold: f32) -> Vec<u32> {
+        let proba = self.predict_proba(dataset);
+        proba.iter().map(|&p| if p >= threshold { 1 } else { 0 }).collect()
+    }
+
+    // ============================================================================
+    // Multi-class classification prediction methods
+    // ============================================================================
+
+    /// Check if this is a multi-class model
+    pub fn is_multiclass(&self) -> bool {
+        self.num_classes > 0
+    }
+
+    /// Get number of classes (0 for regression/binary)
+    pub fn get_num_classes(&self) -> usize {
+        self.num_classes
+    }
+
+    /// Predict class probabilities for multi-class classification
+    ///
+    /// Applies softmax to raw predictions to get probabilities for each class.
+    /// Only meaningful when trained with `with_multiclass_logloss()`.
+    ///
+    /// # Returns
+    /// Vector of probability vectors: result[sample][class]
+    pub fn predict_proba_multiclass(&self, dataset: &BinnedDataset) -> Vec<Vec<f32>> {
+        if self.num_classes == 0 {
+            // Not a multi-class model, fall back to binary
+            return self.predict_proba(dataset).into_iter().map(|p| vec![1.0 - p, p]).collect();
+        }
+
+        let num_rows = dataset.num_rows();
+        let num_classes = self.num_classes;
+        let num_rounds = self.trees.len() / num_classes;
+
+        // Initialize raw predictions with base values
+        let mut raw_preds: Vec<f32> = Vec::with_capacity(num_rows * num_classes);
+        for _ in 0..num_rows {
+            raw_preds.extend_from_slice(&self.base_predictions_multiclass);
+        }
+
+        // Add tree predictions
+        // Trees are stored as: [round0_class0, round0_class1, ..., round0_classK, round1_class0, ...]
+        for round in 0..num_rounds {
+            for class_idx in 0..num_classes {
+                let tree_idx = round * num_classes + class_idx;
+                let tree = &self.trees[tree_idx];
+
+                for row_idx in 0..num_rows {
+                    let delta = tree.predict(|f| dataset.get_bin(row_idx, f));
+                    raw_preds[row_idx * num_classes + class_idx] += delta;
+                }
+            }
+        }
+
+        // Apply softmax to each row
+        let mut result = Vec::with_capacity(num_rows);
+        for row_idx in 0..num_rows {
+            let row_preds = &raw_preds[row_idx * num_classes..(row_idx + 1) * num_classes];
+            result.push(softmax(row_preds));
+        }
+
+        result
+    }
+
+    /// Predict class labels for multi-class classification
+    ///
+    /// Returns the class with highest probability (argmax of softmax).
+    /// Only meaningful when trained with `with_multiclass_logloss()`.
+    ///
+    /// # Returns
+    /// Vector of class labels (0, 1, 2, ..., K-1)
+    pub fn predict_class_multiclass(&self, dataset: &BinnedDataset) -> Vec<u32> {
+        let proba = self.predict_proba_multiclass(dataset);
+        proba
+            .iter()
+            .map(|p| {
+                p.iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .map(|(idx, _)| idx as u32)
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+
+    /// Predict raw scores for multi-class classification (before softmax)
+    ///
+    /// Returns raw predictions for each class (not probabilities).
+    /// Shape: result[sample][class]
+    pub fn predict_raw_multiclass(&self, dataset: &BinnedDataset) -> Vec<Vec<f32>> {
+        if self.num_classes == 0 {
+            // Not a multi-class model
+            return self.predict(dataset).into_iter().map(|p| vec![p]).collect();
+        }
+
+        let num_rows = dataset.num_rows();
+        let num_classes = self.num_classes;
+        let num_rounds = self.trees.len() / num_classes;
+
+        // Initialize raw predictions with base values
+        let mut raw_preds: Vec<f32> = Vec::with_capacity(num_rows * num_classes);
+        for _ in 0..num_rows {
+            raw_preds.extend_from_slice(&self.base_predictions_multiclass);
+        }
+
+        // Add tree predictions
+        for round in 0..num_rounds {
+            for class_idx in 0..num_classes {
+                let tree_idx = round * num_classes + class_idx;
+                let tree = &self.trees[tree_idx];
+
+                for row_idx in 0..num_rows {
+                    let delta = tree.predict(|f| dataset.get_bin(row_idx, f));
+                    raw_preds[row_idx * num_classes + class_idx] += delta;
+                }
+            }
+        }
+
+        // Convert to Vec<Vec<f32>>
+        let mut result = Vec::with_capacity(num_rows);
+        for row_idx in 0..num_rows {
+            let row_preds = &raw_preds[row_idx * num_classes..(row_idx + 1) * num_classes];
+            result.push(row_preds.to_vec());
+        }
+
+        result
+    }
+
+    // ============================================================================
     // Raw prediction methods (no binning required)
     // ============================================================================
 
@@ -961,6 +1294,163 @@ impl GBDTModel {
         let upper: Vec<f32> = predictions.iter().map(|&p| p + q).collect();
 
         (predictions, lower, upper)
+    }
+
+    /// Predict class probabilities from raw features (for binary classification)
+    ///
+    /// Applies sigmoid to raw predictions to get probabilities in [0, 1].
+    /// Only meaningful when trained with `with_binary_logloss()`.
+    pub fn predict_proba_raw(&self, features: &[f64]) -> Vec<f32> {
+        let raw = self.predict_raw(features);
+        raw.iter().map(|&r| sigmoid(r)).collect()
+    }
+
+    /// Predict class labels from raw features (for binary classification)
+    ///
+    /// Applies sigmoid to raw predictions and thresholds.
+    /// Only meaningful when trained with `with_binary_logloss()`.
+    pub fn predict_class_raw(&self, features: &[f64], threshold: f32) -> Vec<u32> {
+        let proba = self.predict_proba_raw(features);
+        proba.iter().map(|&p| if p >= threshold { 1 } else { 0 }).collect()
+    }
+
+    // ============================================================================
+    // Multi-class raw prediction methods (from raw features, no binning needed)
+    // ============================================================================
+
+    /// Predict class probabilities from raw features (for multi-class classification)
+    ///
+    /// Uses the split_value stored in tree nodes to compare directly against raw values.
+    /// Applies softmax to raw predictions to get probabilities for each class.
+    /// Only meaningful when trained with `with_multiclass_logloss()`.
+    ///
+    /// # Arguments
+    /// * `features` - Row-major feature matrix: features[row * num_features + feature]
+    ///
+    /// # Returns
+    /// Vector of probability vectors: result[sample][class]
+    pub fn predict_proba_multiclass_raw(&self, features: &[f64]) -> Vec<Vec<f32>> {
+        if self.num_classes == 0 {
+            // Not a multi-class model, fall back to binary
+            return self.predict_proba_raw(features).into_iter().map(|p| vec![1.0 - p, p]).collect();
+        }
+
+        let num_features = self.num_features();
+        if num_features == 0 {
+            return vec![];
+        }
+
+        let num_rows = features.len() / num_features;
+        let num_classes = self.num_classes;
+        let num_rounds = self.trees.len() / num_classes;
+
+        // Initialize raw predictions with base values
+        let mut raw_preds: Vec<f32> = Vec::with_capacity(num_rows * num_classes);
+        for _ in 0..num_rows {
+            raw_preds.extend_from_slice(&self.base_predictions_multiclass);
+        }
+
+        // Add tree predictions
+        // Trees are stored as: [round0_class0, round0_class1, ..., round0_classK, round1_class0, ...]
+        for round in 0..num_rounds {
+            for class_idx in 0..num_classes {
+                let tree_idx = round * num_classes + class_idx;
+                let tree = &self.trees[tree_idx];
+
+                for row_idx in 0..num_rows {
+                    let row_offset = row_idx * num_features;
+                    let delta = tree.predict_raw(|f| features[row_offset + f]);
+                    raw_preds[row_idx * num_classes + class_idx] += delta;
+                }
+            }
+        }
+
+        // Apply softmax to each row
+        let mut result = Vec::with_capacity(num_rows);
+        for row_idx in 0..num_rows {
+            let row_preds = &raw_preds[row_idx * num_classes..(row_idx + 1) * num_classes];
+            result.push(softmax(row_preds));
+        }
+
+        result
+    }
+
+    /// Predict class labels from raw features (for multi-class classification)
+    ///
+    /// Returns the class with highest probability (argmax of softmax).
+    /// Only meaningful when trained with `with_multiclass_logloss()`.
+    ///
+    /// # Arguments
+    /// * `features` - Row-major feature matrix: features[row * num_features + feature]
+    ///
+    /// # Returns
+    /// Vector of class labels (0, 1, 2, ..., K-1)
+    pub fn predict_class_multiclass_raw(&self, features: &[f64]) -> Vec<u32> {
+        let proba = self.predict_proba_multiclass_raw(features);
+        proba
+            .iter()
+            .map(|p| {
+                p.iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .map(|(idx, _)| idx as u32)
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+
+    /// Predict raw scores from raw features (for multi-class, before softmax)
+    ///
+    /// Returns raw predictions for each class (not probabilities).
+    ///
+    /// # Arguments
+    /// * `features` - Row-major feature matrix: features[row * num_features + feature]
+    ///
+    /// # Returns
+    /// Vector of raw score vectors: result[sample][class]
+    pub fn predict_raw_multiclass_raw(&self, features: &[f64]) -> Vec<Vec<f32>> {
+        if self.num_classes == 0 {
+            // Not a multi-class model
+            return self.predict_raw(features).into_iter().map(|p| vec![p]).collect();
+        }
+
+        let num_features = self.num_features();
+        if num_features == 0 {
+            return vec![];
+        }
+
+        let num_rows = features.len() / num_features;
+        let num_classes = self.num_classes;
+        let num_rounds = self.trees.len() / num_classes;
+
+        // Initialize raw predictions with base values
+        let mut raw_preds: Vec<f32> = Vec::with_capacity(num_rows * num_classes);
+        for _ in 0..num_rows {
+            raw_preds.extend_from_slice(&self.base_predictions_multiclass);
+        }
+
+        // Add tree predictions
+        for round in 0..num_rounds {
+            for class_idx in 0..num_classes {
+                let tree_idx = round * num_classes + class_idx;
+                let tree = &self.trees[tree_idx];
+
+                for row_idx in 0..num_rows {
+                    let row_offset = row_idx * num_features;
+                    let delta = tree.predict_raw(|f| features[row_offset + f]);
+                    raw_preds[row_idx * num_classes + class_idx] += delta;
+                }
+            }
+        }
+
+        // Convert to Vec<Vec<f32>>
+        let mut result = Vec::with_capacity(num_rows);
+        for row_idx in 0..num_rows {
+            let row_preds = &raw_preds[row_idx * num_classes..(row_idx + 1) * num_classes];
+            result.push(row_preds.to_vec());
+        }
+
+        result
     }
 
     /// Get number of trees
@@ -1396,5 +1886,109 @@ mod tests {
         let features_f64: Vec<f64> = features.iter().map(|&v| v as f64).collect();
         let predictions = model.predict_raw(&features_f64);
         assert_eq!(predictions.len(), num_rows);
+    }
+
+    // Helper function to create a multi-class dataset
+    fn create_multiclass_dataset(num_rows: usize, num_classes: usize) -> BinnedDataset {
+        let num_features = 4;
+
+        // Generate features with some class-specific patterns
+        let mut features = Vec::with_capacity(num_rows * num_features);
+        for f in 0..num_features {
+            for r in 0..num_rows {
+                features.push(((r * (f + 1) * 17 + r % num_classes * 50) % 256) as u8);
+            }
+        }
+
+        // Generate class labels (0, 1, ..., num_classes-1)
+        let targets: Vec<f32> = (0..num_rows).map(|i| (i % num_classes) as f32).collect();
+
+        let feature_info = (0..num_features)
+            .map(|i| FeatureInfo {
+                name: format!("feature_{}", i),
+                feature_type: FeatureType::Numeric,
+                num_bins: 255,
+                bin_boundaries: vec![],
+            })
+            .collect();
+
+        BinnedDataset::new(num_rows, features, targets, feature_info)
+    }
+
+    #[test]
+    fn test_multiclass_training() {
+        let num_classes = 3;
+        let dataset = create_multiclass_dataset(300, num_classes);
+
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(3)
+            .with_learning_rate(0.1)
+            .with_multiclass_logloss(num_classes);
+
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
+
+        // Should have K trees per round = 10 * 3 = 30 trees
+        assert_eq!(model.num_trees(), 10 * num_classes);
+        assert!(model.is_multiclass());
+        assert_eq!(model.get_num_classes(), num_classes);
+    }
+
+    #[test]
+    fn test_multiclass_prediction() {
+        let num_classes = 3;
+        let dataset = create_multiclass_dataset(150, num_classes);
+
+        let config = GBDTConfig::new()
+            .with_num_rounds(20)
+            .with_max_depth(4)
+            .with_learning_rate(0.1)
+            .with_multiclass_logloss(num_classes);
+
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
+
+        // Test probability predictions
+        let proba = model.predict_proba_multiclass(&dataset);
+        assert_eq!(proba.len(), 150);
+
+        // Each row should have num_classes probabilities that sum to 1
+        for row_proba in &proba {
+            assert_eq!(row_proba.len(), num_classes);
+            let sum: f32 = row_proba.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-5, "Probabilities should sum to 1");
+
+            // All probabilities should be in [0, 1]
+            for &p in row_proba {
+                assert!(p >= 0.0 && p <= 1.0, "Probability should be in [0, 1]");
+            }
+        }
+
+        // Test class predictions
+        let classes = model.predict_class_multiclass(&dataset);
+        assert_eq!(classes.len(), 150);
+
+        // All predicted classes should be valid
+        for &c in &classes {
+            assert!(
+                (c as usize) < num_classes,
+                "Predicted class should be < num_classes"
+            );
+        }
+
+        // Check that predictions are better than random (at least some correct)
+        let targets = dataset.targets();
+        let correct: usize = classes
+            .iter()
+            .zip(targets.iter())
+            .filter(|(&pred, &target)| pred == target as u32)
+            .count();
+        let accuracy = correct as f32 / 150.0;
+
+        // With balanced classes and learned patterns, should be better than random (33%)
+        assert!(
+            accuracy > 0.4,
+            "Multi-class accuracy {} should be better than random",
+            accuracy
+        );
     }
 }

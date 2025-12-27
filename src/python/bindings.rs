@@ -167,6 +167,32 @@ impl PyGBDTConfig {
         self.inner.loss_type = LossType::PseudoHuber { delta };
     }
 
+    /// Set loss function to Binary Log Loss (for binary classification)
+    ///
+    /// Uses sigmoid activation for probability output.
+    /// Targets should be 0 or 1.
+    fn use_binary_logloss(&mut self) {
+        self.inner.loss_type = LossType::BinaryLogLoss;
+    }
+
+    /// Set loss function to Multi-class Log Loss (for multi-class classification)
+    ///
+    /// Uses softmax activation for probability output.
+    /// Targets should be class indices: 0, 1, 2, ..., num_classes-1.
+    ///
+    /// This trains K trees per round (one per class) and combines predictions
+    /// via softmax for final class probabilities.
+    ///
+    /// Args:
+    ///     num_classes: Number of classes (K), must be >= 2
+    fn use_multiclass_logloss(&mut self, num_classes: usize) -> PyResult<()> {
+        if num_classes < 2 {
+            return Err(PyValueError::new_err("num_classes must be >= 2"));
+        }
+        self.inner.loss_type = LossType::MultiClassLogLoss { num_classes };
+        Ok(())
+    }
+
     // Subsampling
 
     /// Row subsampling ratio (0.0-1.0)
@@ -720,6 +746,302 @@ impl PyGBDTModel {
             PyArray1::from_vec(py, lower),
             PyArray1::from_vec(py, upper),
         ))
+    }
+
+    /// Predict class probabilities (for binary classification)
+    ///
+    /// Applies sigmoid to raw predictions to get probabilities in [0, 1].
+    /// Only meaningful when trained with `use_binary_logloss()`.
+    ///
+    /// For multi-class models, use `predict_proba_multiclass()` instead.
+    ///
+    /// Args:
+    ///     features: 2D numpy array of shape (n_samples, n_features)
+    ///               Accepts float32 or float64 arrays
+    ///
+    /// Returns:
+    ///     1D numpy array of probabilities (probability of class 1)
+    #[pyo3(signature = (features))]
+    fn predict_proba<'py>(
+        &self,
+        py: Python<'py>,
+        features: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyArray1<f32>>> {
+        // Check if this is a multi-class model and provide helpful error
+        if self.model.is_multiclass() {
+            return Err(PyValueError::new_err(
+                "predict_proba() is for binary classification only. \
+                 For multi-class models, use predict_proba_multiclass() instead."
+            ));
+        }
+
+        // Try f64 first, then f32
+        let (num_features, raw_features) = if let Ok(arr) =
+            features.extract::<PyReadonlyArray2<'py, f64>>()
+        {
+            let arr = arr.as_array();
+            let num_rows = arr.nrows();
+            let num_cols = arr.ncols();
+            let mut raw = Vec::with_capacity(num_rows * num_cols);
+            for row in arr.rows() {
+                raw.extend(row.iter().copied());
+            }
+            (num_cols, raw)
+        } else if let Ok(arr) = features.extract::<PyReadonlyArray2<'py, f32>>() {
+            let arr = arr.as_array();
+            let num_rows = arr.nrows();
+            let num_cols = arr.ncols();
+            let mut raw = Vec::with_capacity(num_rows * num_cols);
+            for row in arr.rows() {
+                raw.extend(row.iter().map(|&v| v as f64));
+            }
+            (num_cols, raw)
+        } else {
+            return Err(PyValueError::new_err(
+                "features must be a 2D numpy array of float32 or float64",
+            ));
+        };
+
+        if num_features != self.model.num_features() {
+            return Err(PyValueError::new_err(format!(
+                "Expected {} features, got {}",
+                self.model.num_features(),
+                num_features
+            )));
+        }
+
+        // Predict probabilities (release GIL)
+        let proba = py.allow_threads(|| self.model.predict_proba_raw(&raw_features));
+
+        Ok(PyArray1::from_vec(py, proba))
+    }
+
+    /// Predict class labels (for binary classification)
+    ///
+    /// Applies sigmoid to raw predictions and thresholds.
+    /// Only meaningful when trained with `use_binary_logloss()`.
+    ///
+    /// For multi-class models, use `predict_class_multiclass()` instead.
+    ///
+    /// Args:
+    ///     features: 2D numpy array of shape (n_samples, n_features)
+    ///               Accepts float32 or float64 arrays
+    ///     threshold: Classification threshold (default 0.5)
+    ///
+    /// Returns:
+    ///     1D numpy array of class labels (0 or 1)
+    #[pyo3(signature = (features, threshold = 0.5))]
+    fn predict_class<'py>(
+        &self,
+        py: Python<'py>,
+        features: &Bound<'py, PyAny>,
+        threshold: f32,
+    ) -> PyResult<Bound<'py, PyArray1<u32>>> {
+        // Check if this is a multi-class model and provide helpful error
+        if self.model.is_multiclass() {
+            return Err(PyValueError::new_err(
+                "predict_class() is for binary classification only. \
+                 For multi-class models, use predict_class_multiclass() instead."
+            ));
+        }
+
+        // Try f64 first, then f32
+        let (num_features, raw_features) = if let Ok(arr) =
+            features.extract::<PyReadonlyArray2<'py, f64>>()
+        {
+            let arr = arr.as_array();
+            let num_rows = arr.nrows();
+            let num_cols = arr.ncols();
+            let mut raw = Vec::with_capacity(num_rows * num_cols);
+            for row in arr.rows() {
+                raw.extend(row.iter().copied());
+            }
+            (num_cols, raw)
+        } else if let Ok(arr) = features.extract::<PyReadonlyArray2<'py, f32>>() {
+            let arr = arr.as_array();
+            let num_rows = arr.nrows();
+            let num_cols = arr.ncols();
+            let mut raw = Vec::with_capacity(num_rows * num_cols);
+            for row in arr.rows() {
+                raw.extend(row.iter().map(|&v| v as f64));
+            }
+            (num_cols, raw)
+        } else {
+            return Err(PyValueError::new_err(
+                "features must be a 2D numpy array of float32 or float64",
+            ));
+        };
+
+        if num_features != self.model.num_features() {
+            return Err(PyValueError::new_err(format!(
+                "Expected {} features, got {}",
+                self.model.num_features(),
+                num_features
+            )));
+        }
+
+        // Predict classes (release GIL)
+        let classes = py.allow_threads(|| self.model.predict_class_raw(&raw_features, threshold));
+
+        Ok(PyArray1::from_vec(py, classes))
+    }
+
+    // Multi-class classification methods
+
+    /// Check if this is a multi-class model
+    #[getter]
+    fn is_multiclass(&self) -> bool {
+        self.model.is_multiclass()
+    }
+
+    /// Get number of classes (0 for regression/binary)
+    #[getter]
+    fn num_classes(&self) -> usize {
+        self.model.get_num_classes()
+    }
+
+    /// Predict class probabilities for multi-class classification
+    ///
+    /// Applies softmax to raw predictions to get probabilities for each class.
+    /// Only meaningful when trained with `use_multiclass_logloss()`.
+    ///
+    /// For binary classification, use `predict_proba()` instead.
+    ///
+    /// Args:
+    ///     features: 2D numpy array of shape (n_samples, n_features)
+    ///               Accepts float32 or float64 arrays
+    ///
+    /// Returns:
+    ///     2D numpy array of shape (n_samples, n_classes) with probabilities
+    #[pyo3(signature = (features))]
+    fn predict_proba_multiclass<'py>(
+        &self,
+        py: Python<'py>,
+        features: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, numpy::PyArray2<f32>>> {
+        use numpy::PyArray2;
+
+        // Try f64 first, then f32
+        let (num_features, raw_features) = if let Ok(arr) =
+            features.extract::<PyReadonlyArray2<'py, f64>>()
+        {
+            let arr = arr.as_array();
+            let num_rows = arr.nrows();
+            let num_cols = arr.ncols();
+            let mut raw = Vec::with_capacity(num_rows * num_cols);
+            for row in arr.rows() {
+                raw.extend(row.iter().copied());
+            }
+            (num_cols, raw)
+        } else if let Ok(arr) = features.extract::<PyReadonlyArray2<'py, f32>>() {
+            let arr = arr.as_array();
+            let num_rows = arr.nrows();
+            let num_cols = arr.ncols();
+            let mut raw = Vec::with_capacity(num_rows * num_cols);
+            for row in arr.rows() {
+                raw.extend(row.iter().map(|&v| v as f64));
+            }
+            (num_cols, raw)
+        } else {
+            return Err(PyValueError::new_err(
+                "features must be a 2D numpy array of float32 or float64",
+            ));
+        };
+
+        if num_features != self.model.num_features() {
+            return Err(PyValueError::new_err(format!(
+                "Expected {} features, got {}",
+                self.model.num_features(),
+                num_features
+            )));
+        }
+
+        if !self.model.is_multiclass() {
+            return Err(PyValueError::new_err(
+                "predict_proba_multiclass() is for multi-class models only. \
+                 For binary classification, use predict_proba() instead."
+            ));
+        }
+
+        let num_rows = raw_features.len() / num_features;
+        let num_classes = self.model.get_num_classes();
+
+        // Use the raw prediction method (no binning needed, release GIL)
+        let proba = py.allow_threads(|| self.model.predict_proba_multiclass_raw(&raw_features));
+
+        // Convert Vec<Vec<f32>> to 2D numpy array
+        let flat: Vec<f32> = proba.into_iter().flatten().collect();
+        PyArray2::from_vec(py, flat)
+            .map_err(|e| PyValueError::new_err(format!("Failed to create numpy array: {:?}", e)))?
+            .reshape([num_rows, num_classes])
+            .map_err(|e| PyValueError::new_err(format!("Failed to reshape array: {:?}", e)))
+    }
+
+    /// Predict class labels for multi-class classification
+    ///
+    /// Returns the class with highest probability (argmax of softmax).
+    /// Only meaningful when trained with `use_multiclass_logloss()`.
+    ///
+    /// For binary classification, use `predict_class()` instead.
+    ///
+    /// Args:
+    ///     features: 2D numpy array of shape (n_samples, n_features)
+    ///               Accepts float32 or float64 arrays
+    ///
+    /// Returns:
+    ///     1D numpy array of class labels (0, 1, 2, ..., K-1)
+    #[pyo3(signature = (features))]
+    fn predict_class_multiclass<'py>(
+        &self,
+        py: Python<'py>,
+        features: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyArray1<u32>>> {
+        // Try f64 first, then f32
+        let (num_features, raw_features) = if let Ok(arr) =
+            features.extract::<PyReadonlyArray2<'py, f64>>()
+        {
+            let arr = arr.as_array();
+            let num_rows = arr.nrows();
+            let num_cols = arr.ncols();
+            let mut raw = Vec::with_capacity(num_rows * num_cols);
+            for row in arr.rows() {
+                raw.extend(row.iter().copied());
+            }
+            (num_cols, raw)
+        } else if let Ok(arr) = features.extract::<PyReadonlyArray2<'py, f32>>() {
+            let arr = arr.as_array();
+            let num_rows = arr.nrows();
+            let num_cols = arr.ncols();
+            let mut raw = Vec::with_capacity(num_rows * num_cols);
+            for row in arr.rows() {
+                raw.extend(row.iter().map(|&v| v as f64));
+            }
+            (num_cols, raw)
+        } else {
+            return Err(PyValueError::new_err(
+                "features must be a 2D numpy array of float32 or float64",
+            ));
+        };
+
+        if num_features != self.model.num_features() {
+            return Err(PyValueError::new_err(format!(
+                "Expected {} features, got {}",
+                self.model.num_features(),
+                num_features
+            )));
+        }
+
+        if !self.model.is_multiclass() {
+            return Err(PyValueError::new_err(
+                "predict_class_multiclass() is for multi-class models only. \
+                 For binary classification, use predict_class() instead."
+            ));
+        }
+
+        // Use the raw prediction method (no binning needed, release GIL)
+        let classes = py.allow_threads(|| self.model.predict_class_multiclass_raw(&raw_features));
+
+        Ok(PyArray1::from_vec(py, classes))
     }
 
     /// Get feature importances (gain-based)

@@ -2,17 +2,21 @@
 
 use crate::backend::{BackendType, GpuMode};
 use crate::dataset::OrderingStrategy;
-use crate::loss::{LossFunction, MseLoss, PseudoHuberLoss};
+use crate::loss::{BinaryLogLoss, LossFunction, MseLoss, PseudoHuberLoss};
 use crate::tree::MonotonicConstraint;
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// Loss function type for serialization
 #[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]
 pub enum LossType {
-    /// Mean Squared Error
+    /// Mean Squared Error (regression)
     Mse,
-    /// Pseudo-Huber Loss with given delta
+    /// Pseudo-Huber Loss with given delta (robust regression)
     PseudoHuber { delta: f32 },
+    /// Binary Log Loss / Cross-Entropy (binary classification)
+    BinaryLogLoss,
+    /// Multi-class Log Loss / Softmax Cross-Entropy (multi-class classification)
+    MultiClassLogLoss { num_classes: usize },
 }
 
 impl Default for LossType {
@@ -22,11 +26,43 @@ impl Default for LossType {
 }
 
 impl LossType {
-    /// Create a boxed loss function
+    /// Create a boxed loss function for regression and binary classification
+    ///
+    /// # Panics
+    /// Panics if called with `MultiClassLogLoss` - multi-class has a separate
+    /// training path that handles gradients differently.
     pub fn create(&self) -> Box<dyn LossFunction> {
         match self {
             LossType::Mse => Box::new(MseLoss::new()),
             LossType::PseudoHuber { delta } => Box::new(PseudoHuberLoss::new(*delta)),
+            LossType::BinaryLogLoss => Box::new(BinaryLogLoss::new()),
+            LossType::MultiClassLogLoss { .. } => {
+                panic!(
+                    "MultiClassLogLoss does not implement LossFunction trait. \
+                     Use train_binned_multiclass() which handles multi-class gradients directly."
+                )
+            }
+        }
+    }
+
+    /// Returns true if this is a classification loss
+    pub fn is_classification(&self) -> bool {
+        matches!(
+            self,
+            LossType::BinaryLogLoss | LossType::MultiClassLogLoss { .. }
+        )
+    }
+
+    /// Returns true if this is a multi-class classification loss
+    pub fn is_multiclass(&self) -> bool {
+        matches!(self, LossType::MultiClassLogLoss { .. })
+    }
+
+    /// Get number of classes (for multi-class classification)
+    pub fn num_classes(&self) -> Option<usize> {
+        match self {
+            LossType::MultiClassLogLoss { num_classes } => Some(*num_classes),
+            _ => None,
         }
     }
 }
@@ -272,6 +308,31 @@ impl GBDTConfig {
     /// Set loss function to Pseudo-Huber
     pub fn with_pseudo_huber_loss(mut self, delta: f32) -> Self {
         self.loss_type = LossType::PseudoHuber { delta };
+        self
+    }
+
+    /// Set loss function to Binary Log Loss (for binary classification)
+    ///
+    /// Uses sigmoid activation for probability output.
+    /// Targets should be 0 or 1.
+    pub fn with_binary_logloss(mut self) -> Self {
+        self.loss_type = LossType::BinaryLogLoss;
+        self
+    }
+
+    /// Set loss function to Multi-class Log Loss (for multi-class classification)
+    ///
+    /// Uses softmax activation for probability output.
+    /// Targets should be class indices: 0, 1, 2, ..., num_classes-1.
+    ///
+    /// This trains K trees per round (one per class) and combines predictions
+    /// via softmax for final class probabilities.
+    ///
+    /// # Arguments
+    /// * `num_classes` - Number of classes (K)
+    pub fn with_multiclass_logloss(mut self, num_classes: usize) -> Self {
+        assert!(num_classes >= 2, "num_classes must be >= 2");
+        self.loss_type = LossType::MultiClassLogLoss { num_classes };
         self
     }
 
