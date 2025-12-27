@@ -57,7 +57,7 @@ pub use booster::{GBDTConfig, GBDTModel};
 pub use dataset::{BinnedDataset, FeatureInfo, FeatureType, QuantileBinner};
 pub use histogram::HistogramBuilder;
 pub use inference::Prediction;
-pub use loss::{LossFunction, MseLoss, PseudoHuberLoss};
+pub use loss::{sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, PseudoHuberLoss};
 pub use tree::{InteractionConstraints, MonotonicConstraint};
 
 /// Library error type
