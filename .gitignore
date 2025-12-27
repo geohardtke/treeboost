@@ -31,19 +31,15 @@ callgrind.out.*
 *.safetensors
 *.gguf
 
-# Data files (real data - ignored)
+# Data files (ignored)
 *.csv
 *.parquet
 *.arrow
 *.feather
 *.xlsx
 
-# Keep synthetic test samples (tracked in git)
-# Small CSV samples are tracked, large parquet files are generated locally
-!samples/synthetic/*.csv
-!samples/synthetic/README.md
-# Generated parquet files (run scripts/generate_samples.py to create)
-# samples/synthetic/*.parquet - NOT tracked (too large)
+# Sample data - all ignored (generate locally with scripts/generate_samples.py)
+samples/
 
 # Logs
 *.log
