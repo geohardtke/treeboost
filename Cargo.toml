@@ -5,6 +5,16 @@ edition = "2021"
 description = "High-performance Gradient Boosted Decision Tree engine for large-scale tabular data"
 license = "Apache-2.0"
 repository = "https://github.com/ml-rust/treeboost"
+keywords = [
+  "machine-learning",
+  "gbdt",
+  "gradient-boosting",
+  "decision-tree",
+  "xgboost",
+]
+categories = ["science", "algorithms"]
+readme = "README.md"
+authors = ["Farhan Syah"]
 
 [lib]
 name = "treeboost"

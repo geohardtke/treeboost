@@ -9,11 +9,14 @@
 //! import numpy as np
 //! from treeboost import GBDTConfig, GBDTModel
 //!
-//! # Create configuration
-//! config = GBDTConfig()
-//! config.num_rounds = 100
-//! config.max_depth = 6
-//! config.learning_rate = 0.1
+//! # Create configuration with builder pattern (recommended)
+//! config = (
+//!     GBDTConfig()
+//!     .with_num_rounds(100)
+//!     .with_max_depth(6)
+//!     .with_learning_rate(0.1)
+//!     .with_backend("cuda")
+//! )
 //!
 //! # Train model (features: 2D array, targets: 1D array)
 //! model = GBDTModel.train(features, targets, config)
@@ -34,6 +37,139 @@ use crate::backend::{BackendType, GpuMode};
 use crate::booster::{GBDTConfig, GBDTModel, LossType};
 use crate::serialize;
 use crate::tree::MonotonicConstraint;
+
+/// Extract features from a 2D numpy array (f64 or f32) into a flat Vec<f64>
+///
+/// Returns (num_features, flattened_row_major_data)
+fn extract_features_array<'py>(
+    features: &Bound<'py, PyAny>,
+) -> PyResult<(usize, Vec<f64>)> {
+    // Try f64 first (most common for numpy), then f32
+    if let Ok(arr) = features.extract::<PyReadonlyArray2<'py, f64>>() {
+        let arr = arr.as_array();
+        let num_rows = arr.nrows();
+        let num_cols = arr.ncols();
+        let mut raw = Vec::with_capacity(num_rows * num_cols);
+        for row in arr.rows() {
+            raw.extend(row.iter().copied());
+        }
+        Ok((num_cols, raw))
+    } else if let Ok(arr) = features.extract::<PyReadonlyArray2<'py, f32>>() {
+        let arr = arr.as_array();
+        let num_rows = arr.nrows();
+        let num_cols = arr.ncols();
+        let mut raw = Vec::with_capacity(num_rows * num_cols);
+        for row in arr.rows() {
+            raw.extend(row.iter().map(|&v| v as f64));
+        }
+        Ok((num_cols, raw))
+    } else {
+        Err(PyValueError::new_err(
+            "features must be a 2D numpy array of float32 or float64",
+        ))
+    }
+}
+
+/// Validate that extracted features match the expected count
+fn validate_feature_count(actual: usize, expected: usize) -> PyResult<()> {
+    if actual != expected {
+        return Err(PyValueError::new_err(format!(
+            "Expected {} features, got {}",
+            expected, actual
+        )));
+    }
+    Ok(())
+}
+
+/// Python wrapper for monotonic constraint
+///
+/// Controls the direction of feature effects on predictions.
+///
+/// Example:
+/// ```python
+/// from treeboost import MonotonicConstraint
+///
+/// # Feature 0: increasing, Feature 1: decreasing, Feature 2: none
+/// constraints = [
+///     MonotonicConstraint.increasing(),
+///     MonotonicConstraint.decreasing(),
+///     MonotonicConstraint.none()
+/// ]
+/// config = config.with_monotonic_constraints(constraints)
+/// ```
+#[pyclass(name = "MonotonicConstraint", eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PyMonotonicConstraint {
+    inner: MonotonicConstraint,
+}
+
+#[pymethods]
+impl PyMonotonicConstraint {
+    /// Create an increasing constraint (larger values -> larger predictions)
+    #[staticmethod]
+    fn increasing() -> Self {
+        Self { inner: MonotonicConstraint::Increasing }
+    }
+
+    /// Create a decreasing constraint (larger values -> smaller predictions)
+    #[staticmethod]
+    fn decreasing() -> Self {
+        Self { inner: MonotonicConstraint::Decreasing }
+    }
+
+    /// Create no constraint (no monotonic restriction)
+    #[staticmethod]
+    fn none() -> Self {
+        Self { inner: MonotonicConstraint::None }
+    }
+
+    /// Check if this is an increasing constraint
+    #[getter]
+    fn is_increasing(&self) -> bool {
+        matches!(self.inner, MonotonicConstraint::Increasing)
+    }
+
+    /// Check if this is a decreasing constraint
+    #[getter]
+    fn is_decreasing(&self) -> bool {
+        matches!(self.inner, MonotonicConstraint::Decreasing)
+    }
+
+    /// Check if this is no constraint
+    #[getter]
+    fn is_none(&self) -> bool {
+        matches!(self.inner, MonotonicConstraint::None)
+    }
+
+    /// Convert to integer value (1 = increasing, -1 = decreasing, 0 = none)
+    fn to_int(&self) -> i32 {
+        match self.inner {
+            MonotonicConstraint::Increasing => 1,
+            MonotonicConstraint::Decreasing => -1,
+            MonotonicConstraint::None => 0,
+        }
+    }
+
+    fn __repr__(&self) -> &'static str {
+        match self.inner {
+            MonotonicConstraint::Increasing => "MonotonicConstraint.increasing()",
+            MonotonicConstraint::Decreasing => "MonotonicConstraint.decreasing()",
+            MonotonicConstraint::None => "MonotonicConstraint.none()",
+        }
+    }
+}
+
+impl From<MonotonicConstraint> for PyMonotonicConstraint {
+    fn from(mc: MonotonicConstraint) -> Self {
+        Self { inner: mc }
+    }
+}
+
+impl From<PyMonotonicConstraint> for MonotonicConstraint {
+    fn from(pmc: PyMonotonicConstraint) -> Self {
+        pmc.inner
+    }
+}
 
 /// Python wrapper for GBDT training configuration
 #[pyclass(name = "GBDTConfig")]
@@ -379,7 +515,7 @@ impl PyGBDTConfig {
             "rocm" => BackendType::Rocm,
             "metal" => BackendType::Metal,
             _ => return Err(PyValueError::new_err(
-                "backend must be one of: 'auto', 'cpu', 'gpu', 'wgpu', 'cuda', 'rocm', 'metal'"
+                "backend must be one of: 'auto' (or 'gpu'), 'cpu' (or 'scalar'), 'wgpu', 'cuda', 'rocm', 'metal'"
             )),
         };
         Ok(())
@@ -493,6 +629,340 @@ impl PyGBDTConfig {
             self.backend(),
             self.gpu_mode()
         )
+    }
+
+    // ========== Builder Pattern Methods ==========
+    // All return Self for method chaining (immutable builder pattern)
+
+    /// Set number of boosting rounds (trees)
+    fn with_num_rounds(&self, value: usize) -> PyResult<Self> {
+        if value == 0 {
+            return Err(PyValueError::new_err("num_rounds must be >= 1"));
+        }
+        let mut new = self.clone();
+        new.inner.num_rounds = value;
+        Ok(new)
+    }
+
+    /// Set learning rate (shrinkage)
+    fn with_learning_rate(&self, value: f32) -> PyResult<Self> {
+        if value <= 0.0 || value > 1.0 {
+            return Err(PyValueError::new_err("learning_rate must be in (0.0, 1.0]"));
+        }
+        let mut new = self.clone();
+        new.inner.learning_rate = value;
+        Ok(new)
+    }
+
+    /// Set maximum depth of each tree
+    fn with_max_depth(&self, value: usize) -> PyResult<Self> {
+        if value == 0 {
+            return Err(PyValueError::new_err("max_depth must be >= 1"));
+        }
+        let mut new = self.clone();
+        new.inner.max_depth = value;
+        Ok(new)
+    }
+
+    /// Set maximum number of leaves per tree
+    fn with_max_leaves(&self, value: usize) -> PyResult<Self> {
+        if value < 2 {
+            return Err(PyValueError::new_err("max_leaves must be >= 2"));
+        }
+        let mut new = self.clone();
+        new.inner.max_leaves = value;
+        Ok(new)
+    }
+
+    /// Set minimum samples required in a leaf
+    fn with_min_samples_leaf(&self, value: usize) -> PyResult<Self> {
+        if value == 0 {
+            return Err(PyValueError::new_err("min_samples_leaf must be >= 1"));
+        }
+        let mut new = self.clone();
+        new.inner.min_samples_leaf = value;
+        Ok(new)
+    }
+
+    /// Set minimum hessian sum required in a leaf
+    fn with_min_hessian_leaf(&self, value: f32) -> PyResult<Self> {
+        if value < 0.0 {
+            return Err(PyValueError::new_err("min_hessian_leaf must be >= 0.0"));
+        }
+        let mut new = self.clone();
+        new.inner.min_hessian_leaf = value;
+        Ok(new)
+    }
+
+    /// Set minimum gain to make a split
+    fn with_min_gain(&self, value: f32) -> PyResult<Self> {
+        if value < 0.0 {
+            return Err(PyValueError::new_err("min_gain must be >= 0.0"));
+        }
+        let mut new = self.clone();
+        new.inner.min_gain = value;
+        Ok(new)
+    }
+
+    /// Set L2 regularization (lambda)
+    fn with_lambda(&self, value: f32) -> PyResult<Self> {
+        if value < 0.0 {
+            return Err(PyValueError::new_err("lambda must be >= 0.0"));
+        }
+        let mut new = self.clone();
+        new.inner.lambda = value;
+        Ok(new)
+    }
+
+    /// Set Shannon Entropy regularization weight (beta)
+    fn with_entropy_weight(&self, value: f32) -> PyResult<Self> {
+        if value < 0.0 {
+            return Err(PyValueError::new_err("entropy_weight must be >= 0.0"));
+        }
+        let mut new = self.clone();
+        new.inner.entropy_weight = value;
+        Ok(new)
+    }
+
+    /// Set row subsampling ratio (0.0-1.0)
+    fn with_subsample(&self, value: f32) -> PyResult<Self> {
+        if value <= 0.0 || value > 1.0 {
+            return Err(PyValueError::new_err("subsample must be in (0.0, 1.0]"));
+        }
+        let mut new = self.clone();
+        new.inner.subsample = value;
+        Ok(new)
+    }
+
+    /// Set column subsampling ratio (0.0-1.0)
+    fn with_colsample(&self, value: f32) -> PyResult<Self> {
+        if value <= 0.0 || value > 1.0 {
+            return Err(PyValueError::new_err("colsample must be in (0.0, 1.0]"));
+        }
+        let mut new = self.clone();
+        new.inner.colsample = value;
+        Ok(new)
+    }
+
+    /// Set number of histogram bins
+    fn with_num_bins(&self, value: usize) -> PyResult<Self> {
+        if value < 2 || value > 255 {
+            return Err(PyValueError::new_err("num_bins must be in [2, 255]"));
+        }
+        let mut new = self.clone();
+        new.inner.num_bins = value;
+        Ok(new)
+    }
+
+    /// Set calibration set ratio for conformal prediction (0.0 to disable)
+    fn with_calibration_ratio(&self, value: f32) -> PyResult<Self> {
+        if value < 0.0 || value >= 1.0 {
+            return Err(PyValueError::new_err("calibration_ratio must be in [0.0, 1.0)"));
+        }
+        let mut new = self.clone();
+        new.inner.calibration_ratio = value;
+        Ok(new)
+    }
+
+    /// Set conformal prediction quantile (e.g., 0.9 for 90% coverage)
+    fn with_conformal_quantile(&self, value: f32) -> PyResult<Self> {
+        if value <= 0.0 || value >= 1.0 {
+            return Err(PyValueError::new_err("conformal_quantile must be in (0.0, 1.0)"));
+        }
+        let mut new = self.clone();
+        new.inner.conformal_quantile = value;
+        Ok(new)
+    }
+
+    /// Set early stopping rounds (0 to disable)
+    fn with_early_stopping_rounds(&self, value: usize) -> PyResult<Self> {
+        let mut new = self.clone();
+        new.inner.early_stopping_rounds = value;
+        Ok(new)
+    }
+
+    /// Set validation ratio for early stopping (0.0 to disable)
+    fn with_validation_ratio(&self, value: f32) -> PyResult<Self> {
+        if value < 0.0 || value >= 1.0 {
+            return Err(PyValueError::new_err("validation_ratio must be in [0.0, 1.0)"));
+        }
+        let mut new = self.clone();
+        new.inner.validation_ratio = value;
+        Ok(new)
+    }
+
+    /// Enable/disable parallel prediction
+    fn with_parallel_prediction(&self, value: bool) -> PyResult<Self> {
+        let mut new = self.clone();
+        new.inner.parallel_prediction = value;
+        Ok(new)
+    }
+
+    /// Enable/disable column reordering for cache locality
+    fn with_column_reordering(&self, value: bool) -> PyResult<Self> {
+        let mut new = self.clone();
+        new.inner.column_reordering = value;
+        Ok(new)
+    }
+
+    /// Enable/disable 4-bit packing for low-cardinality features
+    fn with_packed_dataset(&self, value: bool) -> PyResult<Self> {
+        let mut new = self.clone();
+        new.inner.packed_dataset = value;
+        Ok(new)
+    }
+
+    /// Enable/disable parallel gradient computation
+    fn with_parallel_gradient(&self, value: bool) -> PyResult<Self> {
+        let mut new = self.clone();
+        new.inner.parallel_gradient = value;
+        Ok(new)
+    }
+
+    /// Enable/disable GPU subgroup operations
+    fn with_gpu_subgroups(&self, value: bool) -> PyResult<Self> {
+        let mut new = self.clone();
+        new.inner.use_gpu_subgroups = value;
+        Ok(new)
+    }
+
+    /// Set backend type ("auto", "cpu", "gpu", "wgpu", "cuda", "rocm", "metal")
+    fn with_backend(&self, value: &str) -> PyResult<Self> {
+        let mut new = self.clone();
+        new.inner.backend_type = match value.to_lowercase().as_str() {
+            "auto" | "gpu" => BackendType::Auto,
+            "cpu" | "scalar" => BackendType::Scalar,
+            "wgpu" => BackendType::Wgpu,
+            "cuda" => BackendType::Cuda,
+            "rocm" => BackendType::Rocm,
+            "metal" => BackendType::Metal,
+            _ => return Err(PyValueError::new_err(
+                "backend must be one of: 'auto' (or 'gpu'), 'cpu' (or 'scalar'), 'wgpu', 'cuda', 'rocm', 'metal'"
+            )),
+        };
+        Ok(new)
+    }
+
+    /// Set GPU execution mode ("auto", "hybrid", "full")
+    fn with_gpu_mode(&self, value: &str) -> PyResult<Self> {
+        let mut new = self.clone();
+        new.inner.gpu_mode = match value.to_lowercase().as_str() {
+            "auto" => GpuMode::Auto,
+            "hybrid" => GpuMode::Hybrid,
+            "full" => GpuMode::Full,
+            _ => return Err(PyValueError::new_err(
+                "gpu_mode must be one of: 'auto', 'hybrid', 'full'"
+            )),
+        };
+        Ok(new)
+    }
+
+    /// Enable/disable Directional Era Splitting
+    fn with_era_splitting(&self, value: bool) -> PyResult<Self> {
+        let mut new = self.clone();
+        new.inner.era_splitting = value;
+        Ok(new)
+    }
+
+    /// Use MSE loss function
+    fn with_mse_loss(&self) -> PyResult<Self> {
+        let mut new = self.clone();
+        new.inner.loss_type = LossType::Mse;
+        Ok(new)
+    }
+
+    /// Use Pseudo-Huber loss function with given delta
+    fn with_pseudo_huber_loss(&self, delta: f32) -> PyResult<Self> {
+        if delta <= 0.0 {
+            return Err(PyValueError::new_err("delta must be > 0.0"));
+        }
+        let mut new = self.clone();
+        new.inner.loss_type = LossType::PseudoHuber { delta };
+        Ok(new)
+    }
+
+    /// Use Binary Log Loss for binary classification
+    fn with_binary_logloss(&self) -> PyResult<Self> {
+        let mut new = self.clone();
+        new.inner.loss_type = LossType::BinaryLogLoss;
+        Ok(new)
+    }
+
+    /// Use Multi-class Log Loss for multi-class classification
+    fn with_multiclass_logloss(&self, num_classes: usize) -> PyResult<Self> {
+        if num_classes < 2 {
+            return Err(PyValueError::new_err("num_classes must be >= 2"));
+        }
+        let mut new = self.clone();
+        new.inner.loss_type = LossType::MultiClassLogLoss { num_classes };
+        Ok(new)
+    }
+
+    /// Set monotonic constraints for features (using integers)
+    ///
+    /// Args:
+    ///     constraints: List of constraint values per feature
+    ///         - 1 = Increasing, -1 = Decreasing, 0 = None
+    ///
+    /// Note: Prefer with_constraints() with MonotonicConstraint enum for clearer code
+    fn with_monotonic_constraints(&self, constraints: Vec<i32>) -> PyResult<Self> {
+        let parsed: Result<Vec<MonotonicConstraint>, _> = constraints
+            .into_iter()
+            .map(|c| match c {
+                1 => Ok(MonotonicConstraint::Increasing),
+                -1 => Ok(MonotonicConstraint::Decreasing),
+                0 => Ok(MonotonicConstraint::None),
+                _ => Err(PyValueError::new_err(
+                    "Constraint must be 1 (increasing), -1 (decreasing), or 0 (none)",
+                )),
+            })
+            .collect();
+
+        let mut new = self.clone();
+        new.inner.monotonic_constraints = parsed?;
+        Ok(new)
+    }
+
+    /// Set monotonic constraints for features (using enum)
+    ///
+    /// Args:
+    ///     constraints: List of MonotonicConstraint per feature
+    ///
+    /// Example:
+    ///     config.with_constraints([
+    ///         MonotonicConstraint.increasing(),
+    ///         MonotonicConstraint.decreasing(),
+    ///         MonotonicConstraint.none()
+    ///     ])
+    fn with_constraints(&self, constraints: Vec<PyMonotonicConstraint>) -> PyResult<Self> {
+        let parsed: Vec<MonotonicConstraint> = constraints
+            .into_iter()
+            .map(|c| c.into())
+            .collect();
+
+        let mut new = self.clone();
+        new.inner.monotonic_constraints = parsed;
+        Ok(new)
+    }
+
+    /// Set feature interaction groups
+    fn with_interaction_groups(&self, groups: Vec<Vec<usize>>) -> PyResult<Self> {
+        let mut new = self.clone();
+        new.inner.interaction_groups = groups;
+        Ok(new)
+    }
+}
+
+// Internal methods for use by other Python binding modules
+impl PyGBDTConfig {
+    /// Get reference to inner config (for use by tuner module)
+    pub fn inner(&self) -> &GBDTConfig {
+        &self.inner
+    }
+
+    /// Create from inner config (for use by tuner module)
+    pub fn from_inner(config: GBDTConfig) -> Self {
+        Self { inner: config }
     }
 }
 
@@ -643,40 +1113,8 @@ impl PyGBDTModel {
         py: Python<'py>,
         features: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyArray1<f32>>> {
-        // Try f64 first (most common for numpy), then f32
-        let (num_features, raw_features) = if let Ok(arr) =
-            features.extract::<PyReadonlyArray2<'py, f64>>()
-        {
-            let arr = arr.as_array();
-            let num_rows = arr.nrows();
-            let num_cols = arr.ncols();
-            let mut raw = Vec::with_capacity(num_rows * num_cols);
-            for row in arr.rows() {
-                raw.extend(row.iter().copied());
-            }
-            (num_cols, raw)
-        } else if let Ok(arr) = features.extract::<PyReadonlyArray2<'py, f32>>() {
-            let arr = arr.as_array();
-            let num_rows = arr.nrows();
-            let num_cols = arr.ncols();
-            let mut raw = Vec::with_capacity(num_rows * num_cols);
-            for row in arr.rows() {
-                raw.extend(row.iter().map(|&v| v as f64));
-            }
-            (num_cols, raw)
-        } else {
-            return Err(PyValueError::new_err(
-                "features must be a 2D numpy array of float32 or float64",
-            ));
-        };
-
-        if num_features != self.model.num_features() {
-            return Err(PyValueError::new_err(format!(
-                "Expected {} features, got {}",
-                self.model.num_features(),
-                num_features
-            )));
-        }
+        let (num_features, raw_features) = extract_features_array(features)?;
+        validate_feature_count(num_features, self.model.num_features())?;
 
         // Predict using raw values (release GIL)
         let predictions = py.allow_threads(|| self.model.predict_raw(&raw_features));
@@ -702,40 +1140,8 @@ impl PyGBDTModel {
         Bound<'py, PyArray1<f32>>,
         Bound<'py, PyArray1<f32>>,
     )> {
-        // Try f64 first, then f32
-        let (num_features, raw_features) = if let Ok(arr) =
-            features.extract::<PyReadonlyArray2<'py, f64>>()
-        {
-            let arr = arr.as_array();
-            let num_rows = arr.nrows();
-            let num_cols = arr.ncols();
-            let mut raw = Vec::with_capacity(num_rows * num_cols);
-            for row in arr.rows() {
-                raw.extend(row.iter().copied());
-            }
-            (num_cols, raw)
-        } else if let Ok(arr) = features.extract::<PyReadonlyArray2<'py, f32>>() {
-            let arr = arr.as_array();
-            let num_rows = arr.nrows();
-            let num_cols = arr.ncols();
-            let mut raw = Vec::with_capacity(num_rows * num_cols);
-            for row in arr.rows() {
-                raw.extend(row.iter().map(|&v| v as f64));
-            }
-            (num_cols, raw)
-        } else {
-            return Err(PyValueError::new_err(
-                "features must be a 2D numpy array of float32 or float64",
-            ));
-        };
-
-        if num_features != self.model.num_features() {
-            return Err(PyValueError::new_err(format!(
-                "Expected {} features, got {}",
-                self.model.num_features(),
-                num_features
-            )));
-        }
+        let (num_features, raw_features) = extract_features_array(features)?;
+        validate_feature_count(num_features, self.model.num_features())?;
 
         // Predict with intervals (release GIL)
         let (preds, lower, upper) =
@@ -767,47 +1173,16 @@ impl PyGBDTModel {
         py: Python<'py>,
         features: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyArray1<f32>>> {
-        // Check if this is a multi-class model and provide helpful error
+        // Extract and validate features first (most specific error)
+        let (num_features, raw_features) = extract_features_array(features)?;
+        validate_feature_count(num_features, self.model.num_features())?;
+
+        // Then check model type
         if self.model.is_multiclass() {
             return Err(PyValueError::new_err(
                 "predict_proba() is for binary classification only. \
                  For multi-class models, use predict_proba_multiclass() instead."
             ));
-        }
-
-        // Try f64 first, then f32
-        let (num_features, raw_features) = if let Ok(arr) =
-            features.extract::<PyReadonlyArray2<'py, f64>>()
-        {
-            let arr = arr.as_array();
-            let num_rows = arr.nrows();
-            let num_cols = arr.ncols();
-            let mut raw = Vec::with_capacity(num_rows * num_cols);
-            for row in arr.rows() {
-                raw.extend(row.iter().copied());
-            }
-            (num_cols, raw)
-        } else if let Ok(arr) = features.extract::<PyReadonlyArray2<'py, f32>>() {
-            let arr = arr.as_array();
-            let num_rows = arr.nrows();
-            let num_cols = arr.ncols();
-            let mut raw = Vec::with_capacity(num_rows * num_cols);
-            for row in arr.rows() {
-                raw.extend(row.iter().map(|&v| v as f64));
-            }
-            (num_cols, raw)
-        } else {
-            return Err(PyValueError::new_err(
-                "features must be a 2D numpy array of float32 or float64",
-            ));
-        };
-
-        if num_features != self.model.num_features() {
-            return Err(PyValueError::new_err(format!(
-                "Expected {} features, got {}",
-                self.model.num_features(),
-                num_features
-            )));
         }
 
         // Predict probabilities (release GIL)
@@ -837,47 +1212,16 @@ impl PyGBDTModel {
         features: &Bound<'py, PyAny>,
         threshold: f32,
     ) -> PyResult<Bound<'py, PyArray1<u32>>> {
-        // Check if this is a multi-class model and provide helpful error
+        // Extract and validate features first (most specific error)
+        let (num_features, raw_features) = extract_features_array(features)?;
+        validate_feature_count(num_features, self.model.num_features())?;
+
+        // Then check model type
         if self.model.is_multiclass() {
             return Err(PyValueError::new_err(
                 "predict_class() is for binary classification only. \
                  For multi-class models, use predict_class_multiclass() instead."
             ));
-        }
-
-        // Try f64 first, then f32
-        let (num_features, raw_features) = if let Ok(arr) =
-            features.extract::<PyReadonlyArray2<'py, f64>>()
-        {
-            let arr = arr.as_array();
-            let num_rows = arr.nrows();
-            let num_cols = arr.ncols();
-            let mut raw = Vec::with_capacity(num_rows * num_cols);
-            for row in arr.rows() {
-                raw.extend(row.iter().copied());
-            }
-            (num_cols, raw)
-        } else if let Ok(arr) = features.extract::<PyReadonlyArray2<'py, f32>>() {
-            let arr = arr.as_array();
-            let num_rows = arr.nrows();
-            let num_cols = arr.ncols();
-            let mut raw = Vec::with_capacity(num_rows * num_cols);
-            for row in arr.rows() {
-                raw.extend(row.iter().map(|&v| v as f64));
-            }
-            (num_cols, raw)
-        } else {
-            return Err(PyValueError::new_err(
-                "features must be a 2D numpy array of float32 or float64",
-            ));
-        };
-
-        if num_features != self.model.num_features() {
-            return Err(PyValueError::new_err(format!(
-                "Expected {} features, got {}",
-                self.model.num_features(),
-                num_features
-            )));
         }
 
         // Predict classes (release GIL)
@@ -921,41 +1265,11 @@ impl PyGBDTModel {
     ) -> PyResult<Bound<'py, numpy::PyArray2<f32>>> {
         use numpy::PyArray2;
 
-        // Try f64 first, then f32
-        let (num_features, raw_features) = if let Ok(arr) =
-            features.extract::<PyReadonlyArray2<'py, f64>>()
-        {
-            let arr = arr.as_array();
-            let num_rows = arr.nrows();
-            let num_cols = arr.ncols();
-            let mut raw = Vec::with_capacity(num_rows * num_cols);
-            for row in arr.rows() {
-                raw.extend(row.iter().copied());
-            }
-            (num_cols, raw)
-        } else if let Ok(arr) = features.extract::<PyReadonlyArray2<'py, f32>>() {
-            let arr = arr.as_array();
-            let num_rows = arr.nrows();
-            let num_cols = arr.ncols();
-            let mut raw = Vec::with_capacity(num_rows * num_cols);
-            for row in arr.rows() {
-                raw.extend(row.iter().map(|&v| v as f64));
-            }
-            (num_cols, raw)
-        } else {
-            return Err(PyValueError::new_err(
-                "features must be a 2D numpy array of float32 or float64",
-            ));
-        };
+        // Extract and validate features first (most specific error)
+        let (num_features, raw_features) = extract_features_array(features)?;
+        validate_feature_count(num_features, self.model.num_features())?;
 
-        if num_features != self.model.num_features() {
-            return Err(PyValueError::new_err(format!(
-                "Expected {} features, got {}",
-                self.model.num_features(),
-                num_features
-            )));
-        }
-
+        // Then check model type
         if !self.model.is_multiclass() {
             return Err(PyValueError::new_err(
                 "predict_proba_multiclass() is for multi-class models only. \
@@ -963,18 +1277,23 @@ impl PyGBDTModel {
             ));
         }
 
-        let num_rows = raw_features.len() / num_features;
-        let num_classes = self.model.get_num_classes();
-
         // Use the raw prediction method (no binning needed, release GIL)
         let proba = py.allow_threads(|| self.model.predict_proba_multiclass_raw(&raw_features));
 
-        // Convert Vec<Vec<f32>> to 2D numpy array
-        let flat: Vec<f32> = proba.into_iter().flatten().collect();
-        PyArray2::from_vec(py, flat)
-            .map_err(|e| PyValueError::new_err(format!("Failed to create numpy array: {:?}", e)))?
-            .reshape([num_rows, num_classes])
-            .map_err(|e| PyValueError::new_err(format!("Failed to reshape array: {:?}", e)))
+        // Validate array is not jagged before conversion
+        if proba.is_empty() {
+            return Err(PyValueError::new_err("No predictions returned"));
+        }
+        let expected_cols = proba[0].len();
+        if !proba.iter().all(|row| row.len() == expected_cols) {
+            return Err(PyValueError::new_err(
+                "Internal error: jagged probability array returned"
+            ));
+        }
+
+        // Convert Vec<Vec<f32>> to 2D numpy array via nested vec
+        PyArray2::from_vec2(py, &proba)
+            .map_err(|e| PyValueError::new_err(format!("Failed to create numpy array: {:?}", e)))
     }
 
     /// Predict class labels for multi-class classification
@@ -996,41 +1315,11 @@ impl PyGBDTModel {
         py: Python<'py>,
         features: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyArray1<u32>>> {
-        // Try f64 first, then f32
-        let (num_features, raw_features) = if let Ok(arr) =
-            features.extract::<PyReadonlyArray2<'py, f64>>()
-        {
-            let arr = arr.as_array();
-            let num_rows = arr.nrows();
-            let num_cols = arr.ncols();
-            let mut raw = Vec::with_capacity(num_rows * num_cols);
-            for row in arr.rows() {
-                raw.extend(row.iter().copied());
-            }
-            (num_cols, raw)
-        } else if let Ok(arr) = features.extract::<PyReadonlyArray2<'py, f32>>() {
-            let arr = arr.as_array();
-            let num_rows = arr.nrows();
-            let num_cols = arr.ncols();
-            let mut raw = Vec::with_capacity(num_rows * num_cols);
-            for row in arr.rows() {
-                raw.extend(row.iter().map(|&v| v as f64));
-            }
-            (num_cols, raw)
-        } else {
-            return Err(PyValueError::new_err(
-                "features must be a 2D numpy array of float32 or float64",
-            ));
-        };
+        // Extract and validate features first (most specific error)
+        let (num_features, raw_features) = extract_features_array(features)?;
+        validate_feature_count(num_features, self.model.num_features())?;
 
-        if num_features != self.model.num_features() {
-            return Err(PyValueError::new_err(format!(
-                "Expected {} features, got {}",
-                self.model.num_features(),
-                num_features
-            )));
-        }
-
+        // Then check model type
         if !self.model.is_multiclass() {
             return Err(PyValueError::new_err(
                 "predict_class_multiclass() is for multi-class models only. \
@@ -1053,26 +1342,46 @@ impl PyGBDTModel {
         PyArray1::from_vec(py, importances)
     }
 
-    /// Save model to file (rkyv format)
+    /// Save model to file
     ///
     /// Args:
     ///     path: Path to save the model
-    fn save(&self, path: &str) -> PyResult<()> {
-        serialize::save_model(&self.model, path)
-            .map_err(|e| PyIOError::new_err(e.to_string()))
+    ///     format: Serialization format ("rkyv" or "bincode", default: "rkyv")
+    ///         - "rkyv": Zero-copy deserialization, fastest loading (recommended)
+    ///         - "bincode": Compact binary format, serde-based
+    #[pyo3(signature = (path, format="rkyv"))]
+    fn save(&self, path: &str, format: &str) -> PyResult<()> {
+        match format.to_lowercase().as_str() {
+            "rkyv" => serialize::save_model(&self.model, path),
+            "bincode" => serialize::save_model_bincode(&self.model, path),
+            _ => return Err(PyValueError::new_err(
+                "format must be 'rkyv' or 'bincode'"
+            )),
+        }
+        .map_err(|e| PyIOError::new_err(e.to_string()))
     }
 
-    /// Load model from file (rkyv format)
+    /// Load model from file
     ///
     /// Args:
     ///     path: Path to the model file
+    ///     format: Serialization format ("rkyv" or "bincode", default: "rkyv")
+    ///         - "rkyv": Zero-copy deserialization, fastest loading (recommended)
+    ///         - "bincode": Compact binary format, serde-based
     ///
     /// Returns:
     ///     Loaded GBDTModel
     #[staticmethod]
-    fn load(path: &str) -> PyResult<Self> {
-        let model = serialize::load_model(path)
-            .map_err(|e| PyIOError::new_err(e.to_string()))?;
+    #[pyo3(signature = (path, format="rkyv"))]
+    fn load(path: &str, format: &str) -> PyResult<Self> {
+        let model = match format.to_lowercase().as_str() {
+            "rkyv" => serialize::load_model(path),
+            "bincode" => serialize::load_model_bincode(path),
+            _ => return Err(PyValueError::new_err(
+                "format must be 'rkyv' or 'bincode'"
+            )),
+        }
+        .map_err(|e| PyIOError::new_err(e.to_string()))?;
 
         Ok(Self { model })
     }
@@ -1123,6 +1432,7 @@ impl PyGBDTModel {
 
 /// Register Python module classes and functions
 pub fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyMonotonicConstraint>()?;
     m.add_class::<PyGBDTConfig>()?;
     m.add_class::<PyGBDTModel>()?;
     Ok(())
