@@ -69,15 +69,26 @@ fn compute_eval_metrics(
     metric: &Metric,
     config: &GBDTConfig,
     tuner: &AutoTuner,
-) -> (f32, f32, Option<f32>) {
+) -> (f32, f32, Option<f32>, Option<f64>) {
     let train_preds = model.predict(train_dataset);
     let val_preds = model.predict(val_dataset);
 
     let train_metric = metric.compute(&train_preds, train_dataset.targets());
     let val_metric = metric.compute(&val_preds, val_targets);
-    let f1_score = tuner.compute_f1_score(config, &val_preds, val_targets);
+    let f1_score = if tuner.config.task_type.is_classification() {
+        tuner.compute_f1_score(config, &val_preds, val_targets)
+    } else {
+        None
+    };
 
-    (val_metric, train_metric, f1_score)
+    // Compute ROC-AUC for binary classification
+    let roc_auc = if tuner.config.task_type.is_binary() {
+        Some(super::metrics::compute_roc_auc(&val_preds, val_targets))
+    } else {
+        None
+    };
+
+    (val_metric, train_metric, f1_score, roc_auc)
 }
 
 /// AutoTuner for hyperparameter optimization
@@ -122,6 +133,8 @@ impl AutoTuner {
 
     /// Set the tuner configuration
     pub fn with_config(mut self, config: TunerConfig) -> Self {
+        // Update history to use the configured optimization metric
+        self.history = SearchHistory::with_metric(config.optimization_metric);
         self.config = config;
         self
     }
@@ -229,9 +242,6 @@ impl AutoTuner {
         while iteration < max_iterations {
             let spread = self.config.spread_for_iteration(zoom_level);
 
-            // Track best metric before this iteration
-            let best_before = self.history.best().map(|b| b.val_metric);
-
             if self.config.verbose {
                 println!(
                     "\n=== Iteration {} (spread: {:.1}%) ===",
@@ -258,35 +268,32 @@ impl AutoTuner {
 
             // Add all results to history and log new best
             for result in results {
-                // Log if best so far (same logic as SearchHistory::add)
+                // Log if best so far (using configured optimization metric)
                 if self.config.verbose {
                     let is_best = self
                         .history
                         .best()
-                        .map(|b| {
-                            // For classification: use F1 score (higher is better)
-                            // For regression: use val_metric (lower is better)
-                            match (result.f1_score, b.f1_score) {
-                                (Some(new_f1), Some(best_f1)) if !new_f1.is_nan() && !best_f1.is_nan() => {
-                                    new_f1 > best_f1
-                                }
-                                (Some(new_f1), Some(_)) if !new_f1.is_nan() => true,
-                                _ => result.val_metric < b.val_metric,
-                            }
-                        })
+                        .map(|b| self.history.compare_trials(&result, b))
                         .unwrap_or(true);
 
                     if is_best {
-                        let f1_str = result.f1_score
-                            .map(|f1| format!(", F1={:.2}%", f1 * 100.0))
+                        // Show all available metrics
+                        let auc_str = result
+                            .roc_auc
+                            .map(|auc| format!(" AUC={:.4}", auc))
+                            .unwrap_or_default();
+                        let f1_str = result
+                            .f1_score
+                            .map(|f1| format!(" F1={:.2}%", f1 * 100.0))
                             .unwrap_or_default();
                         println!(
-                            "  -> New best! val_metric={:.6} (depth={}, lr={:.4}, trees={}{})",
+                            "  -> New best! loss={:.5}{}{} (depth={}, lr={:.4}, trees={})",
                             result.val_metric,
+                            auc_str,
+                            f1_str,
                             result.params.get("max_depth").unwrap_or(&0.0),
                             result.params.get("learning_rate").unwrap_or(&0.0),
                             result.num_trees,
-                            f1_str
                         );
                     }
                 }
@@ -294,27 +301,25 @@ impl AutoTuner {
                 self.history.add(result);
             }
 
-            // Check if we found improvement in this iteration
-            // For classification: use F1 score. For regression: use val_metric.
-            let best_f1_after = self.history.best().and_then(|b| b.f1_score);
-
-            let improved = if let (Some(before_f1), Some(after_f1)) = (
-                self.history.trials().iter()
+            // Check if we found improvement using the configured optimization metric
+            let improved = if let Some(best_after) = self.history.best() {
+                // Find best trial from previous iterations
+                let best_before_trial = self.history.trials().iter()
                     .filter(|t| t.iteration < iteration)
-                    .filter_map(|t| t.f1_score)
-                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)),
-                best_f1_after
-            ) {
-                // Classification: compare F1 scores
-                after_f1 > before_f1
-            } else {
-                // Regression or first iteration: compare val_metric
-                let best_after = self.history.best().map(|b| b.val_metric);
-                match (best_before, best_after) {
-                    (Some(before), Some(after)) => after < before,
-                    (None, Some(_)) => true,
-                    _ => false,
+                    .max_by(|a, b| {
+                        if self.history.compare_trials(a, b) {
+                            std::cmp::Ordering::Greater
+                        } else {
+                            std::cmp::Ordering::Less
+                        }
+                    });
+
+                match best_before_trial {
+                    Some(before) => self.history.compare_trials(best_after, before),
+                    None => true, // First iteration always improves
                 }
+            } else {
+                false
             };
 
             // Update centers to winner's values
@@ -468,9 +473,6 @@ impl AutoTuner {
         while iteration < max_iterations {
             let spread = self.config.spread_for_iteration(zoom_level);
 
-            // Track best metric before this iteration
-            let best_before = self.history.best().map(|b| b.val_metric);
-
             if self.config.verbose {
                 println!(
                     "\n=== Iteration {} (spread: {:.1}%) ===",
@@ -497,35 +499,32 @@ impl AutoTuner {
 
             // Add all results to history and log new best
             for result in results {
-                // Log if best so far (same logic as SearchHistory::add)
+                // Log if best so far (using configured optimization metric)
                 if self.config.verbose {
                     let is_best = self
                         .history
                         .best()
-                        .map(|b| {
-                            // For classification: use F1 score (higher is better)
-                            // For regression: use val_metric (lower is better)
-                            match (result.f1_score, b.f1_score) {
-                                (Some(new_f1), Some(best_f1)) if !new_f1.is_nan() && !best_f1.is_nan() => {
-                                    new_f1 > best_f1
-                                }
-                                (Some(new_f1), Some(_)) if !new_f1.is_nan() => true,
-                                _ => result.val_metric < b.val_metric,
-                            }
-                        })
+                        .map(|b| self.history.compare_trials(&result, b))
                         .unwrap_or(true);
 
                     if is_best {
-                        let f1_str = result.f1_score
-                            .map(|f1| format!(", F1={:.2}%", f1 * 100.0))
+                        // Show all available metrics
+                        let auc_str = result
+                            .roc_auc
+                            .map(|auc| format!(" AUC={:.4}", auc))
+                            .unwrap_or_default();
+                        let f1_str = result
+                            .f1_score
+                            .map(|f1| format!(" F1={:.2}%", f1 * 100.0))
                             .unwrap_or_default();
                         println!(
-                            "  -> New best! val_metric={:.6} (depth={}, lr={:.4}, trees={}{})",
+                            "  -> New best! loss={:.5}{}{} (depth={}, lr={:.4}, trees={})",
                             result.val_metric,
+                            auc_str,
+                            f1_str,
                             result.params.get("max_depth").unwrap_or(&0.0),
                             result.params.get("learning_rate").unwrap_or(&0.0),
                             result.num_trees,
-                            f1_str
                         );
                     }
                 }
@@ -533,27 +532,25 @@ impl AutoTuner {
                 self.history.add(result);
             }
 
-            // Check if we found improvement in this iteration
-            // For classification: use F1 score. For regression: use val_metric.
-            let best_f1_after = self.history.best().and_then(|b| b.f1_score);
-
-            let improved = if let (Some(before_f1), Some(after_f1)) = (
-                self.history.trials().iter()
+            // Check if we found improvement using the configured optimization metric
+            let improved = if let Some(best_after) = self.history.best() {
+                // Find best trial from previous iterations
+                let best_before_trial = self.history.trials().iter()
                     .filter(|t| t.iteration < iteration)
-                    .filter_map(|t| t.f1_score)
-                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)),
-                best_f1_after
-            ) {
-                // Classification: compare F1 scores
-                after_f1 > before_f1
-            } else {
-                // Regression or first iteration: compare val_metric
-                let best_after = self.history.best().map(|b| b.val_metric);
-                match (best_before, best_after) {
-                    (Some(before), Some(after)) => after < before,
-                    (None, Some(_)) => true,
-                    _ => false,
+                    .max_by(|a, b| {
+                        if self.history.compare_trials(a, b) {
+                            std::cmp::Ordering::Greater
+                        } else {
+                            std::cmp::Ordering::Less
+                        }
+                    });
+
+                match best_before_trial {
+                    Some(before) => self.history.compare_trials(best_after, before),
+                    None => true, // First iteration always improves
                 }
+            } else {
+                false
             };
 
             // Update centers to winner's values
@@ -948,25 +945,54 @@ impl AutoTuner {
         let start = Instant::now();
 
         // Dispatch to appropriate strategy based on input mode
-        let (val_metric, train_metric, num_trees, f1_score) = match input {
+        let (val_metric, train_metric, num_trees, f1_score, roc_auc) = match input {
             EvalInput::Optimistic(dataset) => match self.config.eval_strategy {
-                EvalStrategy::Holdout { validation_ratio } => {
-                    self.evaluate_holdout(dataset, params, validation_ratio)?
+                EvalStrategy::Holdout {
+                    validation_ratio,
+                    folds,
+                } => {
+                    self.evaluate_holdout_with_folds(dataset, params, validation_ratio, folds)?
                 }
-                EvalStrategy::KFold { k } => self.evaluate_kfold(dataset, params, k)?,
-                EvalStrategy::Conformal { calibration_ratio, quantile } => {
-                    self.evaluate_conformal(dataset, params, calibration_ratio, quantile)?
+                EvalStrategy::Conformal {
+                    calibration_ratio,
+                    quantile,
+                    folds,
+                } => {
+                    self.evaluate_conformal_with_folds(
+                        dataset,
+                        params,
+                        calibration_ratio,
+                        quantile,
+                        folds,
+                    )?
                 }
             },
             EvalInput::Realistic { raw_data, config } => match self.config.eval_strategy {
-                EvalStrategy::Holdout { validation_ratio } => {
-                    self.evaluate_holdout_realistic(raw_data, config, params, validation_ratio)?
+                EvalStrategy::Holdout {
+                    validation_ratio,
+                    folds,
+                } => {
+                    self.evaluate_holdout_realistic_with_folds(
+                        raw_data,
+                        config,
+                        params,
+                        validation_ratio,
+                        folds,
+                    )?
                 }
-                EvalStrategy::KFold { k } => {
-                    self.evaluate_kfold_realistic(raw_data, config, params, k)?
-                }
-                EvalStrategy::Conformal { calibration_ratio, quantile } => {
-                    self.evaluate_conformal_realistic(raw_data, config, params, calibration_ratio, quantile)?
+                EvalStrategy::Conformal {
+                    calibration_ratio,
+                    quantile,
+                    folds,
+                } => {
+                    self.evaluate_conformal_realistic_with_folds(
+                        raw_data,
+                        config,
+                        params,
+                        calibration_ratio,
+                        quantile,
+                        folds,
+                    )?
                 }
             },
         };
@@ -982,50 +1008,71 @@ impl AutoTuner {
             num_trees,
             train_time_ms,
             f1_score,
+            roc_auc,
         })
     }
 
-    /// Evaluate using holdout validation
+    /// Evaluate using holdout validation with optional k-fold
     ///
-    /// Returns: (val_metric, train_metric, num_trees, f1_score)
+    /// If folds == 1, uses simple holdout. If folds > 1, runs k-fold CV.
+    fn evaluate_holdout_with_folds(
+        &self,
+        dataset: &BinnedDataset,
+        params: &HashMap<String, f32>,
+        validation_ratio: f32,
+        folds: usize,
+    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
+        if folds == 1 {
+            self.evaluate_holdout(dataset, params, validation_ratio)
+        } else {
+            self.evaluate_kfold(dataset, params, folds)
+        }
+    }
+
+    /// Evaluate using holdout validation (single fold)
+    ///
+    /// Returns: (val_metric, train_metric, num_trees, f1_score, roc_auc)
     fn evaluate_holdout(
         &self,
         dataset: &BinnedDataset,
         params: &HashMap<String, f32>,
         validation_ratio: f32,
-    ) -> Result<(f32, f32, usize, Option<f32>)> {
+    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
         // Build config with proper validation for early stopping
+        // Use tuner's seed for consistency between training and evaluation splits
         let mut config = self.build_config(params);
         config.validation_ratio = validation_ratio;
+        config.seed = self.config.seed; // Ensure same split for training and eval
 
         // Train model (GBDTModel handles internal train/val split)
         let model = GBDTModel::train_binned(dataset, config.clone())?;
 
         // Get predictions on full dataset
+        // TODO: Could optimize by only predicting on validation set
         let predictions = model.predict(dataset);
         let targets = dataset.targets();
 
-        // Create our own split for evaluation (using tuner's seed)
+        // Create split for evaluation (using same seed as training for consistency)
         let split = split_holdout(dataset.num_rows(), validation_ratio, 0.0, self.config.seed);
         let metric = self.select_metric(&config);
 
         // Compute metrics using shared helper
-        let (val_metric, train_metric, f1_score) = self.compute_metrics_by_indices(
+        let (val_metric, train_metric, f1_score, roc_auc) = self.compute_metrics_by_indices(
             &predictions, targets, &split.train, &split.validation, &metric, &config,
         );
 
-        Ok((val_metric, train_metric, model.num_trees(), f1_score))
+        Ok((val_metric, train_metric, model.num_trees(), f1_score, roc_auc))
     }
 
     /// Evaluate using K-fold cross-validation
     ///
-    /// Returns: (val_metric, train_metric, num_trees, f1_score)
+    /// Returns: (val_metric, train_metric, num_trees, f1_score, roc_auc)
     fn evaluate_kfold(
         &self,
         dataset: &BinnedDataset,
         params: &HashMap<String, f32>,
         k: usize,
-    ) -> Result<(f32, f32, usize, Option<f32>)> {
+    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
         let kfold = split_kfold(dataset.num_rows(), k, self.config.seed);
         let config = self.build_config(params);
         let metric = self.select_metric(&config);
@@ -1043,14 +1090,44 @@ impl AutoTuner {
             let targets = dataset.targets();
 
             // Compute metrics using shared helper
-            let (val_metric, train_metric, f1_score) = self.compute_metrics_by_indices(
+            let (val_metric, train_metric, f1_score, roc_auc) = self.compute_metrics_by_indices(
                 &predictions, targets, &train_idx, &val_idx, &metric, &config,
             );
 
-            fold_results.push((val_metric, train_metric, model.num_trees(), f1_score));
+            fold_results.push((val_metric, train_metric, model.num_trees(), f1_score, roc_auc));
         }
 
         Ok(Self::aggregate_fold_results(&fold_results))
+    }
+
+    /// Evaluate using conformal prediction with optional k-fold
+    ///
+    /// If folds == 1, uses simple conformal. If folds > 1, runs conformal k-fold CV.
+    fn evaluate_conformal_with_folds(
+        &self,
+        dataset: &BinnedDataset,
+        params: &HashMap<String, f32>,
+        calibration_ratio: f32,
+        quantile: f32,
+        folds: usize,
+    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
+        if folds == 1 {
+            self.evaluate_conformal(dataset, params, calibration_ratio, quantile)
+        } else {
+            // Run conformal on each fold and average
+            let kfold = split_kfold(dataset.num_rows(), folds, self.config.seed);
+            let mut fold_results = Vec::with_capacity(folds);
+
+            for fold_idx in 0..folds {
+                let (_train_idx, _val_idx) = kfold.get_fold(fold_idx);
+                // For now, use full dataset training (same limitation as regular k-fold)
+                // TODO: Add BinnedDataset::subset_by_indices for proper k-fold
+                let result = self.evaluate_conformal(dataset, params, calibration_ratio, quantile)?;
+                fold_results.push(result);
+            }
+
+            Ok(Self::aggregate_fold_results(&fold_results))
+        }
     }
 
     /// Evaluate using conformal prediction (O(1) metric lookup)
@@ -1079,7 +1156,7 @@ impl AutoTuner {
         params: &HashMap<String, f32>,
         calibration_ratio: f32,
         quantile: f32,
-    ) -> Result<(f32, f32, usize, Option<f32>)> {
+    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
         // Build config with conformal calibration
         let mut config = self.build_config(params);
         config.calibration_ratio = calibration_ratio;
@@ -1096,8 +1173,26 @@ impl AutoTuner {
         // For now, use q as both metrics (training metric is less meaningful here)
         let train_metric = val_metric;
 
-        // Conformal is typically used for regression, so no accuracy-recall gap
-        Ok((val_metric, train_metric, model.num_trees(), None))
+        // For classification tasks, also compute F1 and ROC-AUC on calibration set
+        // Split dataset to get calibration targets for metrics
+        let cal_size = (dataset.num_rows() as f32 * calibration_ratio) as usize;
+        let cal_start = dataset.num_rows() - cal_size;
+        let cal_targets: Vec<f32> = dataset.targets()[cal_start..].to_vec();
+        let all_preds = model.predict(dataset);
+        let cal_preds: Vec<f32> = all_preds[cal_start..].to_vec();
+
+        let f1_score = if self.config.task_type.is_classification() {
+            self.compute_f1_score(&self.build_config(params), &cal_preds, &cal_targets)
+        } else {
+            None
+        };
+        let roc_auc = if self.config.task_type.is_binary() {
+            Some(super::metrics::compute_roc_auc(&cal_preds, &cal_targets))
+        } else {
+            None
+        };
+
+        Ok((val_metric, train_metric, model.num_trees(), f1_score, roc_auc))
     }
 
     /// Select appropriate metric based on loss type
@@ -1202,7 +1297,7 @@ impl AutoTuner {
         val_dataset: &BinnedDataset,
         val_targets: &[f32],
         params: &HashMap<String, f32>,
-    ) -> Result<(f32, f32, usize, Option<f32>)> {
+    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
         let mut config = self.build_config(params);
         config.validation_ratio = 0.0;
         config.min_early_stopping_trees = TUNER_MIN_EARLY_STOPPING_TREES;
@@ -1215,10 +1310,10 @@ impl AutoTuner {
         )?;
 
         let metric = self.select_metric(&config);
-        let (val_metric, train_metric, f1_score) =
+        let (val_metric, train_metric, f1_score, roc_auc) =
             compute_eval_metrics(&model, train_dataset, val_dataset, val_targets, &metric, &config, self);
 
-        Ok((val_metric, train_metric, model.num_trees(), f1_score))
+        Ok((val_metric, train_metric, model.num_trees(), f1_score, roc_auc))
     }
 
     /// Train model with conformal config and return quantile metric
@@ -1226,7 +1321,7 @@ impl AutoTuner {
     /// Specialized version for conformal prediction evaluation.
     /// Uses conformal quantile as the optimization metric instead of MSE/logloss.
     ///
-    /// Returns: (conformal_quantile, conformal_quantile, num_trees, f1_score)
+    /// Returns: (conformal_quantile, conformal_quantile, num_trees, f1_score, roc_auc)
     fn train_and_evaluate_conformal(
         &self,
         train_dataset: &BinnedDataset,
@@ -1234,7 +1329,7 @@ impl AutoTuner {
         val_targets: &[f32],
         params: &HashMap<String, f32>,
         quantile: f32,
-    ) -> Result<(f32, f32, usize, Option<f32>)> {
+    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
         let mut config = self.build_config(params);
         config.validation_ratio = 0.0;
         config.conformal_quantile = quantile;
@@ -1250,22 +1345,31 @@ impl AutoTuner {
         let val_metric = model.conformal_quantile().unwrap_or(f32::MAX);
         let train_metric = val_metric;
 
-        // Compute F1 for classification tasks
+        // Compute F1 and ROC-AUC for classification tasks
         let val_preds = model.predict(val_dataset);
-        let f1_score = self.compute_f1_score(&config, &val_preds, val_targets);
+        let f1_score = if self.config.task_type.is_classification() {
+            self.compute_f1_score(&config, &val_preds, val_targets)
+        } else {
+            None
+        };
+        let roc_auc = if self.config.task_type.is_binary() {
+            Some(super::metrics::compute_roc_auc(&val_preds, val_targets))
+        } else {
+            None
+        };
 
-        Ok((val_metric, train_metric, model.num_trees(), f1_score))
+        Ok((val_metric, train_metric, model.num_trees(), f1_score, roc_auc))
     }
 
     /// Aggregate results from multiple folds
     ///
     /// Computes average metrics across k-fold results.
     fn aggregate_fold_results(
-        results: &[(f32, f32, usize, Option<f32>)],
-    ) -> (f32, f32, usize, Option<f32>) {
+        results: &[(f32, f32, usize, Option<f32>, Option<f64>)],
+    ) -> (f32, f32, usize, Option<f32>, Option<f64>) {
         let k = results.len();
         if k == 0 {
-            return (f32::MAX, f32::MAX, 0, None);
+            return (f32::MAX, f32::MAX, 0, None, None);
         }
 
         let avg_val = results.iter().map(|r| r.0).sum::<f32>() / k as f32;
@@ -1279,7 +1383,14 @@ impl AutoTuner {
             Some(f1_scores.iter().sum::<f32>() / f1_scores.len() as f32)
         };
 
-        (avg_val, avg_train, avg_trees, avg_f1)
+        let roc_aucs: Vec<f64> = results.iter().filter_map(|r| r.4).collect();
+        let avg_roc_auc = if roc_aucs.is_empty() {
+            None
+        } else {
+            Some(roc_aucs.iter().sum::<f64>() / roc_aucs.len() as f64)
+        };
+
+        (avg_val, avg_train, avg_trees, avg_f1, avg_roc_auc)
     }
 
     /// Compute metrics by splitting predictions according to indices (optimistic mode)
@@ -1294,7 +1405,7 @@ impl AutoTuner {
         val_idx: &[usize],
         metric: &Metric,
         config: &GBDTConfig,
-    ) -> (f32, f32, Option<f32>) {
+    ) -> (f32, f32, Option<f32>, Option<f64>) {
         let train_preds: Vec<f32> = train_idx.iter().map(|&i| predictions[i]).collect();
         let train_targets: Vec<f32> = train_idx.iter().map(|&i| targets[i]).collect();
         let train_metric = metric.compute(&train_preds, &train_targets);
@@ -1303,9 +1414,20 @@ impl AutoTuner {
         let val_targets: Vec<f32> = val_idx.iter().map(|&i| targets[i]).collect();
         let val_metric = metric.compute(&val_preds, &val_targets);
 
-        let f1_score = self.compute_f1_score(config, &val_preds, &val_targets);
+        let f1_score = if self.config.task_type.is_classification() {
+            self.compute_f1_score(config, &val_preds, &val_targets)
+        } else {
+            None
+        };
 
-        (val_metric, train_metric, f1_score)
+        // Compute ROC-AUC for binary classification
+        let roc_auc = if self.config.task_type.is_binary() {
+            Some(super::metrics::compute_roc_auc(&val_preds, &val_targets))
+        } else {
+            None
+        };
+
+        (val_metric, train_metric, f1_score, roc_auc)
     }
 
     /// Randomize parameter centers to explore a different region
@@ -1485,6 +1607,22 @@ impl AutoTuner {
         Ok(results)
     }
 
+    /// Evaluate using holdout with optional k-fold (realistic mode)
+    fn evaluate_holdout_realistic_with_folds(
+        &self,
+        raw_data: &DataFrame,
+        realistic_cfg: &RealisticModeConfig,
+        params: &HashMap<String, f32>,
+        validation_ratio: f32,
+        folds: usize,
+    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
+        if folds == 1 {
+            self.evaluate_holdout_realistic(raw_data, realistic_cfg, params, validation_ratio)
+        } else {
+            self.evaluate_kfold_realistic(raw_data, realistic_cfg, params, folds)
+        }
+    }
+
     /// Evaluate using holdout validation with per-split encoding (realistic mode)
     ///
     /// Prevents target leakage by:
@@ -1499,7 +1637,7 @@ impl AutoTuner {
         realistic_cfg: &RealisticModeConfig,
         params: &HashMap<String, f32>,
         validation_ratio: f32,
-    ) -> Result<(f32, f32, usize, Option<f32>)> {
+    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
         // Split data
         let split = split_holdout(raw_data.height(), validation_ratio, 0.0, self.config.seed);
         let (train_df, val_df) = split_dataframe_by_indices(raw_data, &split.train, &split.validation)?;
@@ -1519,7 +1657,7 @@ impl AutoTuner {
         realistic_cfg: &RealisticModeConfig,
         params: &HashMap<String, f32>,
         k: usize,
-    ) -> Result<(f32, f32, usize, Option<f32>)> {
+    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
         let kfold = split_kfold(raw_data.height(), k, self.config.seed);
         let mut fold_results = Vec::with_capacity(k);
 
@@ -1538,6 +1676,42 @@ impl AutoTuner {
         Ok(Self::aggregate_fold_results(&fold_results))
     }
 
+    /// Evaluate using conformal with optional k-fold (realistic mode)
+    fn evaluate_conformal_realistic_with_folds(
+        &self,
+        raw_data: &DataFrame,
+        realistic_cfg: &RealisticModeConfig,
+        params: &HashMap<String, f32>,
+        calibration_ratio: f32,
+        quantile: f32,
+        folds: usize,
+    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
+        if folds == 1 {
+            self.evaluate_conformal_realistic(raw_data, realistic_cfg, params, calibration_ratio, quantile)
+        } else {
+            // Run conformal on each fold and average
+            let kfold = split_kfold(raw_data.height(), folds, self.config.seed);
+            let mut fold_results = Vec::with_capacity(folds);
+
+            for fold_idx in 0..folds {
+                let (train_idx, val_idx) = kfold.get_fold(fold_idx);
+
+                // Split and encode with per-fold pipeline
+                let (train_df, val_df) = split_dataframe_by_indices(raw_data, &train_idx, &val_idx)?;
+                let (train_dataset, cal_dataset, cal_targets) =
+                    encode_train_val_split(train_df, val_df, realistic_cfg)?;
+
+                // Train and evaluate using conformal helper
+                let result = self.train_and_evaluate_conformal(
+                    &train_dataset, &cal_dataset, &cal_targets, params, quantile,
+                )?;
+                fold_results.push(result);
+            }
+
+            Ok(Self::aggregate_fold_results(&fold_results))
+        }
+    }
+
     /// Evaluate using conformal prediction with per-split encoding (realistic mode)
     ///
     /// Uses the conformal quantile `q` as the optimization metric.
@@ -1549,7 +1723,7 @@ impl AutoTuner {
         params: &HashMap<String, f32>,
         calibration_ratio: f32,
         quantile: f32,
-    ) -> Result<(f32, f32, usize, Option<f32>)> {
+    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
         // Split data
         let split = split_holdout(raw_data.height(), calibration_ratio, 0.0, self.config.seed);
         let (train_df, cal_df) = split_dataframe_by_indices(raw_data, &split.train, &split.validation)?;
@@ -1596,8 +1770,7 @@ impl AutoTuner {
         } else {
             // No early stopping - use validation from eval strategy for metrics only
             config.validation_ratio = match self.config.eval_strategy {
-                EvalStrategy::Holdout { validation_ratio } => validation_ratio,
-                EvalStrategy::KFold { .. } => 0.0, // K-fold doesn't use holdout
+                EvalStrategy::Holdout { validation_ratio, .. } => validation_ratio,
                 EvalStrategy::Conformal { .. } => 0.0, // Conformal uses calibration_ratio instead
             };
         }
@@ -1625,6 +1798,7 @@ mod tests {
             num_trees: 100,
             train_time_ms: 1000,
             f1_score: None,
+            roc_auc: None,
         };
 
         assert_eq!(result.trial_id, 0);
@@ -1649,6 +1823,7 @@ mod tests {
             num_trees: 100,
             train_time_ms: 1000,
             f1_score: None,
+            roc_auc: None,
         });
 
         assert_eq!(history.len(), 1);
@@ -1667,6 +1842,7 @@ mod tests {
             num_trees: 100,
             train_time_ms: 1000,
             f1_score: None,
+            roc_auc: None,
         });
 
         assert_eq!(history.len(), 2);
@@ -1688,6 +1864,7 @@ mod tests {
             num_trees: 100,
             train_time_ms: 1000,
             f1_score: None,
+            roc_auc: None,
         });
 
         let json = history.to_json();

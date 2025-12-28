@@ -57,11 +57,12 @@ mod trial;
 
 // Re-exports from config
 pub use config::{
-    EvalStrategy, GridStrategy, ParamBounds, ParamDef, ParameterSpace, TunerConfig, TuningMode,
+    EvalStrategy, GridStrategy, OptimizationMetric, ParamBounds, ParamDef, ParameterSpace,
+    TaskType, TunerConfig, TuningMode,
 };
 
 // Re-exports from metrics
-pub use metrics::Metric;
+pub use metrics::{compute_roc_auc, Metric};
 
 // Re-exports from trial
 pub use trial::TrialResult;

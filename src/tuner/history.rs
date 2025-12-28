@@ -1,46 +1,56 @@
 //! Search history tracking for hyperparameter tuning
 
+use super::config::OptimizationMetric;
 use super::trial::TrialResult;
 
 /// Search history tracking all trials
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SearchHistory {
     trials: Vec<TrialResult>,
     /// Index into trials Vec for O(1) lookup (not trial_id)
     best_trial_idx: Option<usize>,
+    /// Metric used for selecting the best trial
+    optimization_metric: OptimizationMetric,
+}
+
+impl Default for SearchHistory {
+    fn default() -> Self {
+        Self {
+            trials: Vec::new(),
+            best_trial_idx: None,
+            optimization_metric: OptimizationMetric::ValidationLoss,
+        }
+    }
 }
 
 impl SearchHistory {
-    /// Create a new empty history
+    /// Create a new empty history with default optimization metric (ValidationLoss)
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Create a new history with a specific optimization metric
+    pub fn with_metric(metric: OptimizationMetric) -> Self {
+        Self {
+            trials: Vec::new(),
+            best_trial_idx: None,
+            optimization_metric: metric,
+        }
+    }
+
     /// Add a trial result
     ///
-    /// For classification (when f1_score is present), uses F1 as the primary
-    /// comparison metric (higher is better). For regression, uses val_metric
-    /// (lower is better).
+    /// Compares using the configured optimization metric:
+    /// - `ValidationLoss`: Lower is better
+    /// - `F1Score`: Higher is better
+    /// - `RocAuc`: Higher is better
     pub fn add(&mut self, result: TrialResult) {
         let new_idx = self.trials.len();
 
         let is_better = self
             .best_trial_idx
             .and_then(|idx| self.trials.get(idx))
-            .map(|best| {
-                // For classification: use F1 score (higher is better)
-                // For regression: use val_metric (lower is better)
-                match (result.f1_score, best.f1_score) {
-                    // Both have valid F1 scores - compare them (handle NaN)
-                    (Some(new_f1), Some(best_f1)) if !new_f1.is_nan() && !best_f1.is_nan() => {
-                        new_f1 > best_f1
-                    }
-                    // New has valid F1, best is NaN - prefer non-NaN
-                    (Some(new_f1), Some(_)) if !new_f1.is_nan() => true,
-                    // Fall back to val_metric for regression or if F1 is unavailable/NaN
-                    _ => result.val_metric < best.val_metric,
-                }
-            })
+            .map(|best| self.compare_trials(&result, best))
             .unwrap_or(true);
 
         self.trials.push(result);
@@ -48,6 +58,42 @@ impl SearchHistory {
         if is_better {
             self.best_trial_idx = Some(new_idx);
         }
+    }
+
+    /// Compare two trials using the configured optimization metric
+    ///
+    /// Returns true if `new` is better than `best`
+    pub fn compare_trials(&self, new: &TrialResult, best: &TrialResult) -> bool {
+        match self.optimization_metric {
+            OptimizationMetric::ValidationLoss => {
+                // Lower is better
+                new.val_metric < best.val_metric
+            }
+            OptimizationMetric::F1Score => {
+                // Higher is better, handle NaN
+                match (new.f1_score, best.f1_score) {
+                    (Some(new_f1), Some(best_f1)) if !new_f1.is_nan() && !best_f1.is_nan() => {
+                        new_f1 > best_f1
+                    }
+                    (Some(new_f1), Some(_)) if !new_f1.is_nan() => true,
+                    (Some(_), None) => true,
+                    _ => false,
+                }
+            }
+            OptimizationMetric::RocAuc => {
+                // Higher is better, handle missing
+                match (new.roc_auc, best.roc_auc) {
+                    (Some(new_auc), Some(best_auc)) => new_auc > best_auc,
+                    (Some(_), None) => true,
+                    _ => false,
+                }
+            }
+        }
+    }
+
+    /// Get the optimization metric being used
+    pub fn optimization_metric(&self) -> OptimizationMetric {
+        self.optimization_metric
     }
 
     /// Get the best trial so far (O(1) lookup)

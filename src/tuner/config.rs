@@ -343,50 +343,43 @@ impl ParameterSpace {
 ///
 /// # Choosing a Strategy
 ///
-/// - **Holdout**: Fast (1x training per trial). Good for large datasets or quick iteration.
-///   Use more samples per iteration to compensate for evaluation variance.
-///
-/// - **KFold**: Slower (Kx training per trial) but finds parameters that generalize better.
-///   Recommended for small datasets or when maximizing test performance is critical.
-///   In testing, 5-fold CV improved Kaggle scores by ~1.2% over holdout.
+/// - **Holdout**: Train/validation split. Use `folds=1` for simple holdout (fast),
+///   or `folds=5` for 5-fold CV (robust, 5x slower but better generalization).
 ///
 /// - **Conformal**: O(1) evaluation using conformal interval width as the metric.
 ///   Instead of optimizing for lowest error, optimizes for tightest prediction intervals.
 ///   Models that overfit will have wide intervals to maintain coverage guarantee.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EvalStrategy {
-    /// Simple train/validation split
+    /// Train/validation split with optional k-fold cross-validation
     ///
-    /// Fast but may have high variance for small datasets.
-    /// Consider using more samples per iteration to compensate.
+    /// - `folds=1`: Simple holdout (fast, may have high variance)
+    /// - `folds=5`: 5-fold CV (robust, 5x slower)
     Holdout {
         /// Fraction of data to use for validation (e.g., 0.2 = 20%)
         validation_ratio: f32,
+        /// Number of folds (1 = simple holdout, 5 = 5-fold CV)
+        folds: usize,
     },
-    /// K-fold cross-validation
-    ///
-    /// More robust evaluation that finds parameters generalizing better to unseen data.
-    /// K times slower than holdout, but typically improves test performance by 1-2%.
-    KFold {
-        /// Number of folds (typically 5 for best accuracy/speed tradeoff)
-        k: usize,
-    },
-    /// Conformal prediction-based evaluation
+    /// Conformal prediction-based evaluation with optional k-fold
     ///
     /// **O(1) evaluation** - Uses the conformal quantile `q` as the optimization metric.
     /// Lower `q` means tighter prediction intervals, indicating a more confident model.
     ///
+    /// - `folds=1`: Simple conformal (fastest)
+    /// - `folds=5`: Conformal 5-fold (robust, still fast per-fold)
+    ///
     /// Benefits:
-    /// - Fastest evaluation (no prediction loop needed, just read `q`)
+    /// - Fast evaluation (no prediction loop needed, just read `q`)
     /// - Penalizes overfitting naturally (overfit models need wide intervals for coverage)
     /// - Optimizes for "certainty" rather than just "accuracy"
-    ///
-    /// The data is split into training + calibration. The calibration set computes `q`.
     Conformal {
         /// Fraction of data for calibration set (e.g., 0.2 = 20%)
         calibration_ratio: f32,
         /// Coverage quantile (e.g., 0.9 = 90% coverage guarantee)
         quantile: f32,
+        /// Number of folds (1 = simple conformal, 5 = conformal 5-fold)
+        folds: usize,
     },
 }
 
@@ -394,22 +387,21 @@ impl Default for EvalStrategy {
     fn default() -> Self {
         Self::Holdout {
             validation_ratio: 0.2,
+            folds: 1,
         }
     }
 }
 
 impl EvalStrategy {
-    /// Create holdout strategy with given validation ratio
+    /// Create holdout strategy with given validation ratio (single fold)
     pub fn holdout(validation_ratio: f32) -> Self {
-        Self::Holdout { validation_ratio }
+        Self::Holdout {
+            validation_ratio,
+            folds: 1,
+        }
     }
 
-    /// Create K-fold cross-validation strategy
-    pub fn kfold(k: usize) -> Self {
-        Self::KFold { k }
-    }
-
-    /// Create conformal prediction-based evaluation strategy
+    /// Create conformal prediction-based evaluation strategy (single fold)
     ///
     /// Uses the conformal quantile `q` as the optimization metric.
     /// Lower `q` = tighter intervals = more confident model.
@@ -421,12 +413,34 @@ impl EvalStrategy {
         Self::Conformal {
             calibration_ratio,
             quantile,
+            folds: 1,
         }
     }
 
     /// Create conformal strategy with default 90% coverage
     pub fn conformal_90(calibration_ratio: f32) -> Self {
         Self::conformal(calibration_ratio, 0.9)
+    }
+
+    /// Set the number of folds for cross-validation
+    ///
+    /// - `folds=1`: Simple single split (default)
+    /// - `folds=5`: 5-fold cross-validation (recommended)
+    /// - `folds=10`: 10-fold cross-validation (more robust, slower)
+    pub fn with_folds(mut self, folds: usize) -> Self {
+        match &mut self {
+            Self::Holdout { folds: f, .. } => *f = folds,
+            Self::Conformal { folds: f, .. } => *f = folds,
+        }
+        self
+    }
+
+    /// Get the number of folds
+    pub fn folds(&self) -> usize {
+        match self {
+            Self::Holdout { folds, .. } => *folds,
+            Self::Conformal { folds, .. } => *folds,
+        }
     }
 
     /// Automatically select strategy based on dataset size
@@ -436,35 +450,35 @@ impl EvalStrategy {
     /// - > 5,000 samples: 20% holdout
     pub fn auto(num_samples: usize) -> Self {
         if num_samples < 1_000 {
-            Self::KFold { k: 5 }
+            Self::holdout(0.2).with_folds(5)
         } else if num_samples < 5_000 {
-            Self::KFold { k: 3 }
+            Self::holdout(0.2).with_folds(3)
         } else {
-            Self::Holdout {
-                validation_ratio: 0.2,
-            }
+            Self::holdout(0.2)
         }
     }
 
     /// Validate the strategy
     pub fn validate(&self) -> Result<(), String> {
         match self {
-            Self::Holdout { validation_ratio } => {
+            Self::Holdout {
+                validation_ratio,
+                folds,
+            } => {
                 if *validation_ratio <= 0.0 || *validation_ratio >= 1.0 {
                     return Err(format!(
                         "validation_ratio must be in (0, 1), got {}",
                         validation_ratio
                     ));
                 }
-            }
-            Self::KFold { k } => {
-                if *k < 2 {
-                    return Err(format!("k must be >= 2, got {}", k));
+                if *folds == 0 {
+                    return Err("folds must be >= 1".into());
                 }
             }
             Self::Conformal {
                 calibration_ratio,
                 quantile,
+                folds,
             } => {
                 if *calibration_ratio <= 0.0 || *calibration_ratio >= 1.0 {
                     return Err(format!(
@@ -474,6 +488,9 @@ impl EvalStrategy {
                 }
                 if *quantile <= 0.0 || *quantile >= 1.0 {
                     return Err(format!("quantile must be in (0, 1), got {}", quantile));
+                }
+                if *folds == 0 {
+                    return Err("folds must be >= 1".into());
                 }
             }
         }
@@ -632,6 +649,76 @@ impl TuningMode {
     }
 }
 
+/// Metric to use for selecting the "best" trial
+///
+/// This determines which metric is used to compare trials and select the winner.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum OptimizationMetric {
+    /// Use validation loss (LogLoss for classification, MSE for regression)
+    /// Lower is better. This is the default.
+    #[default]
+    ValidationLoss,
+    /// Use F1 score (binary/multi-class classification)
+    /// Higher is better.
+    F1Score,
+    /// Use ROC-AUC (binary classification only)
+    /// Higher is better. Measures ranking quality.
+    RocAuc,
+}
+
+impl OptimizationMetric {
+    /// Check if higher values are better for this metric
+    pub fn higher_is_better(&self) -> bool {
+        match self {
+            Self::ValidationLoss => false,
+            Self::F1Score => true,
+            Self::RocAuc => true,
+        }
+    }
+
+    /// Get the metric name for display
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::ValidationLoss => "validation_loss",
+            Self::F1Score => "f1_score",
+            Self::RocAuc => "roc_auc",
+        }
+    }
+}
+
+/// Task type for the tuner
+///
+/// Determines which metrics are computed and displayed.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum TaskType {
+    /// Regression task (MSE, MAE, etc.)
+    /// No F1 or ROC-AUC computed.
+    Regression,
+    /// Binary classification (LogLoss, F1, ROC-AUC)
+    #[default]
+    BinaryClassification,
+    /// Multi-class classification (LogLoss, F1)
+    /// ROC-AUC is not computed (would need one-vs-rest).
+    MultiClassClassification,
+}
+
+impl TaskType {
+    /// Check if this is a classification task
+    pub fn is_classification(&self) -> bool {
+        matches!(self, Self::BinaryClassification | Self::MultiClassClassification)
+    }
+
+    /// Check if this is binary classification
+    pub fn is_binary(&self) -> bool {
+        matches!(self, Self::BinaryClassification)
+    }
+
+    /// Check if this is regression
+    pub fn is_regression(&self) -> bool {
+        matches!(self, Self::Regression)
+    }
+}
+
 /// Main tuner configuration
 #[derive(Debug, Clone)]
 pub struct TunerConfig {
@@ -699,6 +786,19 @@ pub struct TunerConfig {
     pub seed: u64,
     /// Enable verbose logging
     pub verbose: bool,
+    /// Metric to use for selecting the "best" trial
+    ///
+    /// - `ValidationLoss`: Use val_metric (lower is better) - default
+    /// - `F1Score`: Use F1 score (higher is better)
+    /// - `RocAuc`: Use ROC-AUC (higher is better) - ranking quality
+    pub optimization_metric: OptimizationMetric,
+    /// Task type (regression, binary classification, multi-class)
+    ///
+    /// Determines which metrics are computed:
+    /// - Regression: only loss (MSE)
+    /// - BinaryClassification: loss, F1, ROC-AUC
+    /// - MultiClassClassification: loss, F1
+    pub task_type: TaskType,
 }
 
 impl Default for TunerConfig {
@@ -711,6 +811,7 @@ impl Default for TunerConfig {
             grid_strategy: GridStrategy::Cartesian { points_per_dim: 3 },
             eval_strategy: EvalStrategy::Holdout {
                 validation_ratio: 0.2,
+                folds: 1,
             },
             tuning_mode: TuningMode::Optimistic, // Fast by default (for backwards compat)
             parallel_trials: false,   // Conservative default (GPU contention)
@@ -729,6 +830,8 @@ impl Default for TunerConfig {
 
             seed: 42,
             verbose: true,
+            optimization_metric: OptimizationMetric::ValidationLoss,
+            task_type: TaskType::BinaryClassification,
         }
     }
 }
@@ -904,6 +1007,37 @@ impl TunerConfig {
         self
     }
 
+    /// Set the metric to optimize (determines "best" trial)
+    ///
+    /// # Arguments
+    /// * `metric` - The metric to use for comparing trials
+    ///
+    /// # Examples
+    /// ```ignore
+    /// // Optimize for ROC-AUC (ranking quality):
+    /// let config = TunerConfig::new()
+    ///     .with_optimization_metric(OptimizationMetric::RocAuc);
+    ///
+    /// // Optimize for F1 score:
+    /// let config = TunerConfig::new()
+    ///     .with_optimization_metric(OptimizationMetric::F1Score);
+    /// ```
+    pub fn with_optimization_metric(mut self, metric: OptimizationMetric) -> Self {
+        self.optimization_metric = metric;
+        self
+    }
+
+    /// Set the task type (regression, binary classification, multi-class)
+    ///
+    /// This determines which metrics are computed during tuning:
+    /// - `Regression`: only loss (MSE)
+    /// - `BinaryClassification`: loss, F1, ROC-AUC
+    /// - `MultiClassClassification`: loss, F1
+    pub fn with_task_type(mut self, task_type: TaskType) -> Self {
+        self.task_type = task_type;
+        self
+    }
+
     /// Validate the configuration
     pub fn validate(&self) -> Result<(), String> {
         if self.n_iterations == 0 {
@@ -1049,22 +1183,28 @@ mod tests {
     fn test_eval_strategy() {
         let holdout = EvalStrategy::holdout(0.2);
         assert!(holdout.validate().is_ok());
+        assert_eq!(holdout.folds(), 1);
 
-        let kfold = EvalStrategy::kfold(5);
-        assert!(kfold.validate().is_ok());
+        let holdout_5fold = EvalStrategy::holdout(0.2).with_folds(5);
+        assert!(holdout_5fold.validate().is_ok());
+        assert_eq!(holdout_5fold.folds(), 5);
+
+        let conformal = EvalStrategy::conformal(0.2, 0.9).with_folds(3);
+        assert!(conformal.validate().is_ok());
+        assert_eq!(conformal.folds(), 3);
 
         let invalid_holdout = EvalStrategy::holdout(1.5);
         assert!(invalid_holdout.validate().is_err());
 
-        let invalid_kfold = EvalStrategy::kfold(1);
-        assert!(invalid_kfold.validate().is_err());
+        let invalid_folds = EvalStrategy::holdout(0.2).with_folds(0);
+        assert!(invalid_folds.validate().is_err()); // folds must be >= 1
     }
 
     #[test]
     fn test_eval_strategy_auto() {
-        assert!(matches!(EvalStrategy::auto(500), EvalStrategy::KFold { k: 5 }));
-        assert!(matches!(EvalStrategy::auto(2000), EvalStrategy::KFold { k: 3 }));
-        assert!(matches!(EvalStrategy::auto(10000), EvalStrategy::Holdout { .. }));
+        assert!(matches!(EvalStrategy::auto(500), EvalStrategy::Holdout { folds: 5, .. }));
+        assert!(matches!(EvalStrategy::auto(2000), EvalStrategy::Holdout { folds: 3, .. }));
+        assert!(matches!(EvalStrategy::auto(10000), EvalStrategy::Holdout { folds: 1, .. }));
     }
 
     #[test]

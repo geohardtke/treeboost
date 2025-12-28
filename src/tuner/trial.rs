@@ -25,4 +25,9 @@ pub struct TrialResult {
     /// A low F1 score indicates an unbalanced model (e.g., predicting
     /// all negatives gives F1 = 0).
     pub f1_score: Option<f32>,
+    /// ROC-AUC score for binary classification (None for regression/multi-class)
+    ///
+    /// Area Under the ROC Curve measures ranking quality.
+    /// Used by Kaggle for many binary classification competitions.
+    pub roc_auc: Option<f64>,
 }

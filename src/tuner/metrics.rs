@@ -21,6 +21,8 @@ pub enum Metric {
     MultiClassLogLoss { n_classes: usize },
     /// Accuracy (classification)
     Accuracy { threshold: f32 },
+    /// ROC-AUC (binary classification ranking metric)
+    RocAuc,
 }
 
 impl Metric {
@@ -59,6 +61,11 @@ impl Metric {
         Metric::Accuracy { threshold }
     }
 
+    /// Create ROC-AUC metric (binary classification)
+    pub fn roc_auc() -> Self {
+        Metric::RocAuc
+    }
+
     /// Auto-select metric from loss function type
     pub fn from_loss_type(loss: &dyn LossFunction) -> Self {
         let name = loss.name();
@@ -75,7 +82,7 @@ impl Metric {
         match self {
             Metric::Mse | Metric::Rmse | Metric::Mae => true,
             Metric::BinaryLogLoss | Metric::MultiClassLogLoss { .. } => true,
-            Metric::Accuracy { .. } => false,
+            Metric::Accuracy { .. } | Metric::RocAuc => false,
         }
     }
 
@@ -115,6 +122,7 @@ impl Metric {
                     Metric::Mae => compute_mae(predictions, targets),
                     Metric::BinaryLogLoss => compute_binary_log_loss(predictions, targets),
                     Metric::Accuracy { threshold } => compute_accuracy(predictions, targets, *threshold),
+                    Metric::RocAuc => compute_roc_auc(predictions, targets) as f32,
                     Metric::MultiClassLogLoss { .. } => unreachable!(),
                 }
             }
@@ -130,8 +138,65 @@ impl Metric {
             Metric::BinaryLogLoss => "binary_log_loss",
             Metric::MultiClassLogLoss { .. } => "multi_class_log_loss",
             Metric::Accuracy { .. } => "accuracy",
+            Metric::RocAuc => "roc_auc",
         }
     }
+}
+
+/// Compute ROC-AUC score using trapezoidal integration
+///
+/// Predictions are raw logits (will be converted to probabilities via sigmoid).
+/// Targets should be 0.0 or 1.0.
+pub fn compute_roc_auc(predictions: &[f32], targets: &[f32]) -> f64 {
+    if predictions.is_empty() || predictions.len() != targets.len() {
+        return 0.0;
+    }
+
+    // Convert predictions to probabilities
+    let probs: Vec<f64> = predictions.iter().map(|&p| sigmoid(p) as f64).collect();
+    let targets_f64: Vec<f64> = targets.iter().map(|&t| t as f64).collect();
+
+    // Sort by descending probability
+    let mut indices: Vec<usize> = (0..probs.len()).collect();
+    indices.sort_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Count positives and negatives
+    let n_pos = targets_f64.iter().filter(|&&t| t > 0.5).count();
+    let n_neg = targets_f64.len() - n_pos;
+
+    if n_pos == 0 || n_neg == 0 {
+        return 0.5; // Undefined, return random classifier score
+    }
+
+    // Compute TPR and FPR at each threshold
+    let mut tpr_points = Vec::with_capacity(indices.len() + 1);
+    let mut fpr_points = Vec::with_capacity(indices.len() + 1);
+
+    tpr_points.push(0.0);
+    fpr_points.push(0.0);
+
+    let mut tp = 0.0;
+    let mut fp = 0.0;
+
+    for &idx in &indices {
+        if targets_f64[idx] > 0.5 {
+            tp += 1.0;
+        } else {
+            fp += 1.0;
+        }
+        tpr_points.push(tp / n_pos as f64);
+        fpr_points.push(fp / n_neg as f64);
+    }
+
+    // Trapezoidal integration
+    let mut auc = 0.0;
+    for i in 1..tpr_points.len() {
+        let width = fpr_points[i] - fpr_points[i - 1];
+        let height = (tpr_points[i] + tpr_points[i - 1]) / 2.0;
+        auc += width * height;
+    }
+
+    auc
 }
 
 /// Compute Mean Squared Error
@@ -397,5 +462,64 @@ mod tests {
         // Test numerical stability with extreme values
         assert!(sigmoid(1000.0).is_finite());
         assert!(sigmoid(-1000.0).is_finite());
+    }
+
+    #[test]
+    fn test_roc_auc_perfect() {
+        // Perfect predictions: all positives ranked higher than negatives
+        let predictions = vec![10.0, 10.0, -10.0, -10.0];
+        let targets = vec![1.0, 1.0, 0.0, 0.0];
+        let auc = compute_roc_auc(&predictions, &targets);
+        assert!((auc - 1.0).abs() < 1e-6, "Expected AUC = 1.0, got {}", auc);
+    }
+
+    #[test]
+    fn test_roc_auc_worst() {
+        // Worst predictions: all negatives ranked higher than positives
+        let predictions = vec![-10.0, -10.0, 10.0, 10.0];
+        let targets = vec![1.0, 1.0, 0.0, 0.0];
+        let auc = compute_roc_auc(&predictions, &targets);
+        assert!((auc - 0.0).abs() < 1e-6, "Expected AUC = 0.0, got {}", auc);
+    }
+
+    #[test]
+    fn test_roc_auc_random() {
+        // Random ordering should give AUC around 0.5
+        let predictions = vec![0.5, 0.3, 0.4, 0.6];
+        let targets = vec![1.0, 0.0, 1.0, 0.0];
+        let auc = compute_roc_auc(&predictions, &targets);
+        // With this specific ordering, should be 0.5
+        assert!((auc - 0.5).abs() < 0.1, "Expected AUC ~ 0.5, got {}", auc);
+    }
+
+    #[test]
+    fn test_roc_auc_single_class() {
+        // All positives or all negatives should return 0.5
+        let predictions = vec![1.0, 2.0, 3.0];
+        let targets = vec![1.0, 1.0, 1.0];
+        let auc = compute_roc_auc(&predictions, &targets);
+        assert!((auc - 0.5).abs() < 1e-6, "All-positive should give AUC = 0.5, got {}", auc);
+
+        let targets = vec![0.0, 0.0, 0.0];
+        let auc = compute_roc_auc(&predictions, &targets);
+        assert!((auc - 0.5).abs() < 1e-6, "All-negative should give AUC = 0.5, got {}", auc);
+    }
+
+    #[test]
+    fn test_roc_auc_empty() {
+        let empty: Vec<f32> = vec![];
+        let auc = compute_roc_auc(&empty, &empty);
+        assert!((auc - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_metric_roc_auc() {
+        // Test via Metric enum
+        let predictions = vec![10.0, 10.0, -10.0, -10.0];
+        let targets = vec![1.0, 1.0, 0.0, 0.0];
+        let auc = Metric::RocAuc.compute(&predictions, &targets);
+        assert!((auc - 1.0).abs() < 1e-6, "Expected AUC = 1.0, got {}", auc);
+        assert!(!Metric::RocAuc.lower_is_better());
+        assert_eq!(Metric::RocAuc.name(), "roc_auc");
     }
 }

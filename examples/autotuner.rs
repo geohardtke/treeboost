@@ -187,7 +187,7 @@ fn main() {
     let tuner_config = TunerConfig::new()
         .with_iterations(2)
         .with_grid_strategy(GridStrategy::Cartesian { points_per_dim: 2 })
-        .with_eval_strategy(EvalStrategy::kfold(3)) // 3-fold CV
+        .with_eval_strategy(EvalStrategy::holdout(0.2).with_folds(3)) // 3-fold CV
         .with_verbose(false); // We'll use our own progress output
 
     use std::sync::atomic::{AtomicU32, Ordering};
