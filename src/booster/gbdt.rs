@@ -20,6 +20,7 @@ use crate::backend::wgpu::FullGpuTreeBuilder;
 
 /// Trained GBDT model
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct GBDTModel {
     /// Training configuration
     config: GBDTConfig,

@@ -7,9 +7,51 @@
 //! - `EvalStrategy`: How to evaluate candidates (holdout vs K-fold)
 //! - `GridStrategy`: How to generate candidate points
 //! - `TuningMode`: Optimistic (fast) vs Realistic (accurate) evaluation
+//! - `ModelFormat`: Output format for saving models
 //! - `TunerConfig`: Main tuner configuration
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+
+use crate::TreeBoostError;
+
+/// Model serialization format
+///
+/// Determines how the best model is saved after tuning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelFormat {
+    /// Rkyv format - zero-copy deserialization, fastest loading
+    ///
+    /// Uses rkyv for blazing fast model loading with memory mapping.
+    /// Best for production inference where load time matters.
+    /// File extension: `.rkyv`
+    Rkyv,
+
+    /// Bincode format - compact binary, serde-based
+    ///
+    /// Uses bincode for efficient binary serialization.
+    /// Good balance of size and compatibility.
+    /// File extension: `.bin`
+    Bincode,
+}
+
+impl ModelFormat {
+    /// Get the file extension for this format
+    pub fn extension(&self) -> &'static str {
+        match self {
+            Self::Rkyv => "rkyv",
+            Self::Bincode => "bin",
+        }
+    }
+
+    /// Get the filename for the best model in this format
+    pub fn filename(&self) -> &'static str {
+        match self {
+            Self::Rkyv => "best_model.rkyv",
+            Self::Bincode => "best_model.bin",
+        }
+    }
+}
 
 /// Bounds and scaling for a tunable parameter
 #[derive(Debug, Clone, PartialEq)]
@@ -293,6 +335,11 @@ impl ParameterSpace {
         self.params.is_empty()
     }
 
+    /// Get parameter names in consistent order
+    pub fn param_names(&self) -> Vec<String> {
+        self.params.iter().map(|p| p.name.clone()).collect()
+    }
+
     /// Get current centers as a HashMap
     pub fn centers(&self) -> HashMap<String, f32> {
         self.params
@@ -336,6 +383,170 @@ impl ParameterSpace {
             }
         }
         Ok(())
+    }
+
+    /// Constrain parameter bounds based on historical results
+    ///
+    /// Reads iteration_*.csv files from a previous run directory and constrains
+    /// the search space to the min/max values of the top performing trials.
+    ///
+    /// # Arguments
+    /// * `history_dir` - Path to a previous run directory (e.g., "results/run_20251228_143022")
+    /// * `top_percentile` - Fraction of top trials to use (e.g., 0.2 = top 20%)
+    /// * `metric_column` - Column name to sort by ("val_metric", "roc_auc", or "f1_score")
+    /// * `higher_is_better` - Whether higher values are better for the metric
+    ///
+    /// # Example
+    /// ```ignore
+    /// let space = ParameterSpace::default_classification()
+    ///     .constrain_from_history(
+    ///         "results/run_20251228_143022",
+    ///         0.2,  // Top 20%
+    ///         "roc_auc",
+    ///         true, // Higher is better
+    ///     )?;
+    /// ```
+    pub fn constrain_from_history<P: AsRef<std::path::Path>>(
+        mut self,
+        history_dir: P,
+        top_percentile: f32,
+        metric_column: &str,
+        higher_is_better: bool,
+    ) -> crate::Result<Self> {
+        use std::fs;
+
+        let dir = history_dir.as_ref();
+        if !dir.exists() {
+            return Err(TreeBoostError::Data(format!(
+                "History directory not found: {}",
+                dir.display()
+            )));
+        }
+
+        // Find all iteration_*.csv files
+        let mut csv_files: Vec<_> = fs::read_dir(dir)
+            .map_err(|e| TreeBoostError::Data(format!("Failed to read directory: {}", e)))?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                let name = path.file_name()?.to_str()?;
+                if name.starts_with("iteration_") && name.ends_with(".csv") {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if csv_files.is_empty() {
+            return Err(TreeBoostError::Data(
+                "No iteration_*.csv files found in history directory".into(),
+            ));
+        }
+
+        csv_files.sort();
+
+        // Parse all trials from CSV files
+        let mut all_trials: Vec<HashMap<String, f32>> = Vec::new();
+
+        for csv_path in &csv_files {
+            let mut reader = csv::Reader::from_path(csv_path)
+                .map_err(|e| TreeBoostError::Data(format!("Failed to open CSV: {}", e)))?;
+
+            let headers: Vec<String> = reader
+                .headers()
+                .map_err(|e| TreeBoostError::Data(format!("Failed to read headers: {}", e)))?
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+
+            for result in reader.records() {
+                let record =
+                    result.map_err(|e| TreeBoostError::Data(format!("Failed to read record: {}", e)))?;
+                let mut trial: HashMap<String, f32> = HashMap::new();
+
+                for (i, value) in record.iter().enumerate() {
+                    if let Some(header) = headers.get(i) {
+                        if let Ok(v) = value.parse::<f32>() {
+                            trial.insert(header.clone(), v);
+                        }
+                    }
+                }
+
+                if trial.contains_key(metric_column) {
+                    all_trials.push(trial);
+                }
+            }
+        }
+
+        if all_trials.is_empty() {
+            return Err(TreeBoostError::Data(
+                "No valid trials found in CSV files".into(),
+            ));
+        }
+
+        // Sort by metric (higher or lower is better)
+        all_trials.sort_by(|a, b| {
+            let a_val = a.get(metric_column).copied().unwrap_or(f32::NAN);
+            let b_val = b.get(metric_column).copied().unwrap_or(f32::NAN);
+            if higher_is_better {
+                b_val.partial_cmp(&a_val).unwrap_or(std::cmp::Ordering::Equal)
+            } else {
+                a_val.partial_cmp(&b_val).unwrap_or(std::cmp::Ordering::Equal)
+            }
+        });
+
+        // Take top N%
+        let n_top = ((all_trials.len() as f32) * top_percentile).ceil() as usize;
+        let n_top = n_top.max(1); // At least 1 trial
+        let top_trials = &all_trials[..n_top.min(all_trials.len())];
+
+        // For each parameter, find min/max in top trials and constrain bounds
+        for param in &mut self.params {
+            let values: Vec<f32> = top_trials
+                .iter()
+                .filter_map(|t| t.get(&param.name).copied())
+                .filter(|v| !v.is_nan())
+                .collect();
+
+            if values.is_empty() {
+                continue;
+            }
+
+            let min_val = values.iter().copied().fold(f32::INFINITY, f32::min);
+            let max_val = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+
+            // Update bounds based on type
+            match &mut param.bounds {
+                ParamBounds::Continuous { min, max, .. } => {
+                    // Add a small margin (10%) to avoid getting stuck at edges
+                    let range = max_val - min_val;
+                    let margin = range * 0.1;
+                    *min = (min_val - margin).max(*min);
+                    *max = (max_val + margin).min(*max);
+                }
+                ParamBounds::Discrete {
+                    min,
+                    max,
+                    step,
+                } => {
+                    let new_min = (min_val as usize).max(*min);
+                    let new_max = (max_val as usize).min(*max);
+                    // Round to step boundaries
+                    *min = ((new_min - *min) / *step) * *step + *min;
+                    *max = ((new_max - *min) / *step) * *step + *min;
+                }
+            }
+
+            // Update center to be in the middle of new bounds
+            let mid = match &param.bounds {
+                ParamBounds::Continuous { min, max, .. } => (*min + *max) / 2.0,
+                ParamBounds::Discrete { min, max, .. } => ((*min + *max) / 2) as f32,
+            };
+            param.set_center(mid);
+        }
+
+        Ok(self)
     }
 }
 
@@ -799,6 +1010,28 @@ pub struct TunerConfig {
     /// - BinaryClassification: loss, F1, ROC-AUC
     /// - MultiClassClassification: loss, F1
     pub task_type: TaskType,
+    /// Output directory for logging results (None = no logging)
+    ///
+    /// When set, creates a timestamped run directory with:
+    /// - `iteration_N.csv` - trial results per iteration (streaming)
+    /// - `best_params.json` - best hyperparameters
+    /// - `best_model.{format}` - serialized best model (for each format in save_model_formats)
+    /// - `summary.json` - run metadata
+    pub output_dir: Option<PathBuf>,
+    /// Formats to save the best model in after tuning
+    ///
+    /// When non-empty and output_dir is set, retrains with the best config
+    /// on the full dataset and saves to `best_model.{format}` for each format.
+    ///
+    /// Empty by default (no model saving). Use `with_save_model_formats()` to enable.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = TunerConfig::new()
+    ///     .with_output_dir("results")
+    ///     .with_save_model_formats(vec![ModelFormat::Rkyv, ModelFormat::Bincode]);
+    /// ```
+    pub save_model_formats: Vec<ModelFormat>,
 }
 
 impl Default for TunerConfig {
@@ -832,6 +1065,8 @@ impl Default for TunerConfig {
             verbose: true,
             optimization_metric: OptimizationMetric::ValidationLoss,
             task_type: TaskType::BinaryClassification,
+            output_dir: None,
+            save_model_formats: Vec::new(), // No model saving by default
         }
     }
 }
@@ -1035,6 +1270,37 @@ impl TunerConfig {
     /// - `MultiClassClassification`: loss, F1
     pub fn with_task_type(mut self, task_type: TaskType) -> Self {
         self.task_type = task_type;
+        self
+    }
+
+    /// Set the output directory for logging results
+    ///
+    /// When set, creates a timestamped run directory with iteration CSVs,
+    /// best params JSON, and serialized model.
+    pub fn with_output_dir<P: AsRef<std::path::Path>>(mut self, path: P) -> Self {
+        self.output_dir = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// Set the formats to save the best model in
+    ///
+    /// When non-empty and output_dir is set, retrains with the best config
+    /// on the full dataset and saves to `best_model.{format}` for each format.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Save in rkyv format (fastest loading)
+    /// let config = TunerConfig::new()
+    ///     .with_output_dir("results")
+    ///     .with_save_model_formats(vec![ModelFormat::Rkyv]);
+    ///
+    /// // Save in both formats
+    /// let config = TunerConfig::new()
+    ///     .with_output_dir("results")
+    ///     .with_save_model_formats(vec![ModelFormat::Rkyv, ModelFormat::Bincode]);
+    /// ```
+    pub fn with_save_model_formats(mut self, formats: Vec<ModelFormat>) -> Self {
+        self.save_model_formats = formats;
         self
     }
 

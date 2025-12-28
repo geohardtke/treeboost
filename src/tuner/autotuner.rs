@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use rayon::prelude::*;
 use polars::prelude::*;
+use rayon::prelude::*;
 
 use crate::backend::BackendType;
 use crate::booster::{GBDTConfig, GBDTModel};
@@ -20,9 +20,13 @@ use super::config::{
     EvalStrategy, GridStrategy, ParamBounds, ParamDef, ParameterSpace, TunerConfig, TuningMode,
 };
 use super::history::{ProgressCallback, SearchHistory};
+use super::logger::{
+    finalize_logging, init_logger, log_trial, save_model_formats, start_iteration_logging,
+    SharedLogger,
+};
 use super::metrics::Metric;
 use super::realistic::{
-    encode_train_val_split, split_dataframe_by_indices, RealisticModeConfig,
+    encode_full_dataset, encode_train_val_split, split_dataframe_by_indices, RealisticModeConfig,
 };
 use super::trial::TrialResult;
 
@@ -232,6 +236,14 @@ impl AutoTuner {
         }
 
         let current_trial = AtomicUsize::new(0);
+        let start_time = Instant::now();
+
+        // Initialize trial logger if output_dir is configured
+        let logger = init_logger(
+            &self.config.output_dir,
+            self.config.space.param_names(),
+            self.config.verbose,
+        )?;
 
         // Use while loop instead of for loop to allow extending iterations when unbalanced
         let mut iteration = 0;
@@ -241,6 +253,9 @@ impl AutoTuner {
 
         while iteration < max_iterations {
             let spread = self.config.spread_for_iteration(zoom_level);
+
+            // Start new CSV file for this iteration
+            start_iteration_logging(&logger, iteration)?;
 
             if self.config.verbose {
                 println!(
@@ -258,12 +273,14 @@ impl AutoTuner {
             }
 
             // Evaluate all candidates (parallel or sequential based on backend)
+            // Results are logged immediately inside evaluate_candidates via the shared logger
             let results = self.evaluate_candidates(
                 dataset,
                 candidates,
                 iteration,
                 &current_trial,
                 total_trials,
+                logger.as_ref(),
             );
 
             // Add all results to history and log new best
@@ -392,6 +409,37 @@ impl AutoTuner {
             }
         }
 
+        // Export final results if logging is enabled
+        if logger.is_some() {
+            let duration_secs = start_time.elapsed().as_secs_f64();
+            let run_dir = finalize_logging(&logger, &self.history, best, duration_secs)?;
+
+            // Train and save final model if enabled (optimistic mode)
+            if !self.config.save_model_formats.is_empty() {
+                if self.config.verbose {
+                    println!("  Training final model on full dataset...");
+                }
+
+                // Build best config and train on full dataset
+                let best_gbdt_config = self.build_config(&best.params);
+                let final_model = GBDTModel::train_binned(dataset, best_gbdt_config)?;
+
+                // Save model in all specified formats
+                save_model_formats(&logger, &final_model, &self.config.save_model_formats)?;
+
+                if self.config.verbose {
+                    let formats: Vec<_> = self.config.save_model_formats.iter()
+                        .map(|f| f.extension())
+                        .collect();
+                    println!("  Model saved ({} trees) in formats: {:?}", final_model.num_trees(), formats);
+                }
+            }
+
+            if self.config.verbose {
+                println!("  Results saved to: {}", run_dir.display());
+            }
+        }
+
         let best_config = self.build_config(&best.params);
         Ok((best_config, self.history.clone()))
     }
@@ -463,6 +511,14 @@ impl AutoTuner {
         }
 
         let current_trial = AtomicUsize::new(0);
+        let start_time = Instant::now();
+
+        // Initialize trial logger if output_dir is configured
+        let logger = init_logger(
+            &self.config.output_dir,
+            self.config.space.param_names(),
+            self.config.verbose,
+        )?;
 
         // Use while loop instead of for loop to allow extending iterations when unbalanced
         let mut iteration = 0;
@@ -472,6 +528,9 @@ impl AutoTuner {
 
         while iteration < max_iterations {
             let spread = self.config.spread_for_iteration(zoom_level);
+
+            // Start new CSV file for this iteration
+            start_iteration_logging(&logger, iteration)?;
 
             if self.config.verbose {
                 println!(
@@ -489,12 +548,14 @@ impl AutoTuner {
             }
 
             // Evaluate all candidates (parallel or sequential based on backend)
+            // Results are logged immediately inside evaluate_candidates_internal via the shared logger
             let results = self.evaluate_candidates_internal(
                 candidates,
                 iteration,
                 &current_trial,
                 total_trials,
                 use_parallel,
+                logger.as_ref(),
             )?;
 
             // Add all results to history and log new best
@@ -620,6 +681,49 @@ impl AutoTuner {
             println!("  Best params:");
             for (k, v) in &best.params {
                 println!("    {}: {:.4}", k, v);
+            }
+        }
+
+        // Export final results if logging is enabled
+        if logger.is_some() {
+            let duration_secs = start_time.elapsed().as_secs_f64();
+            let run_dir = finalize_logging(&logger, &self.history, best, duration_secs)?;
+
+            // Train and save final model if enabled
+            if !self.config.save_model_formats.is_empty() {
+                match (&self.raw_data, &self.realistic_config) {
+                    (Some(ref raw_data), Some(ref realistic_cfg)) => {
+                        if self.config.verbose {
+                            println!("  Training final model on full dataset...");
+                        }
+
+                        // Encode full dataset
+                        let full_df = (**raw_data).clone();
+                        let full_dataset = encode_full_dataset(full_df, realistic_cfg)?;
+
+                        // Build best config and train
+                        let best_gbdt_config = self.build_config(&best.params);
+                        let final_model = GBDTModel::train_binned(&full_dataset, best_gbdt_config)?;
+
+                        // Save model in all specified formats
+                        save_model_formats(&logger, &final_model, &self.config.save_model_formats)?;
+
+                        if self.config.verbose {
+                            let formats: Vec<_> = self.config.save_model_formats.iter()
+                                .map(|f| f.extension())
+                                .collect();
+                            println!("  Model saved ({} trees) in formats: {:?}", final_model.num_trees(), formats);
+                        }
+                    }
+                    _ => {
+                        // This shouldn't happen in realistic mode, but warn if it does
+                        eprintln!("  Warning: Model saving skipped - realistic mode requires raw_data and realistic_config");
+                    }
+                }
+            }
+
+            if self.config.verbose {
+                println!("  Results saved to: {}", run_dir.display());
             }
         }
 
@@ -1483,6 +1587,8 @@ impl AutoTuner {
     ///
     /// For CPU backends, uses Rayon for parallel evaluation.
     /// For GPU backends, evaluates sequentially to avoid contention.
+    ///
+    /// If a logger is provided, results are written immediately after each trial.
     fn evaluate_candidates(
         &self,
         dataset: &BinnedDataset,
@@ -1490,6 +1596,7 @@ impl AutoTuner {
         iteration: usize,
         current_trial: &AtomicUsize,
         total_trials: usize,
+        logger: Option<&SharedLogger>,
     ) -> Vec<TrialResult> {
         let use_parallel = self.config.parallel_trials && !self.is_gpu_backend();
 
@@ -1522,6 +1629,9 @@ impl AutoTuner {
                                 cb(&result, trial_num, total_trials);
                             }
 
+                            // Log immediately (streaming write with flush)
+                            log_trial(logger, &result);
+
                             results.lock().unwrap().push(result);
                         }
                         Err(e) => {
@@ -1546,6 +1656,9 @@ impl AutoTuner {
                             callback(&result, trial_num, total_trials);
                         }
 
+                        // Log immediately (streaming write with flush)
+                        log_trial(logger, &result);
+
                         results.push(result);
                     }
                     Err(e) => {
@@ -1568,6 +1681,7 @@ impl AutoTuner {
         current_trial: &AtomicUsize,
         total_trials: usize,
         use_parallel: bool,
+        logger: Option<&SharedLogger>,
     ) -> Result<Vec<TrialResult>> {
         // Get raw data and config for realistic mode (should always be set by tune_dataframe)
         let raw_data = self.raw_data.as_ref().ok_or_else(|| {
@@ -1595,6 +1709,9 @@ impl AutoTuner {
                     if let Some(ref callback) = self.callback {
                         callback(&result, trial_num, total_trials);
                     }
+
+                    // Log immediately (streaming write with flush)
+                    log_trial(logger, &result);
 
                     results.push(result);
                 }

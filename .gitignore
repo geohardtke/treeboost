@@ -31,6 +31,7 @@ callgrind.out.*
 *.onnx
 *.safetensors
 *.gguf
+results
 
 # Data files (ignored)
 *.csv

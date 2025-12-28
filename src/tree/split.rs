@@ -22,6 +22,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 
 /// Monotonic constraint for a feature
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum MonotonicConstraint {
     /// No constraint
     None,

@@ -51,14 +51,15 @@
 mod autotuner;
 mod config;
 mod history;
+mod logger;
 mod metrics;
 mod realistic;
 mod trial;
 
 // Re-exports from config
 pub use config::{
-    EvalStrategy, GridStrategy, OptimizationMetric, ParamBounds, ParamDef, ParameterSpace,
-    TaskType, TunerConfig, TuningMode,
+    EvalStrategy, GridStrategy, ModelFormat, OptimizationMetric, ParamBounds, ParamDef,
+    ParameterSpace, TaskType, TunerConfig, TuningMode,
 };
 
 // Re-exports from metrics

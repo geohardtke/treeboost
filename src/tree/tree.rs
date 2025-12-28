@@ -7,6 +7,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 
 /// Decision tree
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Tree {
     /// Nodes in the tree (index 0 is root)
     nodes: Vec<Node>,

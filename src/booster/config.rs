@@ -16,6 +16,7 @@ pub const DEFAULT_MIN_EARLY_STOPPING_TREES: usize = 20;
 
 /// Loss function type for serialization
 #[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum LossType {
     /// Mean Squared Error (regression)
     Mse,
@@ -77,6 +78,7 @@ impl LossType {
 
 /// GBDT training configuration
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct GBDTConfig {
     // Ensemble parameters
     /// Number of boosting rounds (trees)

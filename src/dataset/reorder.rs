@@ -9,6 +9,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 
 /// Column ordering strategy
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum OrderingStrategy {
     /// Original ordering (no reordering)
     Original,
@@ -67,6 +68,7 @@ impl AccessTracker {
 
 /// Column permutation mapping
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ColumnPermutation {
     /// Maps new index -> original index
     new_to_original: Vec<usize>,

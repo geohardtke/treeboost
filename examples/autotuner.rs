@@ -19,7 +19,7 @@ use std::time::Instant;
 use treeboost::booster::{GBDTConfig, GBDTModel};
 use treeboost::dataset::{BinnedDataset, FeatureInfo, FeatureType};
 use treeboost::tuner::{
-    AutoTuner, EvalStrategy, GridStrategy, ParamBounds, ParameterSpace, TunerConfig,
+    AutoTuner, EvalStrategy, GridStrategy, ModelFormat, ParamBounds, ParameterSpace, TunerConfig,
 };
 
 /// Generate a synthetic regression dataset for demonstration
@@ -278,6 +278,100 @@ fn main() {
     println!("  avg trees across trials: {:.1}", avg_trees);
 
     // =========================================================================
+    // Example 5: Model Saving with Multiple Formats
+    // =========================================================================
+    println!("\n-------------------------------------------------------------");
+    println!("Example 5: Model Saving with Multiple Formats");
+    println!("-------------------------------------------------------------\n");
+
+    // Create output directory for results
+    let output_dir = std::path::Path::new("results/autotuner_example");
+
+    let tuner_config = TunerConfig::new()
+        .with_iterations(2)
+        .with_grid_strategy(GridStrategy::Cartesian { points_per_dim: 2 })
+        .with_eval_strategy(EvalStrategy::holdout(0.2))
+        .with_output_dir(output_dir) // Enable logging to directory
+        .with_save_model_formats(vec![ModelFormat::Rkyv, ModelFormat::Bincode]) // Save in both formats
+        .with_verbose(true);
+
+    let mut tuner = AutoTuner::new(base_config.clone())
+        .with_config(tuner_config)
+        .with_space(ParameterSpace::minimal()) // Just max_depth and learning_rate
+        .with_seed(12345);
+
+    println!("Tuning with model saving enabled...");
+    println!("  Output directory: {}", output_dir.display());
+    println!("  Formats: rkyv (zero-copy) and bincode (compact)\n");
+
+    let start = Instant::now();
+    let (best_config, history) = tuner.tune(&dataset).expect("Tuning with save should succeed");
+    let elapsed = start.elapsed();
+
+    println!("\n--- Results ---");
+    println!("Total trials: {}", history.len());
+    println!("Time: {:.2?}", elapsed);
+
+    if let Some(best) = history.best() {
+        println!("\nBest trial:");
+        println!("  val_metric (MSE): {:.6}", best.val_metric);
+        println!("  num_trees: {}", best.num_trees);
+    }
+
+    // Verify saved files exist
+    println!("\n--- Saved Files ---");
+
+    // Find the run directory (timestamped)
+    if let Ok(entries) = std::fs::read_dir(output_dir) {
+        for entry in entries.flatten() {
+            let run_dir = entry.path();
+            if run_dir.is_dir() && run_dir.file_name().unwrap().to_str().unwrap().starts_with("run_") {
+                println!("Run directory: {}", run_dir.display());
+
+                // List files in run directory
+                if let Ok(files) = std::fs::read_dir(&run_dir) {
+                    for file in files.flatten() {
+                        let path = file.path();
+                        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        println!("  {} ({} bytes)", path.file_name().unwrap().to_str().unwrap(), size);
+                    }
+                }
+
+                // Test loading the saved models
+                let rkyv_path = run_dir.join("best_model.rkyv");
+                let bincode_path = run_dir.join("best_model.bin");
+
+                if rkyv_path.exists() {
+                    println!("\nLoading model from rkyv...");
+                    let loaded = treeboost::serialize::load_model(&rkyv_path)
+                        .expect("Should load rkyv model");
+                    println!("  Loaded {} trees", loaded.num_trees());
+
+                    // Verify predictions match
+                    let orig_preds = GBDTModel::train_binned(&dataset, best_config.clone())
+                        .unwrap()
+                        .predict(&dataset);
+                    let loaded_preds = loaded.predict(&dataset);
+                    let max_diff: f32 = orig_preds.iter()
+                        .zip(loaded_preds.iter())
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0, f32::max);
+                    println!("  Max prediction diff: {:.6}", max_diff);
+                }
+
+                if bincode_path.exists() {
+                    println!("\nLoading model from bincode...");
+                    let loaded = treeboost::serialize::load_model_bincode(&bincode_path)
+                        .expect("Should load bincode model");
+                    println!("  Loaded {} trees", loaded.num_trees());
+                }
+
+                break; // Only process first run directory
+            }
+        }
+    }
+
+    // =========================================================================
     // Summary
     // =========================================================================
     println!("\n=============================================================");
@@ -293,9 +387,13 @@ fn main() {
     println!("  - Evaluation strategies: Holdout split, K-fold cross-validation");
     println!("  - Progress callbacks for real-time monitoring");
     println!("  - Integration with early stopping");
+    println!("  - Model saving in multiple formats (rkyv, bincode)");
+    println!("  - Streaming CSV trial logs for interrupted runs");
     println!("\nFor production use, consider:");
     println!("  - More iterations (3-5) for better convergence");
     println!("  - Latin Hypercube for high-dimensional spaces");
     println!("  - K-fold CV for smaller datasets");
     println!("  - Early stopping to prevent overfitting");
+    println!("  - with_save_rkyv() for fastest model loading");
+    println!("  - with_save_all_formats() for flexibility");
 }

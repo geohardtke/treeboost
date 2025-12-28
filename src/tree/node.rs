@@ -4,6 +4,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 
 /// Node type: internal (split) or leaf
 #[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum NodeType {
     /// Internal node with split
     Internal {
@@ -28,6 +29,7 @@ pub enum NodeType {
 
 /// Tree node
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Node {
     /// Node type (internal or leaf)
     pub node_type: NodeType,

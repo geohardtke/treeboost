@@ -74,6 +74,7 @@ impl BinEntry {
 
 /// Feature type for determining how to handle the feature
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum FeatureType {
     /// Continuous numeric feature (binned via T-Digest quantiles)
     Numeric,
@@ -83,6 +84,7 @@ pub enum FeatureType {
 
 /// Feature metadata
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FeatureInfo {
     /// Feature name
     pub name: String,

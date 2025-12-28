@@ -109,3 +109,25 @@ pub(crate) fn encode_train_val_split(
 
     Ok((train_dataset, val_dataset, val_targets))
 }
+
+/// Encode the full dataset for final model training
+///
+/// This is used after tuning to train the final model on all data.
+pub(crate) fn encode_full_dataset(
+    df: DataFrame,
+    realistic_cfg: &RealisticModeConfig,
+) -> Result<BinnedDataset> {
+    let pipeline = DataPipeline::new(realistic_cfg.pipeline_config.clone());
+    let cat_cols: Option<Vec<&str>> = realistic_cfg
+        .categorical_columns
+        .as_ref()
+        .map(|cols| cols.iter().map(|s| s.as_str()).collect());
+
+    let (dataset, _pipeline_state) = pipeline.process_for_training(
+        df,
+        &realistic_cfg.target_column,
+        cat_cols.as_deref(),
+    )?;
+
+    Ok(dataset)
+}

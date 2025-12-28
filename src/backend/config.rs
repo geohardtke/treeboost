@@ -5,6 +5,7 @@
 /// This setting controls how much work is offloaded to the GPU.
 /// Ignored when using CPU-only backends (Scalar, AVX-512, SVE2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum GpuMode {
     /// Automatically select optimal mode based on backend.
     ///
@@ -53,6 +54,7 @@ impl GpuMode {
 
 /// Available backend types for histogram building.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum BackendType {
     /// Automatically detect the best available backend.
     /// Priority: CUDA > WGPU > AVX-512 > SVE2 > Scalar
