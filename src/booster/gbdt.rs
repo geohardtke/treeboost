@@ -51,6 +51,27 @@ pub struct GBDTModel {
     column_permutation: Option<ColumnPermutation>,
 }
 
+// =============================================================================
+// Early Stopping Helpers
+// =============================================================================
+
+/// Check if early stopping should trigger
+#[inline]
+pub(crate) fn should_early_stop(
+    rounds_without_improvement: usize,
+    current_count: usize,
+    early_stopping_rounds: usize,
+    min_early_stopping: usize,
+) -> bool {
+    rounds_without_improvement >= early_stopping_rounds && current_count >= min_early_stopping
+}
+
+/// Calculate how many trees/rounds to keep after early stopping
+#[inline]
+pub(crate) fn early_stop_keep_count(best_count: usize, min_early_stopping: usize) -> usize {
+    best_count.max(min_early_stopping)
+}
+
 impl GBDTModel {
     /// Train a GBDT model from raw feature data (high-level API)
     ///
@@ -550,23 +571,17 @@ impl GBDTModel {
 
             // Check for early stopping on validation set
             if early_stopping_enabled {
-                // Compute validation loss (MSE for simplicity, works with any loss)
-                // Use parallel for large validation sets, sequential for small ones
+                // Compute validation loss using the ACTUAL loss function
+                // This ensures correct early stopping for classification (log loss) and regression (MSE/Huber)
                 let val_loss: f32 = if validation_indices.len() >= 10000 {
                     validation_indices
                         .par_iter()
-                        .map(|&idx| {
-                            let residual = targets[idx] - predictions[idx];
-                            residual * residual
-                        })
+                        .map(|&idx| loss_fn.loss(targets[idx], predictions[idx]))
                         .sum::<f32>()
                 } else {
                     validation_indices
                         .iter()
-                        .map(|&idx| {
-                            let residual = targets[idx] - predictions[idx];
-                            residual * residual
-                        })
+                        .map(|&idx| loss_fn.loss(targets[idx], predictions[idx]))
                         .sum::<f32>()
                 } / validation_indices.len() as f32;
 
@@ -576,9 +591,13 @@ impl GBDTModel {
                     rounds_without_improvement = 0;
                 } else {
                     rounds_without_improvement += 1;
-                    if rounds_without_improvement >= config.early_stopping_rounds {
-                        // Truncate to best number of trees
-                        trees.truncate(best_num_trees);
+                    if should_early_stop(
+                        rounds_without_improvement,
+                        trees.len(),
+                        config.early_stopping_rounds,
+                        config.min_early_stopping_trees,
+                    ) {
+                        trees.truncate(early_stop_keep_count(best_num_trees, config.min_early_stopping_trees));
                         break;
                     }
                 }
@@ -587,7 +606,7 @@ impl GBDTModel {
 
         // If early stopping was used but we finished all rounds, still check if we should truncate
         if early_stopping_enabled && best_num_trees > 0 && best_num_trees < trees.len() {
-            trees.truncate(best_num_trees);
+            trees.truncate(early_stop_keep_count(best_num_trees, config.min_early_stopping_trees));
         }
 
         // Auto-apply column reordering by feature importance if enabled
@@ -625,6 +644,221 @@ impl GBDTModel {
             num_classes: 0,
             conformal_q,
             feature_info: dataset.all_feature_info().to_vec(),
+            column_permutation,
+        })
+    }
+
+    /// Train a GBDT model with an external validation set for early stopping
+    ///
+    /// Use this when you have a separate validation set that was properly prepared
+    /// (e.g., encoded separately to avoid target leakage). The external validation
+    /// set is used for early stopping decisions while training uses the full train set.
+    ///
+    /// # Note on Implementation
+    /// This method shares ~90% of logic with `train_binned()`. The duplication is
+    /// intentional due to the complexity of the training loop (CUDA/WGPU backends,
+    /// fused gradient paths, GOSS sampling). Extracting shared logic would require
+    /// significant refactoring and testing to maintain correctness.
+    ///
+    /// Key differences from `train_binned()`:
+    /// - Uses external validation set instead of internal split
+    /// - Maintains separate validation predictions array
+    /// - No calibration set for conformal prediction
+    pub fn train_binned_with_validation(
+        train_dataset: &BinnedDataset,
+        val_dataset: &BinnedDataset,
+        val_targets: &[f32],
+        config: GBDTConfig,
+    ) -> Result<Self> {
+        config.validate().map_err(TreeBoostError::Config)?;
+
+        let loss_fn = config.loss_type.create();
+        let targets = train_dataset.targets();
+
+        // Use ALL training data (no internal split)
+        let train_indices: Vec<usize> = (0..train_dataset.num_rows()).collect();
+
+        // Compute base prediction from training data
+        let base_prediction = loss_fn.initial_prediction(targets);
+
+        // Predictions for training and validation
+        let mut predictions = vec![base_prediction; train_dataset.num_rows()];
+        let mut val_predictions = vec![base_prediction; val_dataset.num_rows()];
+
+        // Gradient and hessian buffers
+        let mut gradients = vec![0.0f32; train_dataset.num_rows()];
+        let mut hessians = vec![0.0f32; train_dataset.num_rows()];
+
+        // Build interaction constraints
+        let interaction_constraints = if config.interaction_groups.is_empty() {
+            InteractionConstraints::new()
+        } else {
+            InteractionConstraints::from_groups(
+                config.interaction_groups.clone(),
+                train_dataset.num_features(),
+            )
+        };
+
+        // Create tree grower
+        let tree_grower = TreeGrower::new()
+            .with_max_depth(config.max_depth)
+            .with_max_leaves(config.max_leaves)
+            .with_lambda(config.lambda)
+            .with_min_samples_leaf(config.min_samples_leaf)
+            .with_min_hessian_leaf(config.min_hessian_leaf)
+            .with_entropy_weight(config.entropy_weight)
+            .with_min_gain(config.min_gain)
+            .with_learning_rate(config.learning_rate)
+            .with_colsample(config.colsample)
+            .with_monotonic_constraints(config.monotonic_constraints.clone())
+            .with_interaction_constraints(interaction_constraints)
+            .with_backend(config.backend_type)
+            .with_gpu_subgroups(config.use_gpu_subgroups)
+            .with_era_splitting(config.era_splitting);
+
+        let mut trees = Vec::with_capacity(config.num_rounds);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(config.seed);
+
+        // Early stopping with external validation
+        let early_stopping_enabled = config.early_stopping_rounds > 0;
+        let mut best_val_loss = f32::MAX;
+        let mut rounds_without_improvement = 0;
+        let mut best_num_trees = 0;
+
+        // Pre-allocate buffers for subsampling
+        let mut sample_indices: Vec<usize> = Vec::with_capacity(train_indices.len());
+        let mut shuffle_buffer: Vec<usize> = if config.subsample < 1.0 && !config.goss_enabled {
+            train_indices.clone()
+        } else {
+            Vec::new()
+        };
+        let mut goss_indexed: Vec<(usize, f32)> = if config.goss_enabled {
+            Vec::with_capacity(train_indices.len())
+        } else {
+            Vec::new()
+        };
+
+        let use_fused = !config.goss_enabled && config.subsample >= 1.0;
+
+        for _round in 0..config.num_rounds {
+            // Grow tree using same logic as train_binned
+            let tree = if use_fused {
+                tree_grower.grow_fused(
+                    train_dataset,
+                    &train_indices,
+                    targets,
+                    &predictions,
+                    loss_fn.as_ref(),
+                    &mut gradients,
+                    &mut hessians,
+                )
+            } else {
+                // Compute gradients
+                for &idx in &train_indices {
+                    let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
+                    gradients[idx] = g;
+                    hessians[idx] = h;
+                }
+
+                // Handle subsampling
+                let tree_indices: &[usize] = if config.goss_enabled {
+                    sample_indices.clear();
+                    Self::goss_sample_into(
+                        &train_indices,
+                        &mut gradients,
+                        &mut hessians,
+                        config.goss_top_rate,
+                        config.goss_other_rate,
+                        &mut rng,
+                        &mut goss_indexed,
+                        &mut sample_indices,
+                    );
+                    &sample_indices
+                } else if config.subsample < 1.0 {
+                    sample_indices.clear();
+                    let n_samples = ((train_indices.len() as f32) * config.subsample).ceil() as usize;
+                    shuffle_buffer.shuffle(&mut rng);
+                    sample_indices.extend_from_slice(&shuffle_buffer[..n_samples]);
+                    &sample_indices
+                } else {
+                    &train_indices
+                };
+
+                tree_grower.grow_with_indices(train_dataset, &gradients, &hessians, tree_indices)
+            };
+
+            // Update training predictions
+            tree.predict_batch_add(train_dataset, &mut predictions);
+
+            // Update validation predictions using external val_dataset
+            for i in 0..val_dataset.num_rows() {
+                val_predictions[i] += tree.predict_row(val_dataset, i);
+            }
+
+            trees.push(tree);
+
+            // Early stopping check on EXTERNAL validation set
+            // Use the actual loss function, not MSE
+            if early_stopping_enabled {
+                let val_loss: f32 = val_targets
+                    .iter()
+                    .zip(val_predictions.iter())
+                    .map(|(&target, &pred)| loss_fn.loss(target, pred))
+                    .sum::<f32>()
+                    / val_targets.len() as f32;
+
+                if val_loss < best_val_loss {
+                    best_val_loss = val_loss;
+                    best_num_trees = trees.len();
+                    rounds_without_improvement = 0;
+                } else {
+                    rounds_without_improvement += 1;
+                    if should_early_stop(
+                        rounds_without_improvement,
+                        trees.len(),
+                        config.early_stopping_rounds,
+                        config.min_early_stopping_trees,
+                    ) {
+                        trees.truncate(early_stop_keep_count(best_num_trees, config.min_early_stopping_trees));
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Truncate if we finished all rounds but best was earlier
+        if early_stopping_enabled && best_num_trees > 0 && best_num_trees < trees.len() {
+            trees.truncate(early_stop_keep_count(best_num_trees, config.min_early_stopping_trees));
+        }
+
+        // Column reordering
+        let column_permutation = if config.column_reordering && !trees.is_empty() {
+            let importances = Self::compute_importances_from_trees(&trees, train_dataset.num_features());
+            Some(ColumnPermutation::from_importances(&importances))
+        } else {
+            None
+        };
+
+        // Compute conformal quantile from validation set residuals
+        let conformal_q = if !val_targets.is_empty() {
+            let residuals: Vec<f32> = val_targets
+                .iter()
+                .zip(val_predictions.iter())
+                .map(|(&target, &pred)| (target - pred).abs())
+                .collect();
+            Some(Self::compute_quantile(&residuals, config.conformal_quantile))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            config,
+            base_prediction,
+            base_predictions_multiclass: Vec::new(),
+            trees,
+            num_classes: 0,
+            conformal_q,
+            feature_info: train_dataset.all_feature_info().to_vec(),
             column_permutation,
         })
     }
@@ -749,9 +983,15 @@ impl GBDTModel {
                     rounds_without_improvement = 0;
                 } else {
                     rounds_without_improvement += 1;
-                    if rounds_without_improvement >= config.early_stopping_rounds {
-                        // Truncate to best number of rounds (K trees per round)
-                        trees.truncate(best_num_rounds * num_classes);
+                    // Use actual tree count (not round count) for consistency with binary/regression
+                    if should_early_stop(
+                        rounds_without_improvement,
+                        trees.len(),
+                        config.early_stopping_rounds,
+                        config.min_early_stopping_trees,
+                    ) {
+                        let keep_rounds = early_stop_keep_count(best_num_rounds, config.min_early_stopping_trees / num_classes.max(1));
+                        trees.truncate(keep_rounds * num_classes);
                         break;
                     }
                 }
@@ -761,7 +1001,8 @@ impl GBDTModel {
         // Truncate if early stopping finished all rounds but best was earlier
         if early_stopping_enabled && best_num_rounds > 0 && best_num_rounds * num_classes < trees.len()
         {
-            trees.truncate(best_num_rounds * num_classes);
+            let keep_rounds = early_stop_keep_count(best_num_rounds, config.min_early_stopping_trees / num_classes.max(1));
+            trees.truncate(keep_rounds * num_classes);
         }
 
         // Compute column permutation if enabled

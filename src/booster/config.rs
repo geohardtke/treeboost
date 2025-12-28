@@ -6,6 +6,14 @@ use crate::loss::{BinaryLogLoss, LossFunction, MseLoss, PseudoHuberLoss};
 use crate::tree::MonotonicConstraint;
 use rkyv::{Archive, Deserialize, Serialize};
 
+// =============================================================================
+// Constants
+// =============================================================================
+
+/// Default minimum trees before early stopping can trigger.
+/// Set high enough (20) to allow models to learn basic patterns before stopping.
+pub const DEFAULT_MIN_EARLY_STOPPING_TREES: usize = 20;
+
 /// Loss function type for serialization
 #[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]
 pub enum LossType {
@@ -125,6 +133,11 @@ pub struct GBDTConfig {
     // Early stopping
     /// Number of rounds with no improvement before stopping (0 to disable)
     pub early_stopping_rounds: usize,
+    /// Minimum trees before early stopping can trigger (default: 20)
+    ///
+    /// Prevents early stopping from killing models too early.
+    /// Early stopping will only check after this many trees have been trained.
+    pub min_early_stopping_trees: usize,
     /// Ratio of data to use for validation (0.0 to disable early stopping)
     pub validation_ratio: f32,
 
@@ -235,6 +248,7 @@ impl Default for GBDTConfig {
 
             // Early stopping (disabled by default)
             early_stopping_rounds: 0,
+            min_early_stopping_trees: DEFAULT_MIN_EARLY_STOPPING_TREES,
             validation_ratio: 0.0,
 
             // Performance optimizations (all ON by default)
@@ -376,6 +390,15 @@ impl GBDTConfig {
         assert!(validation_ratio > 0.0 && validation_ratio < 1.0);
         self.early_stopping_rounds = rounds;
         self.validation_ratio = validation_ratio;
+        self
+    }
+
+    /// Set minimum trees before early stopping can trigger
+    ///
+    /// Prevents early stopping from killing models too early.
+    /// Default is 20 trees (see `DEFAULT_MIN_EARLY_STOPPING_TREES`).
+    pub fn with_min_early_stopping_trees(mut self, min_trees: usize) -> Self {
+        self.min_early_stopping_trees = min_trees;
         self
     }
 

@@ -1,0 +1,28 @@
+//! Trial result types for hyperparameter tuning
+
+use std::collections::HashMap;
+
+/// Result of a single trial (candidate evaluation)
+#[derive(Debug, Clone)]
+pub struct TrialResult {
+    /// Unique trial identifier
+    pub trial_id: usize,
+    /// Iteration (zoom level) when this trial was run
+    pub iteration: usize,
+    /// Hyperparameter values used
+    pub params: HashMap<String, f32>,
+    /// Validation metric (lower is better for MSE/LogLoss)
+    pub val_metric: f32,
+    /// Training metric
+    pub train_metric: f32,
+    /// Number of trees actually trained (may be < num_rounds if early stopped)
+    pub num_trees: usize,
+    /// Training time in milliseconds
+    pub train_time_ms: u64,
+    /// F1 score for classification (None for regression)
+    ///
+    /// F1 is the harmonic mean of precision and recall.
+    /// A low F1 score indicates an unbalanced model (e.g., predicting
+    /// all negatives gives F1 = 0).
+    pub f1_score: Option<f32>,
+}
