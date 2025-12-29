@@ -60,7 +60,7 @@ pub use histogram::HistogramBuilder;
 pub use inference::Prediction;
 pub use loss::{sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, PseudoHuberLoss};
 pub use tree::{InteractionConstraints, MonotonicConstraint};
-pub use tuner::{AutoTuner, EvalStrategy, GridStrategy, ParameterSpace, SearchHistory, TunerConfig};
+pub use tuner::{AutoTuner, EvalStrategy, GridStrategy, ModelFormat, ParameterSpace, SearchHistory, TunerConfig};
 
 /// Library error type
 #[derive(Debug, thiserror::Error)]

@@ -6,11 +6,13 @@ use crate::booster::GBDTConfig;
 use crate::dataset::{split_holdout, BinnedDataset, ColumnPermutation, FeatureInfo, FeatureType, QuantileBinner};
 use crate::loss::{sigmoid, softmax, MultiClassLogLoss};
 use crate::tree::{InteractionConstraints, Tree, TreeGrower};
+use crate::tuner::ModelFormat;
 use crate::{Result, TreeBoostError};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rayon::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
+use std::path::Path;
 
 #[cfg(feature = "cuda")]
 use crate::backend::cuda::FullCudaTreeBuilder;
@@ -175,6 +177,109 @@ impl GBDTModel {
         let dataset = BinnedDataset::new(num_rows, binned_data, targets.to_vec(), feature_info);
 
         Self::train_binned(&dataset, config)
+    }
+
+    /// Train a GBDT model and save to output directory
+    ///
+    /// This is a convenience method that trains a model and automatically saves:
+    /// - The trained model in the specified format(s)
+    /// - `config.json` with the training configuration for reproducibility
+    ///
+    /// # Arguments
+    /// * `features` - Row-major feature matrix: `features[row * num_features + feature]`
+    /// * `num_features` - Number of features (columns)
+    /// * `targets` - Target values, one per row
+    /// * `config` - Training configuration
+    /// * `feature_names` - Optional feature names
+    /// * `output_dir` - Directory to save the model and config
+    /// * `formats` - Model formats to save (e.g., `[ModelFormat::Rkyv]`)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let features = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // 2 rows × 3 features
+    /// let targets = vec![0.5, 1.5];
+    /// let config = GBDTConfig::new().with_num_rounds(100);
+    ///
+    /// let model = GBDTModel::train_with_output(
+    ///     &features, 3, &targets, config, None,
+    ///     "output/my_model",
+    ///     &[ModelFormat::Rkyv],
+    /// )?;
+    /// // Creates: output/my_model/model.rkyv and output/my_model/config.json
+    /// ```
+    pub fn train_with_output(
+        features: &[f32],
+        num_features: usize,
+        targets: &[f32],
+        config: GBDTConfig,
+        feature_names: Option<Vec<String>>,
+        output_dir: impl AsRef<Path>,
+        formats: &[ModelFormat],
+    ) -> Result<Self> {
+        // Train the model
+        let model = Self::train(features, num_features, targets, config.clone(), feature_names)?;
+
+        // Save to output directory
+        model.save_to_directory(output_dir, &config, formats)?;
+
+        Ok(model)
+    }
+
+    /// Save a trained model to a directory
+    ///
+    /// Creates the directory if it doesn't exist and saves:
+    /// - The model in each specified format
+    /// - `config.json` with the training configuration
+    ///
+    /// # Arguments
+    /// * `output_dir` - Directory to save the model
+    /// * `config` - Training configuration (for config.json)
+    /// * `formats` - Model formats to save (must not be empty)
+    ///
+    /// # Errors
+    /// Returns an error if `formats` is empty or if I/O operations fail.
+    pub fn save_to_directory(
+        &self,
+        output_dir: impl AsRef<Path>,
+        config: &GBDTConfig,
+        formats: &[ModelFormat],
+    ) -> Result<()> {
+        use std::fs;
+        use std::io::Write;
+
+        // Validate formats is not empty
+        if formats.is_empty() {
+            return Err(TreeBoostError::Config(
+                "formats must not be empty - specify at least one model format".to_string(),
+            ));
+        }
+
+        let dir = output_dir.as_ref();
+
+        // Create directory if it doesn't exist
+        fs::create_dir_all(dir)?;
+
+        // Save config.json for reproducibility
+        let config_path = dir.join("config.json");
+        let config_json = serde_json::to_string_pretty(config)
+            .map_err(|e| TreeBoostError::Serialization(format!("Failed to serialize config: {}", e)))?;
+        let mut file = fs::File::create(&config_path)?;
+        file.write_all(config_json.as_bytes())?;
+
+        // Save model in each format
+        for format in formats {
+            let model_path = dir.join(format!("model.{}", format.extension()));
+            match format {
+                ModelFormat::Rkyv => {
+                    crate::serialize::save_model(self, &model_path)?;
+                }
+                ModelFormat::Bincode => {
+                    crate::serialize::save_model_bincode(self, &model_path)?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Train a GBDT model with Directional Era Splitting (DES)
@@ -2194,5 +2299,165 @@ mod tests {
             "Multi-class accuracy {} should be better than random",
             accuracy
         );
+    }
+
+    #[test]
+    fn test_save_to_directory() {
+        use tempfile::tempdir;
+
+        let dataset = create_regression_dataset(100, 0.1);
+
+        let config = GBDTConfig::new()
+            .with_num_rounds(5)
+            .with_max_depth(3);
+
+        let model = GBDTModel::train_binned(&dataset, config.clone()).unwrap();
+
+        // Create temp directory
+        let dir = tempdir().unwrap();
+        let output_path = dir.path().join("model_output");
+
+        // Save model and config
+        model.save_to_directory(&output_path, &config, &[ModelFormat::Rkyv]).unwrap();
+
+        // Verify files exist
+        assert!(output_path.join("config.json").exists());
+        assert!(output_path.join("model.rkyv").exists());
+
+        // Load model and verify it works
+        let loaded = crate::serialize::load_model(output_path.join("model.rkyv")).unwrap();
+        assert_eq!(loaded.num_trees(), model.num_trees());
+
+        // Verify config.json is valid JSON
+        let config_content = std::fs::read_to_string(output_path.join("config.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&config_content).unwrap();
+        assert!(parsed.get("num_rounds").is_some());
+        assert_eq!(parsed["num_rounds"], 5);
+    }
+
+    #[test]
+    fn test_train_with_output() {
+        use tempfile::tempdir;
+
+        // Create simple test data
+        let features = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+        let targets = vec![1.0f32, 2.0, 3.0, 4.0];
+        let num_features = 3;
+
+        let config = GBDTConfig::new()
+            .with_num_rounds(5)
+            .with_max_depth(2);
+
+        // Create temp directory
+        let dir = tempdir().unwrap();
+        let output_path = dir.path().join("train_output");
+
+        // Train and save in one go
+        let model = GBDTModel::train_with_output(
+            &features,
+            num_features,
+            &targets,
+            config,
+            None,
+            &output_path,
+            &[ModelFormat::Rkyv, ModelFormat::Bincode],
+        ).unwrap();
+
+        // Verify model was trained
+        assert_eq!(model.num_trees(), 5);
+
+        // Verify files exist
+        assert!(output_path.join("config.json").exists());
+        assert!(output_path.join("model.rkyv").exists());
+        assert!(output_path.join("model.bin").exists());
+
+        // Load both formats and verify
+        let loaded_rkyv = crate::serialize::load_model(output_path.join("model.rkyv")).unwrap();
+        let loaded_bincode = crate::serialize::load_model_bincode(output_path.join("model.bin")).unwrap();
+        assert_eq!(loaded_rkyv.num_trees(), 5);
+        assert_eq!(loaded_bincode.num_trees(), 5);
+    }
+
+    #[test]
+    fn test_save_to_directory_empty_formats_error() {
+        use tempfile::tempdir;
+
+        let dataset = create_regression_dataset(100, 0.1);
+
+        let config = GBDTConfig::new()
+            .with_num_rounds(5)
+            .with_max_depth(3);
+
+        let model = GBDTModel::train_binned(&dataset, config.clone()).unwrap();
+
+        // Create temp directory
+        let dir = tempdir().unwrap();
+        let output_path = dir.path().join("model_output");
+
+        // Try to save with empty formats - should fail
+        let result = model.save_to_directory(&output_path, &config, &[]);
+        assert!(result.is_err());
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("formats must not be empty"), "Error message: {}", err_msg);
+    }
+
+    #[test]
+    fn test_save_to_directory_creates_parent_dirs() {
+        use tempfile::tempdir;
+
+        let dataset = create_regression_dataset(100, 0.1);
+
+        let config = GBDTConfig::new()
+            .with_num_rounds(5)
+            .with_max_depth(3);
+
+        let model = GBDTModel::train_binned(&dataset, config.clone()).unwrap();
+
+        // Create temp directory with nested non-existent path
+        let dir = tempdir().unwrap();
+        let output_path = dir.path().join("deeply").join("nested").join("path").join("model");
+
+        // Should create all parent directories
+        model.save_to_directory(&output_path, &config, &[ModelFormat::Rkyv]).unwrap();
+
+        // Verify files exist
+        assert!(output_path.join("config.json").exists());
+        assert!(output_path.join("model.rkyv").exists());
+    }
+
+    #[test]
+    fn test_save_to_directory_config_json_completeness() {
+        use tempfile::tempdir;
+
+        let dataset = create_regression_dataset(100, 0.1);
+
+        // Create a config with various non-default settings
+        let config = GBDTConfig::new()
+            .with_num_rounds(42)
+            .with_max_depth(7)
+            .with_learning_rate(0.05)
+            .with_subsample(0.8)
+            .with_lambda(2.0)
+            .with_entropy_weight(0.1);
+
+        let model = GBDTModel::train_binned(&dataset, config.clone()).unwrap();
+
+        // Save
+        let dir = tempdir().unwrap();
+        let output_path = dir.path().join("model_output");
+        model.save_to_directory(&output_path, &config, &[ModelFormat::Rkyv]).unwrap();
+
+        // Load and verify config.json has all fields
+        let config_content = std::fs::read_to_string(output_path.join("config.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&config_content).unwrap();
+
+        // Verify key fields are present and have correct values
+        assert_eq!(parsed["num_rounds"], 42);
+        assert_eq!(parsed["max_depth"], 7);
+        assert!((parsed["learning_rate"].as_f64().unwrap() - 0.05).abs() < 0.001);
+        assert!((parsed["subsample"].as_f64().unwrap() - 0.8).abs() < 0.001);
+        assert!((parsed["lambda"].as_f64().unwrap() - 2.0).abs() < 0.001);
+        assert!((parsed["entropy_weight"].as_f64().unwrap() - 0.1).abs() < 0.001);
     }
 }

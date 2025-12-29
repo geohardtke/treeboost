@@ -37,6 +37,7 @@ use crate::backend::{BackendType, GpuMode};
 use crate::booster::{GBDTConfig, GBDTModel, LossType};
 use crate::serialize;
 use crate::tree::MonotonicConstraint;
+use crate::tuner::ModelFormat;
 
 /// Extract features from a 2D numpy array (f64 or f32) into a flat Vec<f64>
 ///
@@ -79,6 +80,17 @@ fn validate_feature_count(actual: usize, expected: usize) -> PyResult<()> {
         )));
     }
     Ok(())
+}
+
+/// Parse a model format string into ModelFormat enum
+fn parse_model_format(format: &str) -> PyResult<ModelFormat> {
+    match format.to_lowercase().as_str() {
+        "rkyv" => Ok(ModelFormat::Rkyv),
+        "bincode" | "bin" => Ok(ModelFormat::Bincode),
+        _ => Err(PyValueError::new_err(
+            "format must be 'rkyv' or 'bincode'"
+        )),
+    }
 }
 
 /// Python wrapper for monotonic constraint
@@ -981,17 +993,25 @@ impl PyGBDTModel {
     ///     targets: 1D numpy array of shape (n_samples,)
     ///     config: GBDTConfig instance
     ///     feature_names: Optional list of feature names
+    ///     output_dir: Optional directory to save model and config.json
+    ///                 If provided, saves model.rkyv and config.json for reproducibility
     ///
     /// Returns:
     ///     Trained GBDTModel
+    ///
+    /// Example:
+    ///     # Train and save automatically
+    ///     model = GBDTModel.train(features, targets, config, output_dir="my_model")
+    ///     # Creates: my_model/model.rkyv and my_model/config.json
     #[staticmethod]
-    #[pyo3(signature = (features, targets, config, feature_names=None))]
+    #[pyo3(signature = (features, targets, config, feature_names=None, output_dir=None))]
     fn train<'py>(
         py: Python<'py>,
         features: PyReadonlyArray2<'py, f32>,
         targets: PyReadonlyArray1<'py, f32>,
         config: &PyGBDTConfig,
         feature_names: Option<Vec<String>>,
+        output_dir: Option<String>,
     ) -> PyResult<Self> {
         let features_arr = features.as_array();
         let targets_arr = targets.as_array();
@@ -1018,6 +1038,12 @@ impl PyGBDTModel {
                 feature_names,
             )
         }).map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        // If output_dir provided, save model and config
+        if let Some(ref dir) = output_dir {
+            model.save_to_directory(dir, &config.inner, &[ModelFormat::Rkyv])
+                .map_err(|e| PyIOError::new_err(format!("Failed to save to output directory: {}", e)))?;
+        }
 
         Ok(Self { model })
     }
@@ -1348,17 +1374,73 @@ impl PyGBDTModel {
     ///     path: Path to save the model
     ///     format: Serialization format ("rkyv" or "bincode", default: "rkyv")
     ///         - "rkyv": Zero-copy deserialization, fastest loading (recommended)
-    ///         - "bincode": Compact binary format, serde-based
+    ///         - "bincode" (or "bin"): Compact binary format, serde-based
     #[pyo3(signature = (path, format="rkyv"))]
     fn save(&self, path: &str, format: &str) -> PyResult<()> {
-        match format.to_lowercase().as_str() {
-            "rkyv" => serialize::save_model(&self.model, path),
-            "bincode" => serialize::save_model_bincode(&self.model, path),
-            _ => return Err(PyValueError::new_err(
-                "format must be 'rkyv' or 'bincode'"
-            )),
+        let model_format = parse_model_format(format)?;
+        match model_format {
+            ModelFormat::Rkyv => serialize::save_model(&self.model, path),
+            ModelFormat::Bincode => serialize::save_model_bincode(&self.model, path),
         }
         .map_err(|e| PyIOError::new_err(e.to_string()))
+    }
+
+    /// Save model and config to a directory for reproducibility
+    ///
+    /// Creates the directory if needed and saves:
+    /// - model.rkyv (or model.bin): The trained model
+    /// - config.json: Training configuration for reproducibility
+    ///
+    /// Args:
+    ///     output_dir: Directory to save model and config
+    ///     config: GBDTConfig used for training (for config.json)
+    ///     formats: Serialization format(s) - either a single string ("rkyv" or "bincode")
+    ///              or a list of strings (["rkyv", "bincode"]). Default: "rkyv"
+    ///
+    /// Example:
+    ///     model = GBDTModel.train(features, targets, config)
+    ///
+    ///     # Single format (default)
+    ///     model.save_to_directory("my_model", config)
+    ///     # Creates: my_model/model.rkyv and my_model/config.json
+    ///
+    ///     # Multiple formats
+    ///     model.save_to_directory("my_model", config, formats=["rkyv", "bincode"])
+    ///     # Creates: my_model/model.rkyv, my_model/model.bin, and my_model/config.json
+    #[pyo3(signature = (output_dir, config, formats=None))]
+    fn save_to_directory(
+        &self,
+        output_dir: &str,
+        config: &PyGBDTConfig,
+        formats: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        // Parse formats - can be None (default), a string, or a list of strings
+        let model_formats = match formats {
+            None => vec![ModelFormat::Rkyv], // Default to rkyv
+            Some(obj) => {
+                if let Ok(s) = obj.extract::<String>() {
+                    // Single string format
+                    vec![parse_model_format(&s)?]
+                } else if let Ok(list) = obj.extract::<Vec<String>>() {
+                    // List of format strings
+                    if list.is_empty() {
+                        return Err(PyValueError::new_err(
+                            "formats list must not be empty"
+                        ));
+                    }
+                    list.iter()
+                        .map(|s| parse_model_format(s))
+                        .collect::<PyResult<Vec<_>>>()?
+                } else {
+                    return Err(PyValueError::new_err(
+                        "formats must be a string ('rkyv' or 'bincode') or a list of strings"
+                    ));
+                }
+            }
+        };
+
+        self.model.save_to_directory(output_dir, &config.inner, &model_formats)
+            .map_err(|e| PyIOError::new_err(e.to_string()))
     }
 
     /// Load model from file
@@ -1367,19 +1449,17 @@ impl PyGBDTModel {
     ///     path: Path to the model file
     ///     format: Serialization format ("rkyv" or "bincode", default: "rkyv")
     ///         - "rkyv": Zero-copy deserialization, fastest loading (recommended)
-    ///         - "bincode": Compact binary format, serde-based
+    ///         - "bincode" (or "bin"): Compact binary format, serde-based
     ///
     /// Returns:
     ///     Loaded GBDTModel
     #[staticmethod]
     #[pyo3(signature = (path, format="rkyv"))]
     fn load(path: &str, format: &str) -> PyResult<Self> {
-        let model = match format.to_lowercase().as_str() {
-            "rkyv" => serialize::load_model(path),
-            "bincode" => serialize::load_model_bincode(path),
-            _ => return Err(PyValueError::new_err(
-                "format must be 'rkyv' or 'bincode'"
-            )),
+        let model_format = parse_model_format(format)?;
+        let model = match model_format {
+            ModelFormat::Rkyv => serialize::load_model(path),
+            ModelFormat::Bincode => serialize::load_model_bincode(path),
         }
         .map_err(|e| PyIOError::new_err(e.to_string()))?;
 
