@@ -31,8 +31,8 @@ Usage:
     # Predict
     predictions = model.predict(X)
 
-    # Feature importances
-    importances = model.feature_importances()
+    # Feature importance
+    importances = model.feature_importance()
 
     # Save/load
     model.save("model.rkyv")

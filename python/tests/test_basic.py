@@ -71,7 +71,7 @@ def test_train_basic():
     assert r2 > 0.5
 
 
-def test_feature_importances():
+def test_feature_importance():
     """Test feature importance computation."""
     from treeboost import GBDTConfig, GBDTModel
 
@@ -88,7 +88,7 @@ def test_feature_importances():
     config.max_depth = 4
 
     model = GBDTModel.train(X, y, config)
-    importances = model.feature_importances()
+    importances = model.feature_importance()
 
     assert importances.shape == (n_features,)
     # First two features should have higher importance

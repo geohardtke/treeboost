@@ -1802,9 +1802,9 @@ impl GBDTModel {
         self.column_permutation.as_ref()
     }
 
-    /// Compute feature importances (gain-based)
-    pub fn feature_importances(&self, num_features: usize) -> Vec<f32> {
-        let mut importances = vec![0.0f32; num_features];
+    /// Compute feature importance (gain-based)
+    pub fn feature_importance(&self) -> Vec<f32> {
+        let mut importances = vec![0.0f32; self.num_features()];
 
         for tree in &self.trees {
             for (_, node) in tree.internal_nodes() {
@@ -1836,7 +1836,7 @@ impl GBDTModel {
         &self,
         dataset: &BinnedDataset,
     ) -> (BinnedDataset, crate::dataset::ColumnPermutation) {
-        let importances = self.feature_importances(dataset.num_features());
+        let importances = self.feature_importance();
         let permutation = crate::dataset::ColumnPermutation::from_importances(&importances);
         let optimized = crate::dataset::reorder_dataset(dataset, &permutation);
         (optimized, permutation)
@@ -2053,7 +2053,7 @@ mod tests {
     }
 
     #[test]
-    fn test_feature_importances() {
+    fn test_feature_importance() {
         let dataset = create_regression_dataset(500, 0.1);
 
         let config = GBDTConfig::new()
@@ -2061,7 +2061,7 @@ mod tests {
             .with_max_depth(4);
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
-        let importances = model.feature_importances(3);
+        let importances = model.feature_importance();
 
         assert_eq!(importances.len(), 3);
 

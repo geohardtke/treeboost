@@ -19,10 +19,17 @@ TreeBoost is a gradient boosted decision tree engine in pure Rust with automatic
 
 **What You Get:**
 
+- **Automatic hyperparameter tuning** — Production-ready AutoTuner with Latin Hypercube Sampling, k-fold CV, parallel evaluation
 - **5-5.5× faster on GPU** than scalar CPU for large datasets (100K+ rows)
 - **Zero configuration** — automatic backend selection (GPU → AVX-512 → scalar fallback)
 - **Advanced features** — entropy regularization, conformal intervals, target encoding
 - **Production features** — model checkpointing, inference optimization, feature importance
+
+## Automatic Hyperparameter Optimization
+
+TreeBoost includes a production-ready **AutoTuner** that finds optimal hyperparameters automatically, eliminating manual tuning:
+
+See `examples/autotuner.rs` for comprehensive examples.
 
 ## Quick Start
 
@@ -43,7 +50,7 @@ let config = GBDTConfig::new()
 let model = GBDTModel::train_binned(&dataset, config)?;
 treeboost::serialize::save_model(&model, "model.rkyv")?;
 
-let predictions = model.predict(&dataset)?;
+let predictions = model.predict(&dataset);
 ```
 
 ### Python (via PyO3)
@@ -238,7 +245,7 @@ let model = GBDTModel::train_binned(&dataset, config)?;
 treeboost::serialize::save_model(&model, "model.rkyv")?;
 
 // Load and predict
-let predictions = model.predict(&dataset)?;
+let predictions = model.predict(&dataset);
 let importances = model.feature_importance();
 ```
 
@@ -281,6 +288,55 @@ X = df[feature_cols].values.astype(np.float32)
 y = df['target'].values.astype(np.float32)
 
 model = GBDTModel.train(X, y, config)
+```
+
+### Automatic Hyperparameter Tuning
+
+**Rust:**
+
+```rust
+use treeboost::{AutoTuner, TunerConfig, GridStrategy, EvalStrategy, ParameterSpace};
+
+let tuner_config = TunerConfig::new()
+    .with_iterations(3)
+    .with_grid_strategy(GridStrategy::LatinHypercube { n_samples: 50 })
+    .with_eval_strategy(EvalStrategy::holdout(0.2).with_folds(5)) // 5-fold CV
+    .with_verbose(true);
+
+let mut tuner = AutoTuner::new(GBDTConfig::new())
+    .with_config(tuner_config)
+    .with_space(ParameterSpace::default_regression())
+    .with_callback(|trial, current, total| {
+        println!("Trial {}/{}: val_loss={:.4}", current, total, trial.val_metric);
+    });
+
+let (best_config, history) = tuner.tune(&dataset)?;
+println!("Best validation loss: {:.6}", history.best().unwrap().val_metric);
+
+// Train final model with best configuration
+let final_model = GBDTModel::train_binned(&dataset, best_config)?;
+```
+
+**Python:**
+
+```python
+from treeboost import AutoTuner, TunerConfig, GridStrategy, EvalStrategy, ParameterSpace
+
+tuner = AutoTuner(GBDTConfig())
+tuner_config = (
+    TunerConfig.thorough()
+    .with_grid_strategy(GridStrategy.lhs(50))
+    .with_eval_strategy(EvalStrategy.holdout(0.2).with_folds(5))
+    .with_verbose(True)
+)
+tuner.config = tuner_config
+tuner.space = ParameterSpace.default_regression()
+
+best_config, history = tuner.tune(X, y)
+print(f"Best validation loss: {history.best().val_metric:.6f}")
+
+# Train final model
+model = GBDTModel.train(X, y, best_config)
 ```
 
 ## CLI Tool

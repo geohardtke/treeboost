@@ -186,7 +186,7 @@ fn test_feature_importance() {
     let config = GBDTConfig::new().with_num_rounds(50).with_max_depth(5);
 
     let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
-    let importances = model.feature_importances(5);
+    let importances = model.feature_importance();
 
     assert_eq!(importances.len(), 5);
 
@@ -1097,7 +1097,7 @@ fn test_column_reordering_by_importance() {
     }
 
     // Verify most important feature is first (or near first)
-    let importances = model.feature_importances(num_features);
+    let importances = model.feature_importance();
     let most_important_orig = importances
         .iter()
         .enumerate()

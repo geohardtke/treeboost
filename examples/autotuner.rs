@@ -14,29 +14,27 @@
 //! Run with:
 //!   cargo run --release --example autotuner
 
+#[path = "common/mod.rs"]
+mod common;
+
 use std::time::Instant;
 
 use treeboost::booster::{GBDTConfig, GBDTModel};
-use treeboost::dataset::{BinnedDataset, FeatureInfo, FeatureType};
+use treeboost::dataset::BinnedDataset;
 use treeboost::tuner::{
     AutoTuner, EvalStrategy, GridStrategy, ModelFormat, ParamBounds, ParameterSpace, TunerConfig,
 };
 
 /// Generate a synthetic regression dataset for demonstration
 fn create_synthetic_dataset(n: usize, num_features: usize, seed: u64) -> BinnedDataset {
-    // Deterministic pseudo-random using LCG
-    let mut state = seed;
-    let mut next_rand = || -> f32 {
-        state = state.wrapping_mul(1103515245).wrapping_add(12345);
-        ((state >> 16) & 0x7FFF) as f32 / 32767.0
-    };
+    let mut rng = common::SimpleRng::new(seed);
 
     let mut features = Vec::with_capacity(n * num_features);
 
     // Generate features (column-major layout)
     for _f in 0..num_features {
         for _r in 0..n {
-            features.push((next_rand() * 255.0) as u8);
+            features.push((rng.next_f32() * 255.0) as u8);
         }
     }
 
@@ -47,19 +45,11 @@ fn create_synthetic_dataset(n: usize, num_features: usize, seed: u64) -> BinnedD
             let f0 = features[i] as f32 / 255.0;
             let f1 = features[n + i] as f32 / 255.0;
             let f2 = features[2 * n + i] as f32 / 255.0;
-            10.0 * f0 + 5.0 * f1 - 3.0 * f2 + next_rand() * 0.5
+            10.0 * f0 + 5.0 * f1 - 3.0 * f2 + rng.next_f32() * 0.5
         })
         .collect();
 
-    let feature_info: Vec<FeatureInfo> = (0..num_features)
-        .map(|i| FeatureInfo {
-            name: format!("feature_{}", i),
-            feature_type: FeatureType::Numeric,
-            num_bins: 255,
-            bin_boundaries: vec![],
-        })
-        .collect();
-
+    let feature_info = common::create_feature_info(num_features, "feature");
     BinnedDataset::new(n, features, targets, feature_info)
 }
 

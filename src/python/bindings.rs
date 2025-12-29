@@ -1359,12 +1359,12 @@ impl PyGBDTModel {
         Ok(PyArray1::from_vec(py, classes))
     }
 
-    /// Get feature importances (gain-based)
+    /// Get feature importance (gain-based)
     ///
     /// Returns:
-    ///     1D numpy array of normalized feature importances
-    fn feature_importances<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
-        let importances = self.model.feature_importances(self.model.num_features());
+    ///     1D numpy array of normalized feature importance
+    fn feature_importance<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        let importances = self.model.feature_importance();
         PyArray1::from_vec(py, importances)
     }
 

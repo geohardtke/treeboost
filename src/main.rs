@@ -159,13 +159,9 @@ enum Commands {
         #[arg(short, long)]
         model: PathBuf,
 
-        /// Show feature importances
+        /// Show feature importance
         #[arg(long)]
         importances: bool,
-
-        /// Number of features (required if showing importances)
-        #[arg(long)]
-        num_features: Option<usize>,
     },
 }
 
@@ -485,11 +481,7 @@ fn main() -> Result<()> {
             Ok(())
         }
 
-        Commands::Info {
-            model,
-            importances,
-            num_features,
-        } => {
+        Commands::Info { model, importances } => {
             println!("Loading model from {:?}...", model);
             let model = load_model(&model)?;
 
@@ -519,14 +511,10 @@ fn main() -> Result<()> {
             }
 
             if importances {
-                if let Some(n_feat) = num_features {
-                    println!("\nFeature Importances:");
-                    let imps = model.feature_importances(n_feat);
-                    for (i, imp) in imps.iter().enumerate() {
-                        println!("  Feature {}: {:.4}", i, imp);
-                    }
-                } else {
-                    println!("\nWarning: --num-features required to show importances");
+                println!("\nFeature Importance:");
+                let imps = model.feature_importance();
+                for (i, imp) in imps.iter().enumerate() {
+                    println!("  Feature {}: {:.4}", i, imp);
                 }
             }
 
