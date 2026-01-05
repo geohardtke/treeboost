@@ -158,7 +158,7 @@ impl TreeConfig {
     /// # Arguments
     /// - `num_features`: Number of features in dataset
     /// - `backend`: Optional backend override (uses Auto if None)
-    fn build_grower(&self, num_features: usize, backend: Option<BackendType>) -> TreeGrower {
+    pub(crate) fn build_grower(&self, num_features: usize, backend: Option<BackendType>) -> TreeGrower {
         let interaction_constraints = if self.interaction_groups.is_empty() {
             InteractionConstraints::new()
         } else {

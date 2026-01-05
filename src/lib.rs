@@ -66,7 +66,10 @@ pub use ensemble::{EnsembleBuilder, StackedEnsemble, MultiSeedConfig, SelectionC
 pub use features::{FeatureGenerationConfig, FeatureGenerator, FeatureSelector, PolynomialGenerator, RatioGenerator, SelectionConfig};
 pub use histogram::HistogramBuilder;
 pub use inference::Prediction;
-pub use learner::{Booster, LinearBooster, LinearConfig, TreeBooster, TreeConfig, WeakLearner};
+pub use learner::{
+    Booster, LeafLinearModel, LinearBooster, LinearConfig, LinearTreeBooster, LinearTreeConfig,
+    TreeBooster, TreeConfig, WeakLearner,
+};
 pub use loss::{sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, PseudoHuberLoss};
 pub use model::{BoostingMode, UniversalConfig, UniversalModel};
 pub use monitoring::{AlertLevel, CVHoldoutTracker, ShiftDetector, ShiftResult};
