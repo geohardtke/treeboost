@@ -570,7 +570,7 @@ impl BinnedDataset {
             let num_rows = self.num_rows;
             let num_features = self.num_features();
             // Each pair of features packs into 1 byte
-            let bytes_per_row = (num_features + 1) / 2;
+            let bytes_per_row = num_features.div_ceil(2);
             let mut packed = vec![0u8; num_rows * bytes_per_row];
 
             for row in 0..num_rows {
@@ -599,7 +599,7 @@ impl BinnedDataset {
     /// Get the number of bytes per row in 4-bit packed format.
     #[inline]
     pub fn bytes_per_row_4bit(&self) -> usize {
-        (self.num_features() + 1) / 2
+        self.num_features().div_ceil(2)
     }
 }
 
