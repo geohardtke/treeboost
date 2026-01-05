@@ -28,7 +28,6 @@ pub struct TrialResult {
     /// ROC-AUC score for binary classification (None for regression/multi-class)
     ///
     /// Area Under the ROC Curve measures ranking quality.
-    /// Used by Kaggle for many binary classification competitions.
     pub roc_auc: Option<f64>,
 }
 
@@ -54,8 +53,12 @@ impl TrialResult {
             self.iteration.to_string(),
             format!("{:.6}", self.val_metric),
             format!("{:.6}", self.train_metric),
-            self.f1_score.map(|f| format!("{:.4}", f)).unwrap_or_default(),
-            self.roc_auc.map(|a| format!("{:.6}", a)).unwrap_or_default(),
+            self.f1_score
+                .map(|f| format!("{:.4}", f))
+                .unwrap_or_default(),
+            self.roc_auc
+                .map(|a| format!("{:.6}", a))
+                .unwrap_or_default(),
             self.num_trees.to_string(),
             self.train_time_ms.to_string(),
         ]
@@ -63,6 +66,9 @@ impl TrialResult {
 
     /// Get param value formatted for CSV
     pub fn param_to_csv(&self, name: &str) -> String {
-        self.params.get(name).map(|v| format!("{:.6}", v)).unwrap_or_default()
+        self.params
+            .get(name)
+            .map(|v| format!("{:.6}", v))
+            .unwrap_or_default()
     }
 }

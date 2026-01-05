@@ -21,7 +21,7 @@ pub struct StackingConfig {
 impl Default for StackingConfig {
     fn default() -> Self {
         Self {
-            alpha: 10.0, // From Kaggle 1st place solution
+            alpha: 10.0,
             rank_transform: false,
             fit_intercept: true,
             min_weight: 0.0,
@@ -459,10 +459,7 @@ mod tests {
         let mut stacker = RidgeStacker::new(config);
 
         // Two models with slightly different predictions
-        let oof = vec![
-            vec![1.0, 2.0, 3.0, 4.0, 5.0],
-            vec![1.1, 2.1, 3.1, 4.1, 5.1],
-        ];
+        let oof = vec![vec![1.0, 2.0, 3.0, 4.0, 5.0], vec![1.1, 2.1, 3.1, 4.1, 5.1]];
         let targets = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
         stacker.fit(&oof, &targets);
