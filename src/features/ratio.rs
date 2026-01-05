@@ -2,6 +2,7 @@
 //!
 //! Generates ratio features (x_i / x_j) for pairs of input features.
 
+use super::stats::compute_correlation_matrix;
 use super::FeatureGenerator;
 
 /// Ratio feature generator
@@ -169,58 +170,6 @@ impl FeatureGenerator for RatioGenerator {
     }
 }
 
-/// Compute correlation matrix for feature columns
-fn compute_correlation_matrix(data: &[f32], num_features: usize, num_rows: usize) -> Vec<f32> {
-    let mut correlations = vec![0.0f32; num_features * num_features];
-
-    // Compute means
-    let means: Vec<f32> = (0..num_features)
-        .map(|f| {
-            let sum: f32 = (0..num_rows).map(|r| data[r * num_features + f]).sum();
-            sum / num_rows as f32
-        })
-        .collect();
-
-    // Compute standard deviations
-    let stds: Vec<f32> = (0..num_features)
-        .map(|f| {
-            let var: f32 = (0..num_rows)
-                .map(|r| {
-                    let diff = data[r * num_features + f] - means[f];
-                    diff * diff
-                })
-                .sum::<f32>()
-                / num_rows as f32;
-            var.sqrt().max(1e-10)
-        })
-        .collect();
-
-    // Compute correlations
-    for i in 0..num_features {
-        for j in 0..num_features {
-            if i == j {
-                correlations[i * num_features + j] = 1.0;
-            } else if j > i {
-                // Only compute once (matrix is symmetric)
-                let covar: f32 = (0..num_rows)
-                    .map(|r| {
-                        let xi = data[r * num_features + i] - means[i];
-                        let xj = data[r * num_features + j] - means[j];
-                        xi * xj
-                    })
-                    .sum::<f32>()
-                    / num_rows as f32;
-
-                let corr = covar / (stds[i] * stds[j]);
-                correlations[i * num_features + j] = corr;
-                correlations[j * num_features + i] = corr;
-            }
-        }
-    }
-
-    correlations
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,17 +244,5 @@ mod tests {
         let (new_data, new_names) = ratio.generate(&[1.0, 2.0], 2, &["a".to_string(), "b".to_string()]);
         assert!(new_data.is_empty());
         assert!(new_names.is_empty());
-    }
-
-    #[test]
-    fn test_correlation_matrix() {
-        // Perfect positive correlation
-        let data = vec![1.0, 2.0, 2.0, 4.0, 3.0, 6.0];
-        let corr = compute_correlation_matrix(&data, 2, 3);
-
-        assert!((corr[0] - 1.0).abs() < 1e-6); // self-correlation
-        assert!((corr[1] - 1.0).abs() < 1e-6); // perfect correlation
-        assert!((corr[2] - 1.0).abs() < 1e-6); // symmetric
-        assert!((corr[3] - 1.0).abs() < 1e-6); // self-correlation
     }
 }

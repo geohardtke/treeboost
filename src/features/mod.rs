@@ -9,23 +9,31 @@
 //!
 //! 1. **Polynomial features**: x², √x, log(1+x)
 //! 2. **Ratio features**: x_i / x_j for correlated pairs
-//! 3. **Feature selection**: Filter by variance, correlation, target importance
+//! 3. **Interaction features**: x_i × x_j, x_i + x_j, |x_i - x_j|, min/max
+//! 4. **Feature selection**: Filter by variance, correlation, target importance
 //!
 //! All feature generation happens BEFORE binning (required by the data pipeline).
 //!
 //! # Example
 //!
 //! ```ignore
-//! use treeboost::features::{FeatureGenerator, PolynomialGenerator};
+//! use treeboost::features::{FeatureGenerator, PolynomialGenerator, InteractionGenerator};
 //!
 //! let poly = PolynomialGenerator::new().with_square().with_sqrt();
 //! let (new_features, new_names) = poly.generate(&features, &feature_names);
+//!
+//! // Generate pairwise interactions
+//! let interactions = InteractionGenerator::top_correlated(20);
+//! let (int_features, int_names) = interactions.generate(&features, num_features, &names);
 //! ```
 
+mod interaction;
 mod polynomial;
 mod ratio;
 mod selector;
+mod stats;
 
+pub use interaction::{InteractionGenerator, InteractionType, PairSelection};
 pub use polynomial::PolynomialGenerator;
 pub use ratio::RatioGenerator;
 pub use selector::{FeatureSelector, SelectionConfig};
@@ -61,10 +69,16 @@ pub struct FeatureGenerationConfig {
     pub polynomials: bool,
     /// Enable ratio features
     pub ratios: bool,
+    /// Enable interaction features
+    pub interactions: bool,
     /// Maximum polynomial degree (default: 2)
     pub max_degree: usize,
     /// Maximum ratio features per input feature
     pub max_ratios_per_feature: usize,
+    /// Maximum interaction pairs
+    pub max_interaction_pairs: usize,
+    /// Interaction types to generate
+    pub interaction_types: Vec<InteractionType>,
     /// Selection config for filtering generated features
     pub selection: SelectionConfig,
 }
@@ -74,8 +88,11 @@ impl Default for FeatureGenerationConfig {
         Self {
             polynomials: true,
             ratios: true,
+            interactions: false, // Off by default (can generate many features)
             max_degree: 2,
             max_ratios_per_feature: 3,
+            max_interaction_pairs: 20,
+            interaction_types: vec![InteractionType::Multiply],
             selection: SelectionConfig::default(),
         }
     }
@@ -99,6 +116,12 @@ impl FeatureGenerationConfig {
         self
     }
 
+    /// Enable or disable interaction features
+    pub fn with_interactions(mut self, enabled: bool) -> Self {
+        self.interactions = enabled;
+        self
+    }
+
     /// Set maximum polynomial degree
     pub fn with_max_degree(mut self, degree: usize) -> Self {
         self.max_degree = degree;
@@ -108,6 +131,18 @@ impl FeatureGenerationConfig {
     /// Set maximum ratios per feature
     pub fn with_max_ratios_per_feature(mut self, max: usize) -> Self {
         self.max_ratios_per_feature = max;
+        self
+    }
+
+    /// Set maximum interaction pairs
+    pub fn with_max_interaction_pairs(mut self, max: usize) -> Self {
+        self.max_interaction_pairs = max;
+        self
+    }
+
+    /// Set interaction types to generate
+    pub fn with_interaction_types(mut self, types: Vec<InteractionType>) -> Self {
+        self.interaction_types = types;
         self
     }
 
