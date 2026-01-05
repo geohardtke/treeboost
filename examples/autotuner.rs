@@ -88,7 +88,7 @@ fn main() {
         .with_eval_strategy(EvalStrategy::holdout(0.2))
         .with_verbose(true);
 
-    let mut tuner = AutoTuner::new(base_config.clone())
+    let mut tuner = AutoTuner::<GBDTModel>::new(base_config.clone())
         .with_config(tuner_config)
         .with_space(ParameterSpace::default_regression())
         .with_seed(42);
@@ -145,7 +145,7 @@ fn main() {
         .with_eval_strategy(EvalStrategy::holdout(0.2))
         .with_verbose(true);
 
-    let mut tuner = AutoTuner::new(base_config.clone())
+    let mut tuner = AutoTuner::<GBDTModel>::new(base_config.clone())
         .with_config(tuner_config)
         .with_space(custom_space)
         .with_seed(999);
@@ -186,7 +186,7 @@ fn main() {
     let best_seen_bits = std::sync::Arc::new(AtomicU32::new(f32::MAX.to_bits()));
     let best_seen_clone = best_seen_bits.clone();
 
-    let mut tuner = AutoTuner::new(base_config.clone())
+    let mut tuner = AutoTuner::<GBDTModel>::new(base_config.clone())
         .with_config(tuner_config)
         .with_space(ParameterSpace::default_regression())
         .with_seed(777)
@@ -243,7 +243,7 @@ fn main() {
         .with_eval_strategy(EvalStrategy::holdout(0.2))
         .with_verbose(true);
 
-    let mut tuner = AutoTuner::new(base_config_es)
+    let mut tuner = AutoTuner::<GBDTModel>::new(base_config_es)
         .with_config(tuner_config)
         .with_space(ParameterSpace::default_regression())
         .with_seed(555);
@@ -285,7 +285,7 @@ fn main() {
         .with_save_model_formats(vec![ModelFormat::Rkyv, ModelFormat::Bincode]) // Save in both formats
         .with_verbose(true);
 
-    let mut tuner = AutoTuner::new(base_config.clone())
+    let mut tuner = AutoTuner::<GBDTModel>::new(base_config.clone())
         .with_config(tuner_config)
         .with_space(ParameterSpace::minimal()) // Just max_depth and learning_rate
         .with_seed(12345);

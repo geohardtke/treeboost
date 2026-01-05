@@ -25,7 +25,7 @@ fn test_autotuner_regression() {
         .with_eval_strategy(EvalStrategy::holdout(0.2))
         .with_verbose(false);
 
-    let mut tuner = AutoTuner::new(base_config)
+    let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
         .with_space(ParameterSpace::default_regression())
         .with_seed(123);
@@ -68,7 +68,7 @@ fn test_autotuner_binary_classification() {
         .with_eval_strategy(EvalStrategy::holdout(0.2))
         .with_verbose(false);
 
-    let mut tuner = AutoTuner::new(base_config)
+    let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
         .with_space(ParameterSpace::default_classification())
         .with_seed(789);
@@ -105,7 +105,7 @@ fn test_autotuner_kfold() {
         .with_eval_strategy(EvalStrategy::holdout(0.2).with_folds(3)) // 3-fold CV
         .with_verbose(false);
 
-    let mut tuner = AutoTuner::new(base_config)
+    let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
         .with_space(ParameterSpace::default_regression())
         .with_seed(654);
@@ -138,7 +138,7 @@ fn test_autotuner_lhs() {
         .with_eval_strategy(EvalStrategy::holdout(0.2))
         .with_verbose(false);
 
-    let mut tuner = AutoTuner::new(base_config)
+    let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
         .with_space(ParameterSpace::default_regression())
         .with_seed(222);
@@ -167,7 +167,7 @@ fn test_autotuner_random() {
         .with_eval_strategy(EvalStrategy::holdout(0.2))
         .with_verbose(false);
 
-    let mut tuner = AutoTuner::new(base_config)
+    let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
         .with_space(ParameterSpace::default_regression())
         .with_seed(444);
@@ -202,7 +202,7 @@ fn test_autotuner_reproducibility() {
         .with_parallel(false); // Disable parallel for determinism
 
     // Run 1
-    let mut tuner1 = AutoTuner::new(base_config.clone())
+    let mut tuner1 = AutoTuner::<GBDTModel>::new(base_config.clone())
         .with_config(tuner_config.clone())
         .with_space(ParameterSpace::default_regression())
         .with_seed(999);
@@ -210,7 +210,7 @@ fn test_autotuner_reproducibility() {
     let (_, history1) = tuner1.tune(&dataset).expect("Run 1 should succeed");
 
     // Run 2 with same seed
-    let mut tuner2 = AutoTuner::new(base_config.clone())
+    let mut tuner2 = AutoTuner::<GBDTModel>::new(base_config.clone())
         .with_config(tuner_config.clone())
         .with_space(ParameterSpace::default_regression())
         .with_seed(999);
@@ -266,7 +266,7 @@ fn test_autotuner_early_stopping() {
         .with_eval_strategy(EvalStrategy::holdout(0.2))
         .with_verbose(false);
 
-    let mut tuner = AutoTuner::new(base_config)
+    let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
         .with_space(ParameterSpace::default_regression())
         .with_seed(777);
@@ -307,7 +307,7 @@ fn test_autotuner_callback() {
     let callback_count = Arc::new(AtomicUsize::new(0));
     let callback_count_clone = callback_count.clone();
 
-    let mut tuner = AutoTuner::new(base_config)
+    let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
         .with_space(ParameterSpace::default_regression())
         .with_seed(999)
@@ -340,7 +340,7 @@ fn test_autotuner_history_json() {
         .with_eval_strategy(EvalStrategy::holdout(0.2))
         .with_verbose(false);
 
-    let mut tuner = AutoTuner::new(base_config)
+    let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
         .with_space(ParameterSpace::default_regression())
         .with_seed(202);

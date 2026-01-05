@@ -1,7 +1,8 @@
 //! GBDT model and training
 
+use crate::backend::BackendType;
 #[cfg(any(feature = "cuda", feature = "gpu"))]
-use crate::backend::{BackendType, GpuMode};
+use crate::backend::GpuMode;
 use crate::booster::GBDTConfig;
 use crate::dataset::{split_holdout, BinnedDataset, ColumnPermutation, FeatureInfo, FeatureType, QuantileBinner};
 use crate::loss::{sigmoid, softmax, MultiClassLogLoss};
@@ -1852,6 +1853,111 @@ impl GBDTModel {
         dataset: &BinnedDataset,
     ) -> crate::dataset::PackedDataset {
         crate::dataset::PackedDataset::from_binned(dataset)
+    }
+}
+
+// =============================================================================
+// TunableModel Implementation
+// =============================================================================
+
+use crate::tuner::{ParamValue, TunableModel};
+use std::collections::HashMap;
+
+impl TunableModel for GBDTModel {
+    type Config = GBDTConfig;
+
+    fn train(dataset: &BinnedDataset, config: &Self::Config) -> Result<Self> {
+        Self::train_binned(dataset, config.clone())
+    }
+
+    fn train_with_validation(
+        train_data: &BinnedDataset,
+        val_data: &BinnedDataset,
+        val_targets: &[f32],
+        config: &Self::Config,
+    ) -> Result<Self> {
+        Self::train_binned_with_validation(train_data, val_data, val_targets, config.clone())
+    }
+
+    fn predict(&self, dataset: &BinnedDataset) -> Vec<f32> {
+        GBDTModel::predict(self, dataset)
+    }
+
+    fn num_trees(&self) -> usize {
+        self.trees.len()
+    }
+
+    fn apply_params(config: &mut Self::Config, params: &HashMap<String, ParamValue>) {
+        for (name, value) in params {
+            match (name.as_str(), value) {
+                ("max_depth", ParamValue::Numeric(v)) => config.max_depth = *v as usize,
+                ("learning_rate", ParamValue::Numeric(v)) => config.learning_rate = *v,
+                ("subsample", ParamValue::Numeric(v)) => config.subsample = *v,
+                ("colsample", ParamValue::Numeric(v)) => config.colsample = *v,
+                ("lambda", ParamValue::Numeric(v)) => config.lambda = *v,
+                ("entropy_weight", ParamValue::Numeric(v)) => config.entropy_weight = *v,
+                ("min_samples_leaf", ParamValue::Numeric(v)) => config.min_samples_leaf = *v as usize,
+                ("min_hessian_leaf", ParamValue::Numeric(v)) => config.min_hessian_leaf = *v,
+                ("min_gain", ParamValue::Numeric(v)) => config.min_gain = *v,
+                ("num_rounds", ParamValue::Numeric(v)) => config.num_rounds = *v as usize,
+                ("goss_top_rate", ParamValue::Numeric(v)) => config.goss_top_rate = *v,
+                ("goss_other_rate", ParamValue::Numeric(v)) => config.goss_other_rate = *v,
+                _ => {} // Unknown params are ignored
+            }
+        }
+    }
+
+    fn valid_params() -> &'static [&'static str] {
+        &[
+            "max_depth",
+            "learning_rate",
+            "subsample",
+            "colsample",
+            "lambda",
+            "entropy_weight",
+            "min_samples_leaf",
+            "min_hessian_leaf",
+            "min_gain",
+            "num_rounds",
+            "goss_top_rate",
+            "goss_other_rate",
+        ]
+    }
+
+    fn default_config() -> Self::Config {
+        GBDTConfig::default()
+    }
+
+    fn is_gpu_config(config: &Self::Config) -> bool {
+        matches!(
+            config.backend_type,
+            BackendType::Wgpu | BackendType::Cuda | BackendType::Auto
+        )
+    }
+
+    fn get_learning_rate(config: &Self::Config) -> f32 {
+        config.learning_rate
+    }
+
+    fn configure_validation(
+        config: &mut Self::Config,
+        validation_ratio: f32,
+        early_stopping_rounds: usize,
+    ) {
+        config.validation_ratio = validation_ratio;
+        config.early_stopping_rounds = early_stopping_rounds;
+    }
+
+    fn set_num_rounds(config: &mut Self::Config, num_rounds: usize) {
+        config.num_rounds = num_rounds;
+    }
+
+    fn save_rkyv(&self, path: &std::path::Path) -> Result<()> {
+        crate::serialize::save_model(self, path)
+    }
+
+    fn save_bincode(&self, path: &std::path::Path) -> Result<()> {
+        crate::serialize::save_model_bincode(self, path)
     }
 }
 

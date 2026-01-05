@@ -634,6 +634,116 @@ impl UniversalModel {
 }
 
 // =============================================================================
+// TunableModel Implementation
+// =============================================================================
+
+use crate::tuner::{ParamValue, TunableModel};
+use std::collections::HashMap;
+
+impl TunableModel for UniversalModel {
+    type Config = UniversalConfig;
+
+    fn train(dataset: &BinnedDataset, config: &Self::Config) -> crate::Result<Self> {
+        // Create a default MSE loss for tuning (loss type could be parameterized later)
+        let loss_fn = crate::loss::MseLoss::new();
+        Self::train(dataset, config.clone(), &loss_fn)
+    }
+
+    fn predict(&self, dataset: &BinnedDataset) -> Vec<f32> {
+        UniversalModel::predict(self, dataset)
+    }
+
+    fn num_trees(&self) -> usize {
+        self.trees.len()
+    }
+
+    fn apply_params(config: &mut Self::Config, params: &HashMap<String, ParamValue>) {
+        for (name, value) in params {
+            match (name.as_str(), value) {
+                // Categorical: boosting mode
+                ("mode", ParamValue::Categorical(v)) => {
+                    config.mode = match v.as_str() {
+                        "PureTree" => BoostingMode::PureTree,
+                        "LinearThenTree" => BoostingMode::LinearThenTree,
+                        "RandomForest" => BoostingMode::RandomForest,
+                        _ => BoostingMode::PureTree, // Default fallback
+                    };
+                }
+                // Numeric parameters
+                ("num_rounds", ParamValue::Numeric(v)) => config.num_rounds = *v as usize,
+                ("learning_rate", ParamValue::Numeric(v)) => config.learning_rate = *v,
+                ("subsample", ParamValue::Numeric(v)) => config.subsample = *v,
+                ("validation_ratio", ParamValue::Numeric(v)) => config.validation_ratio = *v,
+                ("early_stopping_rounds", ParamValue::Numeric(v)) => {
+                    config.early_stopping_rounds = *v as usize
+                }
+                ("linear_rounds", ParamValue::Numeric(v)) => config.linear_rounds = *v as usize,
+                // Tree config parameters (prefixed with tree_)
+                ("tree_max_depth", ParamValue::Numeric(v)) => {
+                    config.tree_config = config.tree_config.clone().with_max_depth(*v as usize)
+                }
+                ("tree_max_leaves", ParamValue::Numeric(v)) => {
+                    config.tree_config = config.tree_config.clone().with_max_leaves(*v as usize)
+                }
+                ("tree_lambda", ParamValue::Numeric(v)) => {
+                    config.tree_config = config.tree_config.clone().with_lambda(*v)
+                }
+                // Linear config parameters (prefixed with linear_)
+                ("linear_lambda", ParamValue::Numeric(v)) => {
+                    config.linear_config = config.linear_config.clone().with_lambda(*v)
+                }
+                ("linear_max_iter", ParamValue::Numeric(v)) => {
+                    config.linear_config = config.linear_config.clone().with_max_iter(*v as usize)
+                }
+                _ => {} // Unknown params are ignored
+            }
+        }
+    }
+
+    fn valid_params() -> &'static [&'static str] {
+        &[
+            // Categorical
+            "mode",
+            // Numeric
+            "num_rounds",
+            "learning_rate",
+            "subsample",
+            "validation_ratio",
+            "early_stopping_rounds",
+            "linear_rounds",
+            // Tree config
+            "tree_max_depth",
+            "tree_max_leaves",
+            "tree_lambda",
+            // Linear config
+            "linear_lambda",
+            "linear_max_iter",
+        ]
+    }
+
+    fn default_config() -> Self::Config {
+        UniversalConfig::default()
+    }
+
+    fn get_learning_rate(config: &Self::Config) -> f32 {
+        config.learning_rate
+    }
+
+    fn configure_validation(
+        config: &mut Self::Config,
+        validation_ratio: f32,
+        early_stopping_rounds: usize,
+    ) {
+        config.validation_ratio = validation_ratio;
+        config.early_stopping_rounds = early_stopping_rounds;
+    }
+
+    fn set_num_rounds(config: &mut Self::Config, num_rounds: usize) {
+        config.num_rounds = num_rounds;
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
