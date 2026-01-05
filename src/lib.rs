@@ -74,9 +74,9 @@ pub use loss::{sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClas
 pub use model::{BoostingMode, UniversalConfig, UniversalModel};
 pub use monitoring::{AlertLevel, CVHoldoutTracker, ShiftDetector, ShiftResult};
 pub use preprocessing::{
-    FrequencyEncoder, ImputeStrategy, IndicatorImputer, LabelEncoder, MinMaxScaler, OneHotEncoder,
-    PipelineBuilder, Preprocessor, RobustScaler, Scaler, SimpleImputer, StandardScaler,
-    UnknownStrategy, YeoJohnsonTransform,
+    EncodingMap, FrequencyEncoder, ImputeStrategy, IndicatorImputer, LabelEncoder, MinMaxScaler,
+    OneHotEncoder, OrderedTargetEncoder, PipelineBuilder, Preprocessor, RobustScaler, Scaler,
+    SimpleImputer, StandardScaler, UnknownStrategy, YeoJohnsonTransform,
 };
 pub use tree::{InteractionConstraints, MonotonicConstraint};
 pub use tuner::{AutoTuner, EvalStrategy, GridStrategy, ModelFormat, ParameterSpace, SearchHistory, TunerConfig};

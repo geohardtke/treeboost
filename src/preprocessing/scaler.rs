@@ -451,39 +451,28 @@ impl Scaler for RobustScaler {
         self.medians = vec![0.0; num_features];
         self.iqrs = vec![0.0; num_features];
 
-        // Compute median and IQR for each feature
+        // Use T-Digest for O(n) quantile estimation instead of O(n log n) sorting
+        // This is critical for large datasets (100M+ rows)
+        use tdigest::TDigest;
+
+        // Compute median and IQR for each feature using approximate quantiles
         for feat in 0..num_features {
-            // Extract feature column
-            let mut column: Vec<f32> = (0..num_rows)
-                .map(|row| data[row * num_features + feat])
-                .collect();
+            // Build T-Digest for this feature column
+            let mut digest = TDigest::new_with_size(100); // 100 centroids is accurate enough
 
-            // Sort to compute percentiles
-            column.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            for row in 0..num_rows {
+                let value = data[row * num_features + feat] as f64;
+                if value.is_finite() {
+                    digest = digest.merge_unsorted(vec![value]);
+                }
+            }
 
-            // Median (Q2)
-            let median_idx = num_rows / 2;
-            self.medians[feat] = if num_rows % 2 == 0 {
-                (column[median_idx - 1] + column[median_idx]) / 2.0
-            } else {
-                column[median_idx]
-            };
+            // Get approximate quantiles from T-Digest
+            let q1 = digest.estimate_quantile(0.25) as f32;
+            let median = digest.estimate_quantile(0.50) as f32;
+            let q3 = digest.estimate_quantile(0.75) as f32;
 
-            // Q1 (25th percentile)
-            let q1_idx = num_rows / 4;
-            let q1 = if num_rows % 4 == 0 {
-                (column[q1_idx - 1] + column[q1_idx]) / 2.0
-            } else {
-                column[q1_idx]
-            };
-
-            // Q3 (75th percentile)
-            let q3_idx = (num_rows * 3) / 4;
-            let q3 = if (num_rows * 3) % 4 == 0 {
-                (column[q3_idx - 1] + column[q3_idx]) / 2.0
-            } else {
-                column[q3_idx]
-            };
+            self.medians[feat] = median;
 
             // IQR = Q3 - Q1
             let iqr = q3 - q1;

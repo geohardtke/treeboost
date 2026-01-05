@@ -112,6 +112,16 @@ pub struct UniversalConfig {
 
     /// Number of linear boosting rounds before trees (LinearThenTree mode)
     pub linear_rounds: usize,
+
+    /// Maximum memory (MB) for LinearThenTree raw feature extraction
+    ///
+    /// LinearThenTree mode unpacks binned u8 data to f32 (4x expansion).
+    /// Set this to limit memory usage. If exceeded:
+    /// - `0` = No limit (default, may cause OOM on large datasets)
+    /// - `> 0` = Error if estimated memory exceeds this limit
+    ///
+    /// **Rule of thumb**: 100M rows × 100 features = ~40GB memory
+    pub max_linear_memory_mb: usize,
 }
 
 impl Default for UniversalConfig {
@@ -127,6 +137,7 @@ impl Default for UniversalConfig {
             early_stopping_rounds: 0,
             seed: 42,
             linear_rounds: 10,
+            max_linear_memory_mb: 0, // No limit by default
         }
     }
 }
@@ -185,6 +196,28 @@ impl UniversalConfig {
     pub fn with_linear_rounds(mut self, rounds: usize) -> Self {
         self.linear_rounds = rounds;
         self
+    }
+
+    /// Set maximum memory (MB) for LinearThenTree raw feature extraction
+    ///
+    /// # Arguments
+    /// - `mb`: Maximum memory in megabytes (0 = no limit)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = UniversalConfig::new()
+    ///     .with_mode(BoostingMode::LinearThenTree)
+    ///     .with_max_linear_memory_mb(4096); // 4GB limit
+    /// ```
+    pub fn with_max_linear_memory_mb(mut self, mb: usize) -> Self {
+        self.max_linear_memory_mb = mb;
+        self
+    }
+
+    /// Estimate memory usage (bytes) for LinearThenTree raw feature extraction
+    pub fn estimate_linear_memory(&self, num_rows: usize, num_features: usize) -> usize {
+        // f32 = 4 bytes per element
+        num_rows * num_features * 4
     }
 }
 
@@ -300,6 +333,29 @@ impl UniversalModel {
         let targets = dataset.targets();
         let num_rows = dataset.num_rows();
         let num_features = dataset.num_features();
+
+        // Memory safety check for LinearThenTree mode
+        let estimated_bytes = config.estimate_linear_memory(num_rows, num_features);
+        let estimated_mb = estimated_bytes / (1024 * 1024);
+
+        if config.max_linear_memory_mb > 0 && estimated_mb > config.max_linear_memory_mb {
+            return Err(crate::TreeBoostError::Config(format!(
+                "LinearThenTree mode would require ~{}MB for raw feature extraction \
+                 ({}rows × {}features × 4bytes), exceeding limit of {}MB. \
+                 Options: (1) Increase max_linear_memory_mb, (2) Use PureTree mode, \
+                 (3) Reduce dataset size, (4) Use fewer features.",
+                estimated_mb, num_rows, num_features, config.max_linear_memory_mb
+            )));
+        }
+
+        // Warn on very large allocations (>1GB) even without explicit limit
+        if estimated_mb > 1024 {
+            eprintln!(
+                "Warning: LinearThenTree will allocate ~{}MB for raw features. \
+                 Consider setting max_linear_memory_mb to prevent OOM.",
+                estimated_mb
+            );
+        }
 
         // Extract raw features for linear model
         let raw_features = Self::extract_raw_features(dataset);

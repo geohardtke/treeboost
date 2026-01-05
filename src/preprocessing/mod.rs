@@ -11,6 +11,7 @@
 //! - **FrequencyEncoder**: Category → count (optimal for trees)
 //! - **LabelEncoder**: String → integer label (CSV loading essential)
 //! - **OneHotEncoder**: Category → binary columns (for linear models)
+//! - **OrderedTargetEncoder**: Target-based encoding with M-estimate smoothing (high-cardinality)
 //!
 //! ## Missing Value Imputation
 //! - **SimpleImputer**: Mean/Median/Mode/Constant strategies
@@ -78,6 +79,9 @@ pub mod transforms;
 
 pub use encoding::{FrequencyEncoder, LabelEncoder, OneHotEncoder, UnknownStrategy};
 pub use imputer::{ImputeStrategy, IndicatorImputer, SimpleImputer};
+
+// Re-export production-grade encoders from encoding module for convenience
+pub use crate::encoding::{EncodingMap, OrderedTargetEncoder};
 pub use outliers::{FeatureBounds, OutlierAction, OutlierDetector, OutlierMethod, TransformResult};
 pub use pipeline::{PipelineBuilder, Preprocessor};
 pub use polars_ext::{

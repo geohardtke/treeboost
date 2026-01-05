@@ -174,7 +174,7 @@ impl Preprocessor {
                 Ok(())
             }
             Preprocessor::OneHot(e) => {
-                e.fit(categories);
+                e.fit(categories)?;
                 Ok(())
             }
             _ => Err(TreeBoostError::Config(
