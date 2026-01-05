@@ -300,22 +300,35 @@ impl AutoTuner {
                         .unwrap_or(true);
 
                     if is_best {
-                        // Show all available metrics
-                        let auc_str = result
-                            .roc_auc
-                            .map(|auc| format!(" AUC={:.4}", auc))
-                            .unwrap_or_default();
-                        let f1_str = result
-                            .f1_score
-                            .map(|f1| format!(" F1={:.2}%", f1 * 100.0))
-                            .unwrap_or_default();
+                        // Show metrics based on eval strategy and task type
+                        let is_conformal = matches!(self.config.eval_strategy, EvalStrategy::Conformal { .. });
+                        let metric_str = if is_conformal {
+                            // Conformal: val_metric is interval width (quantile q)
+                            format!("q={:.5} (interval width)", result.val_metric)
+                        } else if self.config.task_type.is_regression() {
+                            // Regression: show MSE and RMSE
+                            format!("MSE={:.5} RMSE={:.4}", result.val_metric, result.val_metric.sqrt())
+                        } else {
+                            // Classification: show LogLoss, AUC, F1
+                            let auc_str = result
+                                .roc_auc
+                                .map(|auc| format!(" AUC={:.4}", auc))
+                                .unwrap_or_default();
+                            let f1_str = result
+                                .f1_score
+                                .map(|f1| format!(" F1={:.2}%", f1 * 100.0))
+                                .unwrap_or_default();
+                            format!("LogLoss={:.5}{}{}", result.val_metric, auc_str, f1_str)
+                        };
+                        // Show learning_rate from params if tuned, otherwise from base_config
+                        let lr = result.params.get("learning_rate")
+                            .copied()
+                            .unwrap_or(self.base_config.learning_rate);
                         println!(
-                            "  -> New best! loss={:.5}{}{} (depth={}, lr={:.4}, trees={})",
-                            result.val_metric,
-                            auc_str,
-                            f1_str,
+                            "  -> New best! {} (depth={}, lr={:.4}, trees={})",
+                            metric_str,
                             result.params.get("max_depth").unwrap_or(&0.0),
-                            result.params.get("learning_rate").unwrap_or(&0.0),
+                            lr,
                             result.num_trees,
                         );
                     }
@@ -405,9 +418,20 @@ impl AutoTuner {
         if self.config.verbose {
             println!("\n=== Tuning Complete ===");
             println!("  Total trials: {}", self.history.len());
-            println!("  Best val_metric: {:.6}", best.val_metric);
-            if let Some(f1) = best.f1_score {
-                println!("  F1 score: {:.2}%", f1 * 100.0);
+            // Show metrics based on eval strategy and task type
+            let is_conformal = matches!(self.config.eval_strategy, EvalStrategy::Conformal { .. });
+            if is_conformal {
+                println!("  Best interval width (q): {:.6}", best.val_metric);
+            } else if self.config.task_type.is_regression() {
+                println!("  Best MSE: {:.6} (RMSE: {:.4})", best.val_metric, best.val_metric.sqrt());
+            } else {
+                println!("  Best LogLoss: {:.6}", best.val_metric);
+                if let Some(auc) = best.roc_auc {
+                    println!("  ROC-AUC: {:.4}", auc);
+                }
+                if let Some(f1) = best.f1_score {
+                    println!("  F1 score: {:.2}%", f1 * 100.0);
+                }
             }
             println!("  Best params:");
             for (k, v) in &best.params {
@@ -575,22 +599,35 @@ impl AutoTuner {
                         .unwrap_or(true);
 
                     if is_best {
-                        // Show all available metrics
-                        let auc_str = result
-                            .roc_auc
-                            .map(|auc| format!(" AUC={:.4}", auc))
-                            .unwrap_or_default();
-                        let f1_str = result
-                            .f1_score
-                            .map(|f1| format!(" F1={:.2}%", f1 * 100.0))
-                            .unwrap_or_default();
+                        // Show metrics based on eval strategy and task type
+                        let is_conformal = matches!(self.config.eval_strategy, EvalStrategy::Conformal { .. });
+                        let metric_str = if is_conformal {
+                            // Conformal: val_metric is interval width (quantile q)
+                            format!("q={:.5} (interval width)", result.val_metric)
+                        } else if self.config.task_type.is_regression() {
+                            // Regression: show MSE and RMSE
+                            format!("MSE={:.5} RMSE={:.4}", result.val_metric, result.val_metric.sqrt())
+                        } else {
+                            // Classification: show LogLoss, AUC, F1
+                            let auc_str = result
+                                .roc_auc
+                                .map(|auc| format!(" AUC={:.4}", auc))
+                                .unwrap_or_default();
+                            let f1_str = result
+                                .f1_score
+                                .map(|f1| format!(" F1={:.2}%", f1 * 100.0))
+                                .unwrap_or_default();
+                            format!("LogLoss={:.5}{}{}", result.val_metric, auc_str, f1_str)
+                        };
+                        // Show learning_rate from params if tuned, otherwise from base_config
+                        let lr = result.params.get("learning_rate")
+                            .copied()
+                            .unwrap_or(self.base_config.learning_rate);
                         println!(
-                            "  -> New best! loss={:.5}{}{} (depth={}, lr={:.4}, trees={})",
-                            result.val_metric,
-                            auc_str,
-                            f1_str,
+                            "  -> New best! {} (depth={}, lr={:.4}, trees={})",
+                            metric_str,
                             result.params.get("max_depth").unwrap_or(&0.0),
-                            result.params.get("learning_rate").unwrap_or(&0.0),
+                            lr,
                             result.num_trees,
                         );
                     }
@@ -680,9 +717,20 @@ impl AutoTuner {
         if self.config.verbose {
             println!("\n=== Tuning Complete ===");
             println!("  Total trials: {}", self.history.len());
-            println!("  Best val_metric: {:.6}", best.val_metric);
-            if let Some(f1) = best.f1_score {
-                println!("  F1 score: {:.2}%", f1 * 100.0);
+            // Show metrics based on eval strategy and task type
+            let is_conformal = matches!(self.config.eval_strategy, EvalStrategy::Conformal { .. });
+            if is_conformal {
+                println!("  Best interval width (q): {:.6}", best.val_metric);
+            } else if self.config.task_type.is_regression() {
+                println!("  Best MSE: {:.6} (RMSE: {:.4})", best.val_metric, best.val_metric.sqrt());
+            } else {
+                println!("  Best LogLoss: {:.6}", best.val_metric);
+                if let Some(auc) = best.roc_auc {
+                    println!("  ROC-AUC: {:.4}", auc);
+                }
+                if let Some(f1) = best.f1_score {
+                    println!("  F1 score: {:.2}%", f1 * 100.0);
+                }
             }
             println!("  Best params:");
             for (k, v) in &best.params {
@@ -1109,10 +1157,32 @@ impl AutoTuner {
 
         let train_time_ms = start.elapsed().as_millis() as u64;
 
+        // Build full config to extract ALL params (tuned + fixed) for CSV logging
+        let full_config = self.build_config(params);
+        let mut full_params = params.clone();
+
+        // Add fixed params from base_config that aren't being tuned
+        // This ensures CSV logs have complete parameter information
+        if !full_params.contains_key("learning_rate") {
+            full_params.insert("learning_rate".into(), full_config.learning_rate);
+        }
+        if !full_params.contains_key("num_rounds") {
+            full_params.insert("num_rounds".into(), full_config.num_rounds as f32);
+        }
+        if !full_params.contains_key("colsample") {
+            full_params.insert("colsample".into(), full_config.colsample);
+        }
+        if !full_params.contains_key("min_samples_leaf") {
+            full_params.insert("min_samples_leaf".into(), full_config.min_samples_leaf as f32);
+        }
+        if !full_params.contains_key("min_gain") {
+            full_params.insert("min_gain".into(), full_config.min_gain);
+        }
+
         Ok(TrialResult {
             trial_id,
             iteration,
-            params: params.clone(),
+            params: full_params,  // Store full params (tuned + fixed)
             val_metric,
             train_metric,
             num_trees,

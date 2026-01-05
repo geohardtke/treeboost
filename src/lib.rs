@@ -45,6 +45,7 @@ pub mod histogram;
 pub mod inference;
 pub mod loss;
 pub mod monitoring;
+pub mod preprocessing;
 pub mod serialize;
 pub mod tree;
 pub mod tuner;
@@ -60,11 +61,16 @@ pub use backend::{BackendConfig, BackendSelector, BackendType, GpuMode, Histogra
 pub use booster::{GBDTConfig, GBDTModel};
 pub use dataset::{BinnedDataset, FeatureInfo, FeatureType, QuantileBinner};
 pub use ensemble::{EnsembleBuilder, StackedEnsemble, MultiSeedConfig, SelectionConfig as EnsembleSelectionConfig, StackingConfig};
-pub use features::{FeatureGenerationConfig, FeatureGenerator, PolynomialGenerator, RatioGenerator};
+pub use features::{FeatureGenerationConfig, FeatureGenerator, FeatureSelector, PolynomialGenerator, RatioGenerator, SelectionConfig};
 pub use histogram::HistogramBuilder;
 pub use inference::Prediction;
 pub use loss::{sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, PseudoHuberLoss};
 pub use monitoring::{AlertLevel, CVHoldoutTracker, ShiftDetector, ShiftResult};
+pub use preprocessing::{
+    FrequencyEncoder, ImputeStrategy, IndicatorImputer, LabelEncoder, MinMaxScaler, OneHotEncoder,
+    PipelineBuilder, Preprocessor, RobustScaler, Scaler, SimpleImputer, StandardScaler,
+    UnknownStrategy, YeoJohnsonTransform,
+};
 pub use tree::{InteractionConstraints, MonotonicConstraint};
 pub use tuner::{AutoTuner, EvalStrategy, GridStrategy, ModelFormat, ParameterSpace, SearchHistory, TunerConfig};
 

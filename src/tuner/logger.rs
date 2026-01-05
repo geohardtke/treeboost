@@ -25,6 +25,8 @@ pub(crate) struct TrialLogger {
     run_dir: PathBuf,
     writer: Option<csv::Writer<File>>,
     param_names: Vec<String>,
+    /// Extra fixed params to log (learning_rate, num_rounds, etc.)
+    extra_param_names: Vec<String>,
 }
 
 impl TrialLogger {
@@ -37,10 +39,20 @@ impl TrialLogger {
             TreeBoostError::Data(format!("Failed to create run directory: {}", e))
         })?;
 
+        // Fixed params that are always logged (not being tuned)
+        let extra_param_names = vec![
+            "learning_rate".to_string(),
+            "num_rounds".to_string(),
+            "colsample".to_string(),
+            "min_samples_leaf".to_string(),
+            "min_gain".to_string(),
+        ];
+
         Ok(Self {
             run_dir,
             writer: None,
             param_names,
+            extra_param_names,
         })
     }
 
@@ -61,6 +73,7 @@ impl TrialLogger {
             .map(|s| s.to_string())
             .collect();
         headers.extend(self.param_names.clone());
+        headers.extend(self.extra_param_names.clone());
 
         writer.write_record(&headers).map_err(|e| {
             TreeBoostError::Data(format!("Failed to write CSV header: {}", e))
@@ -79,8 +92,13 @@ impl TrialLogger {
             // Use TrialResult's CSV conversion
             let mut row = trial.to_csv_row();
 
-            // Add param values in consistent order
+            // Add tuned param values in consistent order
             for name in &self.param_names {
+                row.push(trial.param_to_csv(name));
+            }
+
+            // Add fixed param values (learning_rate, num_rounds, etc.)
+            for name in &self.extra_param_names {
                 row.push(trial.param_to_csv(name));
             }
 
