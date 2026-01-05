@@ -13,6 +13,10 @@ pub struct SelectionConfig {
     pub max_features: usize,
     /// Whether to use target-based selection
     pub use_target_selection: bool,
+    /// Whether to drop collinear features (highly correlated pairs)
+    pub drop_collinear: bool,
+    /// Correlation threshold for collinearity detection (default: 0.99)
+    pub collinearity_threshold: f32,
 }
 
 impl Default for SelectionConfig {
@@ -22,6 +26,8 @@ impl Default for SelectionConfig {
             max_correlation: 0.95,
             max_features: 50,
             use_target_selection: true,
+            drop_collinear: false,
+            collinearity_threshold: 0.99,
         }
     }
 }
@@ -53,6 +59,26 @@ impl SelectionConfig {
     /// Enable or disable target-based selection
     pub fn with_target_selection(mut self, enabled: bool) -> Self {
         self.use_target_selection = enabled;
+        self
+    }
+
+    /// Enable or disable collinear feature dropping
+    ///
+    /// When enabled, features that are highly correlated with each other
+    /// will be filtered, keeping only the one with higher variance or
+    /// higher target correlation.
+    pub fn with_drop_collinear(mut self, enabled: bool) -> Self {
+        self.drop_collinear = enabled;
+        self
+    }
+
+    /// Set the collinearity threshold
+    ///
+    /// Feature pairs with correlation above this threshold are considered
+    /// collinear. One of the pair will be dropped based on variance or
+    /// target correlation. Default: 0.99
+    pub fn with_collinearity_threshold(mut self, threshold: f32) -> Self {
+        self.collinearity_threshold = threshold;
         self
     }
 }
@@ -172,6 +198,177 @@ impl FeatureSelector {
 
         (selected_data, selected_names, selected_indices)
     }
+
+    /// Drop collinear features from the dataset
+    ///
+    /// Identifies highly correlated feature pairs and drops one from each pair.
+    /// When target values are provided, the feature with higher target correlation
+    /// is kept. Otherwise, the feature with higher variance is kept.
+    ///
+    /// # Arguments
+    /// * `data` - Feature data (row-major)
+    /// * `num_features` - Number of features
+    /// * `feature_names` - Names of features
+    /// * `targets` - Optional target values for deciding which feature to keep
+    ///
+    /// # Returns
+    /// Tuple of (filtered_data, filtered_names, kept_indices)
+    pub fn drop_collinear_features(
+        &self,
+        data: &[f32],
+        num_features: usize,
+        feature_names: &[String],
+        targets: Option<&[f32]>,
+    ) -> (Vec<f32>, Vec<String>, Vec<usize>) {
+        if num_features <= 1 || data.is_empty() {
+            return (
+                data.to_vec(),
+                feature_names.to_vec(),
+                (0..num_features).collect(),
+            );
+        }
+
+        let num_rows = data.len() / num_features;
+        let threshold = self.config.collinearity_threshold;
+
+        // Compute feature statistics (mean, std, variance)
+        let stats: Vec<(f32, f32, f32)> = (0..num_features)
+            .map(|f| compute_feature_stats(data, num_rows, num_features, f))
+            .collect();
+
+        // Compute target correlations if targets provided
+        let target_corrs: Option<Vec<f32>> = targets.map(|t| {
+            (0..num_features)
+                .map(|f| compute_target_correlation(data, num_features, num_rows, f, t).abs())
+                .collect()
+        });
+
+        // Track which features to drop
+        let mut dropped = vec![false; num_features];
+
+        // Greedy collinearity filter: iterate over all pairs
+        for i in 0..num_features {
+            if dropped[i] {
+                continue;
+            }
+            for j in (i + 1)..num_features {
+                if dropped[j] {
+                    continue;
+                }
+
+                // Compute correlation between features i and j
+                let corr = compute_pairwise_correlation(
+                    data,
+                    num_features,
+                    num_rows,
+                    i,
+                    j,
+                    &stats[i],
+                    &stats[j],
+                );
+
+                if corr.abs() > threshold {
+                    // Decide which feature to drop based on target correlation or variance
+                    let drop_j = match &target_corrs {
+                        Some(tc) => tc[i] >= tc[j], // Keep feature with higher target corr
+                        None => stats[i].2 >= stats[j].2, // Keep feature with higher variance
+                    };
+
+                    if drop_j {
+                        dropped[j] = true;
+                    } else {
+                        dropped[i] = true;
+                        break; // Feature i dropped, stop checking its pairs
+                    }
+                }
+            }
+        }
+
+        // Extract non-dropped features
+        let kept_indices: Vec<usize> = (0..num_features)
+            .filter(|&f| !dropped[f])
+            .collect();
+
+        let kept_names: Vec<String> = kept_indices
+            .iter()
+            .filter_map(|&f| feature_names.get(f).cloned())
+            .collect();
+
+        let n_kept = kept_indices.len();
+        let mut kept_data = vec![0.0f32; num_rows * n_kept];
+
+        for (new_idx, &orig_idx) in kept_indices.iter().enumerate() {
+            for r in 0..num_rows {
+                kept_data[r * n_kept + new_idx] = data[r * num_features + orig_idx];
+            }
+        }
+
+        (kept_data, kept_names, kept_indices)
+    }
+}
+
+/// Compute mean, std, and variance of a feature column
+fn compute_feature_stats(
+    data: &[f32],
+    num_rows: usize,
+    num_features: usize,
+    feature_idx: usize,
+) -> (f32, f32, f32) {
+    if num_rows == 0 {
+        return (0.0, 1.0, 0.0);
+    }
+
+    let mean: f32 = (0..num_rows)
+        .map(|r| data[r * num_features + feature_idx])
+        .filter(|v| v.is_finite())
+        .sum::<f32>()
+        / num_rows as f32;
+
+    let variance: f32 = (0..num_rows)
+        .map(|r| {
+            let v = data[r * num_features + feature_idx];
+            if v.is_finite() {
+                let diff = v - mean;
+                diff * diff
+            } else {
+                0.0
+            }
+        })
+        .sum::<f32>()
+        / num_rows as f32;
+
+    let std = variance.sqrt().max(1e-10);
+
+    (mean, std, variance)
+}
+
+/// Compute Pearson correlation between two feature columns
+fn compute_pairwise_correlation(
+    data: &[f32],
+    num_features: usize,
+    num_rows: usize,
+    idx_a: usize,
+    idx_b: usize,
+    stats_a: &(f32, f32, f32),
+    stats_b: &(f32, f32, f32),
+) -> f32 {
+    let (mean_a, std_a, _) = stats_a;
+    let (mean_b, std_b, _) = stats_b;
+
+    let covar: f32 = (0..num_rows)
+        .map(|r| {
+            let a = data[r * num_features + idx_a];
+            let b = data[r * num_features + idx_b];
+            if a.is_finite() && b.is_finite() {
+                (a - mean_a) * (b - mean_b)
+            } else {
+                0.0
+            }
+        })
+        .sum::<f32>()
+        / num_rows as f32;
+
+    covar / (std_a * std_b)
 }
 
 /// Compute variance of a feature column
@@ -412,5 +609,177 @@ mod tests {
         let data = vec![1.0, 2.0, 3.0, 4.0];
         let var = compute_variance(&data, 4, 1, 0);
         assert!((var - 1.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_collinearity_config_defaults() {
+        let config = SelectionConfig::default();
+        assert!(!config.drop_collinear);
+        assert!((config.collinearity_threshold - 0.99).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_collinearity_config_builder() {
+        let config = SelectionConfig::new()
+            .with_drop_collinear(true)
+            .with_collinearity_threshold(0.95);
+
+        assert!(config.drop_collinear);
+        assert!((config.collinearity_threshold - 0.95).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_drop_collinear_perfect_correlation() {
+        // Feature 0: [1, 2, 3, 4]
+        // Feature 1: [2, 4, 6, 8] (perfectly correlated with feature 0, just 2x)
+        // Feature 2: [4, 3, 2, 1] (negatively correlated with feature 0)
+        let config = SelectionConfig::new().with_collinearity_threshold(0.9);
+        let selector = FeatureSelector::new(config);
+
+        let data = vec![
+            1.0, 2.0, 4.0, // row 0
+            2.0, 4.0, 3.0, // row 1
+            3.0, 6.0, 2.0, // row 2
+            4.0, 8.0, 1.0, // row 3
+        ];
+        let names = vec!["f0".to_string(), "f1".to_string(), "f2".to_string()];
+
+        let (_, kept_names, kept_indices) = selector.drop_collinear_features(&data, 3, &names, None);
+
+        // Features 0 and 1 are perfectly correlated (corr = 1.0), one should be dropped
+        // Features 0 and 2 are perfectly negatively correlated (corr = -1.0), one should be dropped
+        // Result: at most 1 feature should remain (since all are collinear)
+        assert!(kept_names.len() <= 2);
+        assert_eq!(kept_names.len(), kept_indices.len());
+    }
+
+    #[test]
+    fn test_drop_collinear_uncorrelated_features() {
+        // Three uncorrelated features
+        let config = SelectionConfig::new().with_collinearity_threshold(0.9);
+        let selector = FeatureSelector::new(config);
+
+        let data = vec![
+            1.0, 5.0, 9.0, // row 0
+            2.0, 3.0, 8.0, // row 1
+            3.0, 8.0, 2.0, // row 2
+            4.0, 1.0, 5.0, // row 3
+        ];
+        let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+        let (_, kept_names, _) = selector.drop_collinear_features(&data, 3, &names, None);
+
+        // No features should be dropped as none are highly correlated
+        assert_eq!(kept_names.len(), 3);
+    }
+
+    #[test]
+    fn test_drop_collinear_with_target() {
+        // Feature 0: [1, 2, 3, 4] - perfectly correlated with target
+        // Feature 1: [2, 4, 6, 8] - same correlation pattern (perfectly correlated with f0)
+        // When target is provided, keep the one with higher target correlation
+        let config = SelectionConfig::new().with_collinearity_threshold(0.9);
+        let selector = FeatureSelector::new(config);
+
+        let data = vec![
+            1.0, 2.0, // row 0
+            2.0, 4.0, // row 1
+            3.0, 6.0, // row 2
+            4.0, 8.0, // row 3
+        ];
+        let names = vec!["f0".to_string(), "f1".to_string()];
+        let targets = vec![1.0, 2.0, 3.0, 4.0]; // Perfectly correlated with both
+
+        let (_, kept_names, _) = selector.drop_collinear_features(&data, 2, &names, Some(&targets));
+
+        // One feature should be dropped (both have same target correlation, so first wins)
+        assert_eq!(kept_names.len(), 1);
+        assert_eq!(kept_names[0], "f0");
+    }
+
+    #[test]
+    fn test_drop_collinear_keeps_higher_variance() {
+        // Feature 0: [1, 2, 3, 4] - variance = 1.25
+        // Feature 1: [10, 20, 30, 40] - variance = 125 (same pattern, higher scale)
+        // Without target, should keep the one with higher variance
+        let config = SelectionConfig::new().with_collinearity_threshold(0.9);
+        let selector = FeatureSelector::new(config);
+
+        let data = vec![
+            1.0, 10.0, // row 0
+            2.0, 20.0, // row 1
+            3.0, 30.0, // row 2
+            4.0, 40.0, // row 3
+        ];
+        let names = vec!["low_var".to_string(), "high_var".to_string()];
+
+        let (_, kept_names, _) = selector.drop_collinear_features(&data, 2, &names, None);
+
+        // Should keep the higher variance feature
+        assert_eq!(kept_names.len(), 1);
+        assert_eq!(kept_names[0], "high_var");
+    }
+
+    #[test]
+    fn test_drop_collinear_single_feature() {
+        let config = SelectionConfig::new().with_collinearity_threshold(0.9);
+        let selector = FeatureSelector::new(config);
+
+        let data = vec![1.0, 2.0, 3.0, 4.0];
+        let names = vec!["only_one".to_string()];
+
+        let (kept_data, kept_names, kept_indices) =
+            selector.drop_collinear_features(&data, 1, &names, None);
+
+        // Single feature should remain unchanged
+        assert_eq!(kept_data, data);
+        assert_eq!(kept_names, names);
+        assert_eq!(kept_indices, vec![0]);
+    }
+
+    #[test]
+    fn test_drop_collinear_empty_input() {
+        let config = SelectionConfig::new().with_collinearity_threshold(0.9);
+        let selector = FeatureSelector::new(config);
+
+        let (kept_data, kept_names, kept_indices) =
+            selector.drop_collinear_features(&[], 0, &[], None);
+
+        assert!(kept_data.is_empty());
+        assert!(kept_names.is_empty());
+        assert!(kept_indices.is_empty());
+    }
+
+    #[test]
+    fn test_pairwise_correlation() {
+        // Feature 0: [1, 2, 3, 4], mean=2.5, std=sqrt(1.25)
+        // Feature 1: [2, 4, 6, 8], mean=5.0, std=sqrt(5.0)
+        // Covariance = ((1-2.5)(2-5) + (2-2.5)(4-5) + (3-2.5)(6-5) + (4-2.5)(8-5)) / 4
+        //            = ((-1.5)(-3) + (-0.5)(-1) + (0.5)(1) + (1.5)(3)) / 4
+        //            = (4.5 + 0.5 + 0.5 + 4.5) / 4 = 2.5
+        // Correlation = 2.5 / (sqrt(1.25) * sqrt(5.0)) = 2.5 / 2.5 = 1.0
+        let data = vec![
+            1.0, 2.0, // row 0
+            2.0, 4.0, // row 1
+            3.0, 6.0, // row 2
+            4.0, 8.0, // row 3
+        ];
+
+        let stats_0 = compute_feature_stats(&data, 4, 2, 0);
+        let stats_1 = compute_feature_stats(&data, 4, 2, 1);
+        let corr = compute_pairwise_correlation(&data, 2, 4, 0, 1, &stats_0, &stats_1);
+
+        assert!((corr - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_feature_stats() {
+        // Feature: [1, 2, 3, 4], mean=2.5, var=1.25, std=sqrt(1.25)
+        let data = vec![1.0, 2.0, 3.0, 4.0];
+        let (mean, std, var) = compute_feature_stats(&data, 4, 1, 0);
+
+        assert!((mean - 2.5).abs() < 1e-6);
+        assert!((var - 1.25).abs() < 1e-6);
+        assert!((std - 1.25f32.sqrt()).abs() < 1e-6);
     }
 }
