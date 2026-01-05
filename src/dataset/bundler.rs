@@ -254,8 +254,8 @@ impl FeatureBundler {
                 let info = dataset.feature_info(f);
                 all_bundles.push(FeatureBundle::new(
                     vec![f],
-                    &[info.num_bins],
-                    &[info.name.clone()],
+                    std::slice::from_ref(&info.num_bins),
+                    std::slice::from_ref(&info.name),
                 ));
             }
         }
@@ -425,7 +425,7 @@ impl FeatureBundler {
         let bundles: Vec<FeatureBundle> = (0..num_features)
             .map(|f| {
                 let info = dataset.feature_info(f);
-                FeatureBundle::new(vec![f], &[info.num_bins], &[info.name.clone()])
+                FeatureBundle::new(vec![f], std::slice::from_ref(&info.num_bins), std::slice::from_ref(&info.name))
             })
             .collect();
 
