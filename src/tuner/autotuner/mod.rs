@@ -2,8 +2,13 @@
 //!
 //! Provides the main `AutoTuner` struct and implementation for
 //! iterative grid search with auto-zoom.
+//!
+//! The tuner is generic over `TunableModel`, allowing it to work with
+//! different model types (GBDTModel, UniversalModel, etc.) without
+//! code duplication.
 
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -11,10 +16,10 @@ use std::time::Instant;
 use polars::prelude::*;
 use rayon::prelude::*;
 
-use crate::backend::BackendType;
-use crate::booster::{GBDTConfig, GBDTModel};
 use crate::dataset::{split_holdout, split_kfold, BinnedDataset};
 use crate::{Result, TreeBoostError};
+
+use super::traits::{ParamMapExt, TunableModel};
 
 use super::config::{
     EvalStrategy, GridStrategy, ParamBounds, ParamDef, ParameterSpace, TunerConfig, TuningMode,
@@ -36,11 +41,6 @@ use super::trial::TrialResult;
 
 /// Maximum consecutive zone switches before abandoning search
 const MAX_ZONE_SWITCH_FAILS: usize = 3;
-
-/// Minimum early stopping trees for tuner trials (lower than default for faster iteration).
-/// The default GBDTConfig uses 20 trees, but tuning needs faster feedback per trial.
-/// See `crate::booster::config::DEFAULT_MIN_EARLY_STOPPING_TREES` for the production default.
-const TUNER_MIN_EARLY_STOPPING_TREES: usize = 5;
 
 /// Binary classification threshold for F1 score computation
 const BINARY_CLASSIFICATION_THRESHOLD: f32 = 0.5;
@@ -70,15 +70,14 @@ type EvalResult = Result<EvalMetrics>;
 // Helper Functions
 // =============================================================================
 
-/// Compute evaluation metrics for a trained model
-fn compute_eval_metrics(
-    model: &GBDTModel,
+/// Compute evaluation metrics for a trained model (generic version)
+fn compute_eval_metrics<M: TunableModel>(
+    model: &M,
     train_dataset: &BinnedDataset,
     val_dataset: &BinnedDataset,
     val_targets: &[f32],
     metric: &Metric,
-    config: &GBDTConfig,
-    tuner: &AutoTuner,
+    tuner: &AutoTuner<M>,
 ) -> (f32, f32, Option<f32>, Option<f64>) {
     let train_preds = model.predict(train_dataset);
     let val_preds = model.predict(val_dataset);
@@ -86,7 +85,7 @@ fn compute_eval_metrics(
     let train_metric = metric.compute(&train_preds, train_dataset.targets());
     let val_metric = metric.compute(&val_preds, val_targets);
     let f1_score = if tuner.config.task_type.is_classification() {
-        tuner.compute_f1_score(config, &val_preds, val_targets)
+        tuner.compute_f1_score(&val_preds, val_targets)
     } else {
         None
     };
@@ -104,12 +103,28 @@ fn compute_eval_metrics(
 /// AutoTuner for hyperparameter optimization
 ///
 /// Uses an Iterative Grid Search (Auto-Zoom) approach to find optimal
-/// hyperparameters for GBDT training.
-pub struct AutoTuner {
+/// hyperparameters. Generic over `TunableModel` to support different
+/// model types (GBDTModel, UniversalModel, etc.).
+///
+/// # Type Parameters
+///
+/// * `M` - The model type to tune, must implement `TunableModel`
+///
+/// # Example
+///
+/// ```ignore
+/// use treeboost::tuner::AutoTuner;
+/// use treeboost::GBDTConfig;
+///
+/// // Tune GBDTModel (turbofish syntax)
+/// let tuner = AutoTuner::<GBDTModel>::new(GBDTConfig::default());
+/// let (best_config, history) = tuner.tune(&dataset)?;
+/// ```
+pub struct AutoTuner<M: TunableModel> {
     /// Tuner configuration
     config: TunerConfig,
-    /// Base GBDT configuration (non-tuned parameters)
-    base_config: GBDTConfig,
+    /// Base model configuration (non-tuned parameters)
+    base_config: M::Config,
     /// Search history
     history: SearchHistory,
     /// Progress callback
@@ -122,14 +137,17 @@ pub struct AutoTuner {
     raw_data: Option<std::sync::Arc<DataFrame>>,
     /// Realistic mode encoding configuration
     realistic_config: Option<RealisticModeConfig>,
+
+    /// Phantom data for generic type
+    _phantom: PhantomData<M>,
 }
 
-impl AutoTuner {
+impl<M: TunableModel> AutoTuner<M> {
     /// Create a new AutoTuner with the given base configuration
     ///
     /// The base configuration provides default values for all parameters
     /// not being tuned.
-    pub fn new(base_config: GBDTConfig) -> Self {
+    pub fn new(base_config: M::Config) -> Self {
         Self {
             config: TunerConfig::default(),
             base_config,
@@ -138,6 +156,7 @@ impl AutoTuner {
             next_trial_id: AtomicUsize::new(0),
             raw_data: None,
             realistic_config: None,
+            _phantom: PhantomData,
         }
     }
 
@@ -209,15 +228,15 @@ impl AutoTuner {
     /// * `dataset` - Pre-binned dataset (reused across all trials)
     ///
     /// # Returns
-    /// * Best GBDTConfig found and the complete search history
-    pub fn tune(&mut self, dataset: &BinnedDataset) -> Result<(GBDTConfig, SearchHistory)> {
+    /// * Best model config found and the complete search history
+    pub fn tune(&mut self, dataset: &BinnedDataset) -> Result<(M::Config, SearchHistory)> {
         // Store dataset reference for evaluation (wrapped in a temporary storage)
         // We use a simple approach: store dataset pointer and retrieve in evaluate functions
         self.run_tune_with_dataset(dataset)
     }
 
     /// Internal tune method that works with BinnedDataset
-    fn run_tune_with_dataset(&mut self, dataset: &BinnedDataset) -> Result<(GBDTConfig, SearchHistory)> {
+    fn run_tune_with_dataset(&mut self, dataset: &BinnedDataset) -> Result<(M::Config, SearchHistory)> {
         // Validate configuration
         self.config.validate().map_err(|e| {
             TreeBoostError::Config(format!("Invalid tuner configuration: {}", e))
@@ -235,9 +254,9 @@ impl AutoTuner {
             println!("  Eval strategy: {:?}", self.config.eval_strategy);
             println!("  Tuning mode: {:?}", self.config.tuning_mode);
             println!(
-                "  Parallel: {} (backend: {:?})",
+                "  Parallel: {} (gpu: {})",
                 if use_parallel { "enabled" } else { "disabled" },
-                self.base_config.backend_type
+                if self.is_gpu_backend() { "yes" } else { "no" }
             );
         }
 
@@ -323,7 +342,7 @@ impl AutoTuner {
                         // Show learning_rate from params if tuned, otherwise from base_config
                         let lr = result.params.get("learning_rate")
                             .copied()
-                            .unwrap_or(self.base_config.learning_rate);
+                            .unwrap_or(M::get_learning_rate(&self.base_config));
                         println!(
                             "  -> New best! {} (depth={}, lr={:.4}, trees={})",
                             metric_str,
@@ -451,17 +470,18 @@ impl AutoTuner {
                 }
 
                 // Build best config and train on full dataset
-                let best_gbdt_config = self.build_config(&best.params);
-                let final_model = GBDTModel::train_binned(dataset, best_gbdt_config)?;
+                let best_config = self.build_config(&best.params);
+                let final_model = M::train(dataset, &best_config)?;
 
-                // Save model in all specified formats
+                if self.config.verbose {
+                    println!("  Model trained ({} trees)", final_model.num_trees());
+                }
+
+                // Save model in requested formats
                 save_model_formats(&logger, &final_model, &self.config.save_model_formats)?;
 
                 if self.config.verbose {
-                    let formats: Vec<_> = self.config.save_model_formats.iter()
-                        .map(|f| f.extension())
-                        .collect();
-                    println!("  Model saved ({} trees) in formats: {:?}", final_model.num_trees(), formats);
+                    println!("  Model saved in {} format(s)", self.config.save_model_formats.len());
                 }
             }
 
@@ -500,7 +520,7 @@ impl AutoTuner {
         &mut self,
         df: DataFrame,
         realistic_config: RealisticModeConfig,
-    ) -> Result<(GBDTConfig, SearchHistory)> {
+    ) -> Result<(M::Config, SearchHistory)> {
         // Store raw data and config for use in evaluation
         self.raw_data = Some(std::sync::Arc::new(df));
         self.realistic_config = Some(realistic_config);
@@ -513,7 +533,7 @@ impl AutoTuner {
     }
 
     /// Internal tuning loop (shared by tune and tune_dataframe)
-    fn tune_internal(&mut self) -> Result<(GBDTConfig, SearchHistory)> {
+    fn tune_internal(&mut self) -> Result<(M::Config, SearchHistory)> {
         // Validate configuration
         self.config.validate().map_err(|e| {
             TreeBoostError::Config(format!("Invalid tuner configuration: {}", e))
@@ -534,9 +554,9 @@ impl AutoTuner {
             println!("  Eval strategy: {:?}", self.config.eval_strategy);
             println!("  Tuning mode: {:?}", self.config.tuning_mode);
             println!(
-                "  Parallel: {} (backend: {:?})",
+                "  Parallel: {} (gpu: {})",
                 if use_parallel { "enabled" } else { "disabled" },
-                self.base_config.backend_type
+                if self.is_gpu_backend() { "yes" } else { "no" }
             );
         }
 
@@ -622,7 +642,7 @@ impl AutoTuner {
                         // Show learning_rate from params if tuned, otherwise from base_config
                         let lr = result.params.get("learning_rate")
                             .copied()
-                            .unwrap_or(self.base_config.learning_rate);
+                            .unwrap_or(M::get_learning_rate(&self.base_config));
                         println!(
                             "  -> New best! {} (depth={}, lr={:.4}, trees={})",
                             metric_str,
@@ -756,17 +776,18 @@ impl AutoTuner {
                         let full_dataset = encode_full_dataset(full_df, realistic_cfg)?;
 
                         // Build best config and train
-                        let best_gbdt_config = self.build_config(&best.params);
-                        let final_model = GBDTModel::train_binned(&full_dataset, best_gbdt_config)?;
+                        let best_config = self.build_config(&best.params);
+                        let final_model = M::train(&full_dataset, &best_config)?;
 
-                        // Save model in all specified formats
+                        if self.config.verbose {
+                            println!("  Model trained ({} trees)", final_model.num_trees());
+                        }
+
+                        // Save model in requested formats
                         save_model_formats(&logger, &final_model, &self.config.save_model_formats)?;
 
                         if self.config.verbose {
-                            let formats: Vec<_> = self.config.save_model_formats.iter()
-                                .map(|f| f.extension())
-                                .collect();
-                            println!("  Model saved ({} trees) in formats: {:?}", final_model.num_trees(), formats);
+                            println!("  Model saved in {} format(s)", self.config.save_model_formats.len());
                         }
                     }
                     _ => {
@@ -960,6 +981,11 @@ impl AutoTuner {
                 values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 values.dedup();
                 values
+            }
+            ParamBounds::Categorical { values } => {
+                // Return indices for each category
+                // The index will be converted to the actual category string when applying params
+                (0..values.len()).map(|i| i as f32).collect()
             }
         }
     }
@@ -1157,26 +1183,14 @@ impl AutoTuner {
 
         let train_time_ms = start.elapsed().as_millis() as u64;
 
-        // Build full config to extract ALL params (tuned + fixed) for CSV logging
+        // Build full config and store params for CSV logging
         let full_config = self.build_config(params);
         let mut full_params = params.clone();
 
-        // Add fixed params from base_config that aren't being tuned
-        // This ensures CSV logs have complete parameter information
+        // Add learning_rate from base config if not being tuned
+        // Note: Other fixed params are model-specific and not logged for generic models
         if !full_params.contains_key("learning_rate") {
-            full_params.insert("learning_rate".into(), full_config.learning_rate);
-        }
-        if !full_params.contains_key("num_rounds") {
-            full_params.insert("num_rounds".into(), full_config.num_rounds as f32);
-        }
-        if !full_params.contains_key("colsample") {
-            full_params.insert("colsample".into(), full_config.colsample);
-        }
-        if !full_params.contains_key("min_samples_leaf") {
-            full_params.insert("min_samples_leaf".into(), full_config.min_samples_leaf as f32);
-        }
-        if !full_params.contains_key("min_gain") {
-            full_params.insert("min_gain".into(), full_config.min_gain);
+            full_params.insert("learning_rate".into(), M::get_learning_rate(&full_config));
         }
 
         Ok(TrialResult {
@@ -1221,11 +1235,10 @@ impl AutoTuner {
         // Build config with proper validation for early stopping
         // Use tuner's seed for consistency between training and evaluation splits
         let mut config = self.build_config(params);
-        config.validation_ratio = validation_ratio;
-        config.seed = self.config.seed; // Ensure same split for training and eval
+        M::configure_validation(&mut config, validation_ratio, 0);
 
-        // Train model (GBDTModel handles internal train/val split)
-        let model = GBDTModel::train_binned(dataset, config.clone())?;
+        // Train model (handles internal train/val split)
+        let model = M::train(dataset, &config)?;
 
         // Get predictions on full dataset
         // TODO: Could optimize by only predicting on validation set
@@ -1234,11 +1247,11 @@ impl AutoTuner {
 
         // Create split for evaluation (using same seed as training for consistency)
         let split = split_holdout(dataset.num_rows(), validation_ratio, 0.0, self.config.seed);
-        let metric = self.select_metric(&config);
+        let metric = self.select_metric();
 
         // Compute metrics using shared helper
         let (val_metric, train_metric, f1_score, roc_auc) = self.compute_metrics_by_indices(
-            &predictions, targets, &split.train, &split.validation, &metric, &config,
+            &predictions, targets, &split.train, &split.validation, &metric,
         );
 
         Ok((val_metric, train_metric, model.num_trees(), f1_score, roc_auc))
@@ -1255,7 +1268,7 @@ impl AutoTuner {
     ) -> EvalResult {
         let kfold = split_kfold(dataset.num_rows(), k, self.config.seed);
         let config = self.build_config(params);
-        let metric = self.select_metric(&config);
+        let metric = self.select_metric();
 
         let mut fold_results = Vec::with_capacity(k);
 
@@ -1265,13 +1278,13 @@ impl AutoTuner {
             // Train model on full dataset with internal validation
             // Note: For true K-fold, we'd need index-based training
             // Current approach: train on full data, evaluate on fold splits
-            let model = GBDTModel::train_binned(dataset, config.clone())?;
+            let model = M::train(dataset, &config)?;
             let predictions = model.predict(dataset);
             let targets = dataset.targets();
 
             // Compute metrics using shared helper
             let (val_metric, train_metric, f1_score, roc_auc) = self.compute_metrics_by_indices(
-                &predictions, targets, &train_idx, &val_idx, &metric, &config,
+                &predictions, targets, &train_idx, &val_idx, &metric,
             );
 
             fold_results.push((val_metric, train_metric, model.num_trees(), f1_score, roc_auc));
@@ -1337,54 +1350,26 @@ impl AutoTuner {
         calibration_ratio: f32,
         quantile: f32,
     ) -> EvalResult {
-        // Build config with conformal calibration
-        let mut config = self.build_config(params);
-        config.calibration_ratio = calibration_ratio;
-        config.conformal_quantile = quantile;
-
-        // Train model (this computes conformal quantile internally)
-        let model = GBDTModel::train_binned(dataset, config)?;
-
-        // O(1) metric: just read the conformal quantile
-        // Lower q = tighter intervals = better model
-        let val_metric = model.conformal_quantile().unwrap_or(f32::MAX);
-
-        // Optionally compute training MSE for reference (can skip for speed)
-        // For now, use q as both metrics (training metric is less meaningful here)
-        let train_metric = val_metric;
-
-        // For classification tasks, also compute F1 and ROC-AUC on calibration set
-        // Split dataset to get calibration targets for metrics
-        let cal_size = (dataset.num_rows() as f32 * calibration_ratio) as usize;
-        let cal_start = dataset.num_rows() - cal_size;
-        let cal_targets: Vec<f32> = dataset.targets()[cal_start..].to_vec();
-        let all_preds = model.predict(dataset);
-        let cal_preds: Vec<f32> = all_preds[cal_start..].to_vec();
-
-        let f1_score = if self.config.task_type.is_classification() {
-            self.compute_f1_score(&self.build_config(params), &cal_preds, &cal_targets)
-        } else {
-            None
-        };
-        let roc_auc = if self.config.task_type.is_binary() {
-            Some(super::metrics::compute_roc_auc(&cal_preds, &cal_targets))
-        } else {
-            None
-        };
-
-        Ok((val_metric, train_metric, model.num_trees(), f1_score, roc_auc))
+        // Conformal evaluation is currently only supported for GBDTModel
+        // TODO: Add conformal prediction support to TunableModel trait
+        let _ = (dataset, params, calibration_ratio, quantile); // Suppress warnings
+        Err(TreeBoostError::Config(
+            "Conformal evaluation is only supported for GBDTModel. \
+             Use EvalStrategy::Holdout for generic model tuning.".to_string()
+        ))
     }
 
-    /// Select appropriate metric based on loss type
-    fn select_metric(&self, config: &GBDTConfig) -> Metric {
-        use crate::booster::LossType;
+    /// Select appropriate metric based on task type
+    fn select_metric(&self) -> Metric {
+        use super::config::TaskType;
 
-        match &config.loss_type {
-            LossType::Mse => Metric::Mse,
-            LossType::PseudoHuber { .. } => Metric::Mse, // Use MSE for Pseudo-Huber
-            LossType::BinaryLogLoss => Metric::BinaryLogLoss,
-            LossType::MultiClassLogLoss { num_classes } => {
-                Metric::MultiClassLogLoss { n_classes: *num_classes }
+        match self.config.task_type {
+            TaskType::Regression => Metric::Mse,
+            TaskType::BinaryClassification => Metric::BinaryLogLoss,
+            TaskType::MultiClassClassification => {
+                // Default to 3 classes for multi-class; use MSE as primary metric
+                // since MultiClassLogLoss requires knowing the exact number of classes
+                Metric::Mse
             }
         }
     }
@@ -1402,14 +1387,11 @@ impl AutoTuner {
     /// Returns `None` for regression tasks or if predictions/targets are misaligned.
     fn compute_f1_score(
         &self,
-        config: &GBDTConfig,
         predictions: &[f32],
         targets: &[f32],
     ) -> Option<f32> {
-        use crate::booster::LossType;
-
-        // Only compute for binary classification
-        if !matches!(config.loss_type, LossType::BinaryLogLoss) {
+        // Only compute for binary classification (use TunerConfig's task_type)
+        if !self.config.task_type.is_binary() {
             return None;
         }
 
@@ -1479,19 +1461,18 @@ impl AutoTuner {
         params: &HashMap<String, f32>,
     ) -> EvalResult {
         let mut config = self.build_config(params);
-        config.validation_ratio = 0.0;
-        config.min_early_stopping_trees = TUNER_MIN_EARLY_STOPPING_TREES;
+        M::configure_validation(&mut config, 0.0, self.config.early_stopping_rounds);
 
-        let model = GBDTModel::train_binned_with_validation(
+        let model = M::train_with_validation(
             train_dataset,
             val_dataset,
             val_targets,
-            config.clone(),
+            &config,
         )?;
 
-        let metric = self.select_metric(&config);
+        let metric = self.select_metric();
         let (val_metric, train_metric, f1_score, roc_auc) =
-            compute_eval_metrics(&model, train_dataset, val_dataset, val_targets, &metric, &config, self);
+            compute_eval_metrics(&model, train_dataset, val_dataset, val_targets, &metric, self);
 
         Ok((val_metric, train_metric, model.num_trees(), f1_score, roc_auc))
     }
@@ -1500,6 +1481,8 @@ impl AutoTuner {
     ///
     /// Specialized version for conformal prediction evaluation.
     /// Uses conformal quantile as the optimization metric instead of MSE/logloss.
+    ///
+    /// Note: Conformal evaluation is currently only supported for GBDTModel.
     ///
     /// Returns: (conformal_quantile, conformal_quantile, num_trees, f1_score, roc_auc)
     fn train_and_evaluate_conformal(
@@ -1510,35 +1493,13 @@ impl AutoTuner {
         params: &HashMap<String, f32>,
         quantile: f32,
     ) -> EvalResult {
-        let mut config = self.build_config(params);
-        config.validation_ratio = 0.0;
-        config.conformal_quantile = quantile;
-
-        let model = GBDTModel::train_binned_with_validation(
-            train_dataset,
-            val_dataset,
-            val_targets,
-            config.clone(),
-        )?;
-
-        // O(1) metric: just read the conformal quantile
-        let val_metric = model.conformal_quantile().unwrap_or(f32::MAX);
-        let train_metric = val_metric;
-
-        // Compute F1 and ROC-AUC for classification tasks
-        let val_preds = model.predict(val_dataset);
-        let f1_score = if self.config.task_type.is_classification() {
-            self.compute_f1_score(&config, &val_preds, val_targets)
-        } else {
-            None
-        };
-        let roc_auc = if self.config.task_type.is_binary() {
-            Some(super::metrics::compute_roc_auc(&val_preds, val_targets))
-        } else {
-            None
-        };
-
-        Ok((val_metric, train_metric, model.num_trees(), f1_score, roc_auc))
+        // Conformal evaluation is currently only supported for GBDTModel
+        // TODO: Add conformal prediction support to TunableModel trait
+        let _ = (train_dataset, val_dataset, val_targets, params, quantile);
+        Err(TreeBoostError::Config(
+            "Conformal evaluation is only supported for GBDTModel. \
+             Use EvalStrategy::Holdout for generic model tuning.".to_string()
+        ))
     }
 
     /// Aggregate results from multiple folds
@@ -1576,7 +1537,7 @@ impl AutoTuner {
     /// Compute metrics by splitting predictions according to indices (optimistic mode)
     ///
     /// Used when training on full dataset and splitting predictions for evaluation.
-    /// Returns: (val_metric, train_metric, f1_score)
+    /// Returns: (val_metric, train_metric, f1_score, roc_auc)
     fn compute_metrics_by_indices(
         &self,
         predictions: &[f32],
@@ -1584,7 +1545,6 @@ impl AutoTuner {
         train_idx: &[usize],
         val_idx: &[usize],
         metric: &Metric,
-        config: &GBDTConfig,
     ) -> (f32, f32, Option<f32>, Option<f64>) {
         let train_preds: Vec<f32> = train_idx.iter().map(|&i| predictions[i]).collect();
         let train_targets: Vec<f32> = train_idx.iter().map(|&i| targets[i]).collect();
@@ -1595,7 +1555,7 @@ impl AutoTuner {
         let val_metric = metric.compute(&val_preds, &val_targets);
 
         let f1_score = if self.config.task_type.is_classification() {
-            self.compute_f1_score(config, &val_preds, &val_targets)
+            self.compute_f1_score(&val_preds, &val_targets)
         } else {
             None
         };
@@ -1645,18 +1605,7 @@ impl AutoTuner {
     /// concurrently on a single device, so trials must run sequentially.
     /// CPU backends (Scalar, AVX-512, SVE2) can run in parallel.
     fn is_gpu_backend(&self) -> bool {
-        match self.base_config.backend_type {
-            // GPU backends: force sequential to avoid OOM/contention
-            BackendType::Auto => true, // Auto may resolve to GPU, be conservative
-            BackendType::Wgpu => true,
-            BackendType::Cuda => true,
-            BackendType::Rocm => true,
-            BackendType::Metal => true,
-            // CPU backends: safe for parallel
-            BackendType::Scalar => false,
-            BackendType::Avx512 => false,
-            BackendType::Sve2 => false,
-        }
+        M::is_gpu_config(&self.base_config)
     }
 
     /// Evaluate candidates using parallel or sequential strategy
@@ -1929,561 +1878,39 @@ impl AutoTuner {
         self.train_and_evaluate_conformal(&train_dataset, &cal_dataset, &cal_targets, params, quantile)
     }
 
-    /// Build a GBDTConfig from parameter values
-    fn build_config(&self, params: &HashMap<String, f32>) -> GBDTConfig {
+    /// Build a model config from parameter values using the TunableModel trait
+    fn build_config(&self, params: &HashMap<String, f32>) -> M::Config {
         let mut config = self.base_config.clone();
 
-        // Apply tuned parameters
-        for (name, &value) in params {
-            match name.as_str() {
-                "max_depth" => config.max_depth = value as usize,
-                "learning_rate" => config.learning_rate = value,
-                "subsample" => config.subsample = value,
-                "colsample" => config.colsample = value,
-                "lambda" => config.lambda = value,
-                "entropy_weight" => config.entropy_weight = value,
-                "min_samples_leaf" => config.min_samples_leaf = value as usize,
-                "min_hessian_leaf" => config.min_hessian_leaf = value,
-                "min_gain" => config.min_gain = value,
-                "goss_top_rate" => config.goss_top_rate = value,
-                "goss_other_rate" => config.goss_other_rate = value,
-                _ => {} // Unknown parameter, ignore
-            }
-        }
+        // Convert f32 params to ParamValue with proper categorical handling
+        let param_values = params.to_param_values_with_space(&self.config.space);
+        M::apply_params(&mut config, &param_values);
 
         // Apply tuner-specific settings
-        config.num_rounds = self.config.num_rounds;
+        M::set_num_rounds(&mut config, self.config.num_rounds);
 
         // Apply early stopping for inner loop (individual model training)
         // Note: Conformal strategy doesn't use early stopping or validation_ratio
         // It uses calibration_ratio instead (set in evaluate_conformal)
         if self.config.early_stopping_rounds > 0 {
-            config.early_stopping_rounds = self.config.early_stopping_rounds;
-            config.validation_ratio = self.config.validation_ratio;
+            M::configure_validation(
+                &mut config,
+                self.config.validation_ratio,
+                self.config.early_stopping_rounds,
+            );
         } else {
             // No early stopping - use validation from eval strategy for metrics only
-            config.validation_ratio = match self.config.eval_strategy {
+            let validation_ratio = match self.config.eval_strategy {
                 EvalStrategy::Holdout { validation_ratio, .. } => validation_ratio,
                 EvalStrategy::Conformal { .. } => 0.0, // Conformal uses calibration_ratio instead
             };
+            M::configure_validation(&mut config, validation_ratio, 0);
         }
 
         config
     }
 }
 
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_trial_result() {
-        let mut params = HashMap::new();
-        params.insert("max_depth".into(), 6.0);
-        params.insert("learning_rate".into(), 0.1);
-
-        let result = TrialResult {
-            trial_id: 0,
-            iteration: 0,
-            params,
-            val_metric: 0.5,
-            train_metric: 0.4,
-            num_trees: 100,
-            train_time_ms: 1000,
-            f1_score: None,
-            roc_auc: None,
-        };
-
-        assert_eq!(result.trial_id, 0);
-        assert_eq!(result.val_metric, 0.5);
-    }
-
-    #[test]
-    fn test_search_history() {
-        let mut history = SearchHistory::new();
-        assert!(history.is_empty());
-
-        // Add first trial
-        let mut params1 = HashMap::new();
-        params1.insert("max_depth".into(), 6.0);
-
-        history.add(TrialResult {
-            trial_id: 0,
-            iteration: 0,
-            params: params1,
-            val_metric: 0.5,
-            train_metric: 0.4,
-            num_trees: 100,
-            train_time_ms: 1000,
-            f1_score: None,
-            roc_auc: None,
-        });
-
-        assert_eq!(history.len(), 1);
-        assert_eq!(history.best().unwrap().trial_id, 0);
-
-        // Add better trial
-        let mut params2 = HashMap::new();
-        params2.insert("max_depth".into(), 8.0);
-
-        history.add(TrialResult {
-            trial_id: 1,
-            iteration: 0,
-            params: params2,
-            val_metric: 0.3, // Better
-            train_metric: 0.25,
-            num_trees: 100,
-            train_time_ms: 1000,
-            f1_score: None,
-            roc_auc: None,
-        });
-
-        assert_eq!(history.len(), 2);
-        assert_eq!(history.best().unwrap().trial_id, 1);
-    }
-
-    #[test]
-    fn test_search_history_to_json() {
-        let mut history = SearchHistory::new();
-        let mut params = HashMap::new();
-        params.insert("max_depth".into(), 6.0);
-
-        history.add(TrialResult {
-            trial_id: 0,
-            iteration: 0,
-            params,
-            val_metric: 0.5,
-            train_metric: 0.4,
-            num_trees: 100,
-            train_time_ms: 1000,
-            f1_score: None,
-            roc_auc: None,
-        });
-
-        let json = history.to_json();
-        assert!(json.contains("\"trial_id\": 0"));
-        assert!(json.contains("\"val_metric\": 0.5"));
-        assert!(json.contains("\"best_trial_id\": 0"));
-    }
-
-    #[test]
-    fn test_autotuner_generate_param_values() {
-        let tuner = AutoTuner::new(GBDTConfig::default());
-
-        // Test continuous parameter
-        let param = ParamDef::new("test", ParamBounds::continuous(0.0, 1.0), 0.5);
-        let values = tuner.generate_param_values(&param, 0.5, 3);
-        assert_eq!(values.len(), 3);
-        assert!(values[0] < values[1]);
-        assert!(values[1] < values[2]);
-
-        // Test discrete parameter
-        let param = ParamDef::new("depth", ParamBounds::discrete(2, 10), 6.0);
-        let values = tuner.generate_param_values(&param, 0.5, 3);
-        assert!(!values.is_empty());
-        assert!(values.iter().all(|&v| v >= 2.0 && v <= 10.0));
-    }
-
-    #[test]
-    fn test_autotuner_generate_cartesian_grid() {
-        let tuner = AutoTuner::new(GBDTConfig::default())
-            .with_space(ParameterSpace::minimal());
-
-        let grid = tuner.generate_cartesian_grid(0.5, 3);
-        // 2 parameters, 3 points each = 9 candidates
-        assert_eq!(grid.len(), 9);
-
-        for candidate in &grid {
-            assert!(candidate.contains_key("max_depth"));
-            assert!(candidate.contains_key("learning_rate"));
-        }
-    }
-
-    #[test]
-    fn test_autotuner_build_config() {
-        let base = GBDTConfig::default();
-        let tuner = AutoTuner::new(base.clone());
-
-        let mut params = HashMap::new();
-        params.insert("max_depth".into(), 8.0);
-        params.insert("learning_rate".into(), 0.05);
-
-        let config = tuner.build_config(&params);
-        assert_eq!(config.max_depth, 8);
-        assert_eq!(config.learning_rate, 0.05);
-    }
-
-    #[test]
-    fn test_discrete_grid_dedup() {
-        // Test that discrete parameters with small spread don't produce duplicates
-        // If center=6 and spread is tiny, all 3 points should round to 6
-        // After dedup, we should have only 1 unique value
-        let space = ParameterSpace::new()
-            .with_param("max_depth", ParamBounds::discrete(2, 10), 6.0);
-
-        let tuner = AutoTuner::new(GBDTConfig::default())
-            .with_space(space);
-
-        // Very small spread - all values should round to 6
-        let values = tuner.generate_param_values(
-            tuner.config.space.get("max_depth").unwrap(),
-            0.01, // 1% spread around center 6
-            3,
-        );
-
-        // After dedup, there should be no duplicate values
-        let mut sorted = values.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        sorted.dedup();
-        assert_eq!(values.len(), sorted.len(), "Discrete values should be unique after dedup");
-    }
-
-    #[test]
-    fn test_grid_level_dedup() {
-        // Test that the grid itself has no duplicate candidates
-        let space = ParameterSpace::new()
-            .with_param("max_depth", ParamBounds::discrete(2, 10), 6.0)
-            .with_param("min_samples_leaf", ParamBounds::discrete(1, 10), 5.0);
-
-        let tuner = AutoTuner::new(GBDTConfig::default())
-            .with_space(space);
-
-        // Small spread - may cause duplicates before dedup
-        let grid = tuner.generate_cartesian_grid(0.05, 3);
-
-        // Check no duplicate candidates
-        let mut seen = std::collections::HashSet::new();
-        for candidate in &grid {
-            let key = format!("{:?}", candidate);
-            assert!(seen.insert(key), "Grid should have no duplicate candidates");
-        }
-    }
-
-    #[test]
-    fn test_lhs_determinism() {
-        // Same seed should produce identical samples
-        let space = ParameterSpace::new()
-            .with_param("learning_rate", ParamBounds::log_continuous(0.01, 0.5), 0.1)
-            .with_param("max_depth", ParamBounds::discrete(2, 12), 6.0);
-
-        let tuner1 = AutoTuner::new(GBDTConfig::default())
-            .with_space(space.clone())
-            .with_seed(42);
-
-        let tuner2 = AutoTuner::new(GBDTConfig::default())
-            .with_space(space)
-            .with_seed(42);
-
-        let grid1 = tuner1.generate_lhs_grid(0.5, 10);
-        let grid2 = tuner2.generate_lhs_grid(0.5, 10);
-
-        assert_eq!(grid1.len(), grid2.len());
-        for (c1, c2) in grid1.iter().zip(grid2.iter()) {
-            for key in c1.keys() {
-                assert!(
-                    (c1[key] - c2[key]).abs() < 1e-6,
-                    "LHS should be deterministic with same seed"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_lhs_sample_count() {
-        let space = ParameterSpace::new()
-            .with_param("learning_rate", ParamBounds::continuous(0.01, 0.5), 0.1)
-            .with_param("subsample", ParamBounds::continuous(0.5, 1.0), 0.8);
-
-        let tuner = AutoTuner::new(GBDTConfig::default())
-            .with_space(space)
-            .with_seed(123);
-
-        // Request 20 samples
-        let grid = tuner.generate_lhs_grid(1.0, 20);
-        assert_eq!(grid.len(), 20, "LHS should return exactly n_samples");
-
-        // Edge case: 0 samples
-        let empty = tuner.generate_lhs_grid(1.0, 0);
-        assert!(empty.is_empty(), "LHS with n_samples=0 should be empty");
-    }
-
-    #[test]
-    fn test_lhs_bounds_respected() {
-        let space = ParameterSpace::new()
-            .with_param("learning_rate", ParamBounds::continuous(0.01, 0.5), 0.1)
-            .with_param("max_depth", ParamBounds::discrete(2, 12), 6.0);
-
-        let tuner = AutoTuner::new(GBDTConfig::default())
-            .with_space(space)
-            .with_seed(999);
-
-        let grid = tuner.generate_lhs_grid(1.0, 50);
-
-        for candidate in &grid {
-            let lr = candidate["learning_rate"];
-            assert!(
-                lr >= 0.01 && lr <= 0.5,
-                "learning_rate {} out of bounds [0.01, 0.5]",
-                lr
-            );
-
-            let depth = candidate["max_depth"];
-            assert!(
-                depth >= 2.0 && depth <= 12.0,
-                "max_depth {} out of bounds [2, 12]",
-                depth
-            );
-        }
-    }
-
-    #[test]
-    fn test_lhs_stratification() {
-        // LHS should have good space-filling property
-        // Each stratum should be sampled exactly once
-        let space = ParameterSpace::new()
-            .with_param("x", ParamBounds::continuous(0.0, 1.0), 0.5);
-
-        let tuner = AutoTuner::new(GBDTConfig::default())
-            .with_space(space)
-            .with_seed(12345);
-
-        let n_samples = 10;
-        let grid = tuner.generate_lhs_grid(1.0, n_samples);
-
-        // Extract values and check stratum coverage
-        let values: Vec<f32> = grid.iter().map(|c| c["x"]).collect();
-
-        // Count how many samples fall into each stratum
-        let mut stratum_counts = vec![0; n_samples];
-        for &v in &values {
-            let stratum = (v * n_samples as f32).floor() as usize;
-            let stratum = stratum.min(n_samples - 1); // Handle edge case of v = 1.0
-            stratum_counts[stratum] += 1;
-        }
-
-        // Each stratum should have exactly one sample
-        for (i, &count) in stratum_counts.iter().enumerate() {
-            assert_eq!(
-                count, 1,
-                "Stratum {} should have exactly 1 sample, got {}",
-                i, count
-            );
-        }
-    }
-
-    #[test]
-    fn test_random_determinism() {
-        let space = ParameterSpace::new()
-            .with_param("learning_rate", ParamBounds::log_continuous(0.01, 0.5), 0.1)
-            .with_param("lambda", ParamBounds::continuous(0.0, 10.0), 1.0);
-
-        let tuner1 = AutoTuner::new(GBDTConfig::default())
-            .with_space(space.clone())
-            .with_seed(42);
-
-        let tuner2 = AutoTuner::new(GBDTConfig::default())
-            .with_space(space)
-            .with_seed(42);
-
-        let grid1 = tuner1.generate_random_grid(0.5, 15);
-        let grid2 = tuner2.generate_random_grid(0.5, 15);
-
-        assert_eq!(grid1.len(), grid2.len());
-        for (c1, c2) in grid1.iter().zip(grid2.iter()) {
-            for key in c1.keys() {
-                assert!(
-                    (c1[key] - c2[key]).abs() < 1e-6,
-                    "Random sampling should be deterministic with same seed"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_random_sample_count() {
-        let space = ParameterSpace::minimal();
-        let tuner = AutoTuner::new(GBDTConfig::default())
-            .with_space(space)
-            .with_seed(777);
-
-        let grid = tuner.generate_random_grid(1.0, 25);
-        assert_eq!(grid.len(), 25, "Random should return exactly n_samples");
-
-        let empty = tuner.generate_random_grid(1.0, 0);
-        assert!(empty.is_empty(), "Random with n_samples=0 should be empty");
-    }
-
-    #[test]
-    fn test_random_bounds_respected() {
-        let space = ParameterSpace::new()
-            .with_param("subsample", ParamBounds::continuous(0.5, 1.0), 0.8)
-            .with_param("entropy_weight", ParamBounds::continuous(0.0, 0.5), 0.1);
-
-        let tuner = AutoTuner::new(GBDTConfig::default())
-            .with_space(space)
-            .with_seed(888);
-
-        let grid = tuner.generate_random_grid(1.0, 100);
-
-        for candidate in &grid {
-            let ss = candidate["subsample"];
-            assert!(
-                ss >= 0.5 && ss <= 1.0,
-                "subsample {} out of bounds [0.5, 1.0]",
-                ss
-            );
-
-            let ew = candidate["entropy_weight"];
-            assert!(
-                ew >= 0.0 && ew <= 0.5,
-                "entropy_weight {} out of bounds [0.0, 0.5]",
-                ew
-            );
-        }
-    }
-
-    #[test]
-    fn test_different_seeds_produce_different_results() {
-        let space = ParameterSpace::minimal();
-
-        let tuner1 = AutoTuner::new(GBDTConfig::default())
-            .with_space(space.clone())
-            .with_seed(1);
-
-        let tuner2 = AutoTuner::new(GBDTConfig::default())
-            .with_space(space)
-            .with_seed(2);
-
-        let grid1 = tuner1.generate_lhs_grid(1.0, 5);
-        let grid2 = tuner2.generate_lhs_grid(1.0, 5);
-
-        // At least one value should differ
-        let mut all_same = true;
-        for (c1, c2) in grid1.iter().zip(grid2.iter()) {
-            for key in c1.keys() {
-                if (c1[key] - c2[key]).abs() > 1e-6 {
-                    all_same = false;
-                    break;
-                }
-            }
-        }
-        assert!(!all_same, "Different seeds should produce different results");
-    }
-
-    #[test]
-    fn test_log_scale_sampling() {
-        // Verify log-scale parameters are sampled uniformly in log space
-        let space = ParameterSpace::new()
-            .with_param("learning_rate", ParamBounds::log_continuous(0.001, 1.0), 0.1);
-
-        let tuner = AutoTuner::new(GBDTConfig::default())
-            .with_space(space)
-            .with_seed(42);
-
-        let grid = tuner.generate_random_grid(1.0, 1000);
-        let values: Vec<f32> = grid.iter().map(|c| c["learning_rate"]).collect();
-
-        // Count how many are below vs above geometric mean
-        let geo_mean = (0.001_f32 * 1.0).sqrt(); // ~0.0316
-        let below = values.iter().filter(|&&v| v < geo_mean).count();
-        let above = values.iter().filter(|&&v| v >= geo_mean).count();
-
-        // Should be roughly 50/50 in log space
-        let ratio = below as f32 / (below + above) as f32;
-        assert!(
-            ratio > 0.4 && ratio < 0.6,
-            "Log-scale sampling should be balanced: ratio = {}",
-            ratio
-        );
-    }
-
-    #[test]
-    fn test_spread_affects_range() {
-        let space = ParameterSpace::new()
-            .with_param("x", ParamBounds::continuous(0.0, 1.0), 0.5);
-
-        let tuner = AutoTuner::new(GBDTConfig::default())
-            .with_space(space)
-            .with_seed(42);
-
-        // Wide spread
-        let wide = tuner.generate_random_grid(1.0, 100);
-        let wide_range: f32 = wide.iter().map(|c| c["x"]).fold(0.0_f32, |a, b| a.max(b))
-            - wide.iter().map(|c| c["x"]).fold(1.0_f32, |a, b| a.min(b));
-
-        // Narrow spread
-        let narrow = tuner.generate_random_grid(0.1, 100);
-        let narrow_range: f32 = narrow.iter().map(|c| c["x"]).fold(0.0_f32, |a, b| a.max(b))
-            - narrow.iter().map(|c| c["x"]).fold(1.0_f32, |a, b| a.min(b));
-
-        assert!(
-            wide_range > narrow_range,
-            "Larger spread should produce wider range: wide={}, narrow={}",
-            wide_range, narrow_range
-        );
-    }
-
-    #[test]
-    fn test_is_gpu_backend() {
-        // Test GPU backends are detected
-        let mut config = GBDTConfig::default();
-
-        config.backend_type = BackendType::Auto;
-        let tuner = AutoTuner::new(config.clone());
-        assert!(tuner.is_gpu_backend(), "Auto should be treated as GPU (conservative)");
-
-        config.backend_type = BackendType::Wgpu;
-        let tuner = AutoTuner::new(config.clone());
-        assert!(tuner.is_gpu_backend(), "WGPU is a GPU backend");
-
-        config.backend_type = BackendType::Cuda;
-        let tuner = AutoTuner::new(config.clone());
-        assert!(tuner.is_gpu_backend(), "CUDA is a GPU backend");
-
-        // Test CPU backends are not GPU
-        config.backend_type = BackendType::Scalar;
-        let tuner = AutoTuner::new(config.clone());
-        assert!(!tuner.is_gpu_backend(), "Scalar is a CPU backend");
-
-        config.backend_type = BackendType::Avx512;
-        let tuner = AutoTuner::new(config.clone());
-        assert!(!tuner.is_gpu_backend(), "AVX-512 is a CPU backend");
-
-        config.backend_type = BackendType::Sve2;
-        let tuner = AutoTuner::new(config);
-        assert!(!tuner.is_gpu_backend(), "SVE2 is a CPU backend");
-    }
-
-    #[test]
-    fn test_parallel_config_respected() {
-        // Test that parallel_trials setting is respected
-        let mut config = GBDTConfig::default();
-        config.backend_type = BackendType::Scalar; // CPU backend
-
-        let tuner_config = TunerConfig::new()
-            .with_parallel(true)
-            .with_n_parallel(4);
-
-        let tuner = AutoTuner::new(config)
-            .with_config(tuner_config);
-
-        // Verify settings are applied
-        assert!(tuner.config().parallel_trials);
-        assert_eq!(tuner.config().n_parallel, 4);
-    }
-
-    // ==========================================================================
-    // Realistic Mode Tests
-    // ==========================================================================
-
-    #[test]
-    fn test_tuning_mode_variants() {
-        // Test that TuningMode enum works correctly
-        let optimistic = TuningMode::Optimistic;
-        let realistic = TuningMode::Realistic;
-
-        // Verify they are distinct variants
-        assert!(matches!(optimistic, TuningMode::Optimistic));
-        assert!(matches!(realistic, TuningMode::Realistic));
-    }
-}
+mod tests;

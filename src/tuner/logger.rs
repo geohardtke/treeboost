@@ -6,7 +6,6 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::booster::GBDTModel;
 use crate::{Result, TreeBoostError};
 
 use super::config::ModelFormat;
@@ -171,16 +170,20 @@ impl TrialLogger {
     }
 
     /// Save the best model in the specified format
-    pub fn save_model(&self, model: &GBDTModel, format: ModelFormat) -> Result<()> {
+    pub fn save_model<M: super::TunableModel>(&self, model: &M, format: ModelFormat) -> Result<()> {
         let path = self.run_dir.join(format.filename());
         match format {
-            ModelFormat::Rkyv => crate::serialize::save_model(model, &path),
-            ModelFormat::Bincode => crate::serialize::save_model_bincode(model, &path),
+            ModelFormat::Rkyv => model.save_rkyv(&path),
+            ModelFormat::Bincode => model.save_bincode(&path),
         }
     }
 
     /// Save the best model in all specified formats
-    pub fn save_models(&self, model: &GBDTModel, formats: &[ModelFormat]) -> Result<()> {
+    pub fn save_models<M: super::TunableModel>(
+        &self,
+        model: &M,
+        formats: &[ModelFormat],
+    ) -> Result<()> {
         for format in formats {
             self.save_model(model, *format)?;
         }
@@ -269,9 +272,9 @@ pub(crate) fn finalize_logging(
 }
 
 /// Save model in specified formats
-pub(crate) fn save_model_formats(
+pub(crate) fn save_model_formats<M: super::TunableModel>(
     logger: &Option<SharedLogger>,
-    model: &GBDTModel,
+    model: &M,
     formats: &[ModelFormat],
 ) -> Result<()> {
     if let Some(ref l) = logger {

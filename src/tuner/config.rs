@@ -75,6 +75,13 @@ pub enum ParamBounds {
         max: usize,
         step: usize,
     },
+    /// Categorical parameter with a fixed set of string values
+    ///
+    /// Used for parameters like boosting_mode where values are discrete choices.
+    /// The center is stored as an index into the values array.
+    Categorical {
+        values: Vec<String>,
+    },
 }
 
 impl ParamBounds {
@@ -106,7 +113,21 @@ impl ParamBounds {
         Self::Discrete { min, max, step }
     }
 
+    /// Create categorical bounds from string values
+    pub fn categorical(values: Vec<String>) -> Self {
+        Self::Categorical { values }
+    }
+
+    /// Create categorical bounds from str slice
+    pub fn categorical_from_strs(values: &[&str]) -> Self {
+        Self::Categorical {
+            values: values.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
     /// Clamp a value to be within bounds
+    ///
+    /// For categorical parameters, clamps to valid index range [0, len-1]
     pub fn clamp(&self, value: f32) -> f32 {
         match self {
             Self::Continuous { min, max, .. } => value.clamp(*min, *max),
@@ -115,6 +136,11 @@ impl ParamBounds {
                 // Round to nearest step
                 let steps = (clamped - min) / step;
                 (min + steps * step) as f32
+            }
+            Self::Categorical { values } => {
+                // For categorical, value is an index
+                let max_idx = values.len().saturating_sub(1);
+                (value as usize).clamp(0, max_idx) as f32
             }
         }
     }
@@ -127,6 +153,10 @@ impl ParamBounds {
                 let v = value as usize;
                 v >= *min && v <= *max
             }
+            Self::Categorical { values } => {
+                let idx = value as usize;
+                idx < values.len()
+            }
         }
     }
 
@@ -135,6 +165,7 @@ impl ParamBounds {
         match self {
             Self::Continuous { min, .. } => *min,
             Self::Discrete { min, .. } => *min as f32,
+            Self::Categorical { .. } => 0.0,
         }
     }
 
@@ -143,12 +174,42 @@ impl ParamBounds {
         match self {
             Self::Continuous { max, .. } => *max,
             Self::Discrete { max, .. } => *max as f32,
+            Self::Categorical { values } => values.len().saturating_sub(1) as f32,
         }
     }
 
     /// Check if this uses log scaling
     pub fn is_log_scale(&self) -> bool {
         matches!(self, Self::Continuous { log_scale: true, .. })
+    }
+
+    /// Check if this is a categorical parameter
+    pub fn is_categorical(&self) -> bool {
+        matches!(self, Self::Categorical { .. })
+    }
+
+    /// Get categorical values (if categorical)
+    pub fn categorical_values(&self) -> Option<&[String]> {
+        match self {
+            Self::Categorical { values } => Some(values),
+            _ => None,
+        }
+    }
+
+    /// Get categorical value by index
+    pub fn get_categorical_value(&self, index: usize) -> Option<&str> {
+        match self {
+            Self::Categorical { values } => values.get(index).map(|s| s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Get index for categorical value
+    pub fn categorical_index(&self, value: &str) -> Option<usize> {
+        match self {
+            Self::Categorical { values } => values.iter().position(|v| v == value),
+            _ => None,
+        }
     }
 }
 
@@ -282,6 +343,100 @@ impl ParameterSpace {
                     "learning_rate",
                     ParamBounds::log_continuous(0.01, 0.3),
                     0.1,
+                ),
+            ],
+        }
+    }
+
+    /// Create search space for UniversalModel with mode selection
+    ///
+    /// Includes boosting mode (PureTree, LinearThenTree, RandomForest) and
+    /// parameters relevant to all modes.
+    pub fn universal_model() -> Self {
+        Self {
+            params: vec![
+                // Mode selection (categorical)
+                ParamDef::new(
+                    "mode",
+                    ParamBounds::categorical_from_strs(&["PureTree", "LinearThenTree", "RandomForest"]),
+                    0.0, // PureTree is default (index 0)
+                ),
+                // Common parameters
+                ParamDef::new(
+                    "num_rounds",
+                    ParamBounds::discrete(50, 200),
+                    100.0,
+                ),
+                ParamDef::new(
+                    "learning_rate",
+                    ParamBounds::log_continuous(0.01, 0.3),
+                    0.1,
+                ),
+                ParamDef::new(
+                    "subsample",
+                    ParamBounds::continuous(0.6, 1.0),
+                    0.8,
+                ),
+                // Tree parameters
+                ParamDef::new(
+                    "tree_max_depth",
+                    ParamBounds::discrete(3, 10),
+                    6.0,
+                ),
+                ParamDef::new(
+                    "tree_lambda",
+                    ParamBounds::continuous(0.0, 10.0),
+                    1.0,
+                ),
+            ],
+        }
+    }
+
+    /// Create search space for UniversalModel focusing on mode selection only
+    ///
+    /// Use this when you want to find the best mode without tuning other parameters.
+    pub fn universal_mode_only() -> Self {
+        Self {
+            params: vec![
+                ParamDef::new(
+                    "mode",
+                    ParamBounds::categorical_from_strs(&["PureTree", "LinearThenTree", "RandomForest"]),
+                    0.0,
+                ),
+            ],
+        }
+    }
+
+    /// Create search space for UniversalModel with LinearThenTree focus
+    ///
+    /// Includes parameters relevant to LinearThenTree mode.
+    pub fn universal_linear_then_tree() -> Self {
+        Self {
+            params: vec![
+                ParamDef::new(
+                    "num_rounds",
+                    ParamBounds::discrete(30, 150),
+                    50.0, // Fewer rounds needed with linear component
+                ),
+                ParamDef::new(
+                    "learning_rate",
+                    ParamBounds::log_continuous(0.01, 0.3),
+                    0.1,
+                ),
+                ParamDef::new(
+                    "linear_rounds",
+                    ParamBounds::discrete(5, 30),
+                    10.0,
+                ),
+                ParamDef::new(
+                    "linear_lambda",
+                    ParamBounds::log_continuous(0.01, 10.0),
+                    1.0,
+                ),
+                ParamDef::new(
+                    "tree_max_depth",
+                    ParamBounds::discrete(3, 8),
+                    5.0,
                 ),
             ],
         }
@@ -536,12 +691,25 @@ impl ParameterSpace {
                     *min = ((new_min - *min) / *step) * *step + *min;
                     *max = ((new_max - *min) / *step) * *step + *min;
                 }
+                ParamBounds::Categorical { .. } => {
+                    // Categorical bounds don't narrow - all categories remain valid
+                }
             }
 
             // Update center to be in the middle of new bounds
             let mid = match &param.bounds {
                 ParamBounds::Continuous { min, max, .. } => (*min + *max) / 2.0,
                 ParamBounds::Discrete { min, max, .. } => ((*min + *max) / 2) as f32,
+                ParamBounds::Categorical { values } => {
+                    // For categorical, center stays at index 0 (first category)
+                    // unless the current center is still valid
+                    let current = param.center as usize;
+                    if current < values.len() {
+                        current as f32
+                    } else {
+                        0.0
+                    }
+                }
             };
             param.set_center(mid);
         }
@@ -1064,7 +1232,7 @@ impl Default for TunerConfig {
             seed: 42,
             verbose: true,
             optimization_metric: OptimizationMetric::ValidationLoss,
-            task_type: TaskType::BinaryClassification,
+            task_type: TaskType::Regression,
             output_dir: None,
             save_model_formats: Vec::new(), // No model saving by default
         }

@@ -54,6 +54,7 @@ mod history;
 mod logger;
 mod metrics;
 mod realistic;
+mod traits;
 mod trial;
 
 // Re-exports from config
@@ -73,6 +74,9 @@ pub use history::{ProgressCallback, SearchHistory};
 
 // Re-exports from realistic
 pub use realistic::RealisticModeConfig;
+
+// Re-exports from traits
+pub use traits::{ParamMapExt, ParamValue, TunableModel};
 
 // Re-exports from autotuner
 pub use autotuner::AutoTuner;
