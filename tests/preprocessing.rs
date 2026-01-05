@@ -1,8 +1,9 @@
 //! Integration tests for preprocessing module
 
 use treeboost::preprocessing::{
-    FrequencyEncoder, ImputeStrategy, LabelEncoder, MinMaxScaler, OneHotEncoder, RobustScaler,
-    Scaler, SimpleImputer, StandardScaler, UnknownStrategy,
+    FrequencyEncoder, ImputeStrategy, LabelEncoder, MinMaxScaler, OneHotEncoder,
+    OutlierAction, OutlierDetector, OutlierMethod, RobustScaler, Scaler, SimpleImputer,
+    StandardScaler, TransformResult, UnknownStrategy,
 };
 
 /// Test StandardScaler end-to-end workflow
@@ -560,4 +561,235 @@ fn variance(data: &[f32]) -> f32 {
     }
     let mean: f32 = valid.iter().sum::<f32>() / valid.len() as f32;
     valid.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / valid.len() as f32
+}
+
+// ============================================================================
+// Outlier Detection Integration Tests
+// ============================================================================
+
+/// Test IQR-based outlier detection with capping
+#[test]
+fn test_outlier_iqr_cap_workflow() {
+    // Create dataset with outliers
+    let mut data: Vec<f32> = Vec::with_capacity(102 * 2);
+
+    // 100 normal values
+    for i in 0..100 {
+        data.push(i as f32); // f0: 0-99
+        data.push((i as f32 * 2.0) + 10.0); // f1: 10-208
+    }
+
+    // 2 outlier rows
+    data.push(1000.0); // f0 outlier (high)
+    data.push(100.0); // f1 normal
+    data.push(-500.0); // f0 outlier (low)
+    data.push(5000.0); // f1 outlier (high)
+
+    let mut detector = OutlierDetector::new(OutlierMethod::iqr())
+        .with_action(OutlierAction::Cap);
+
+    detector.fit(&data, 2).expect("Fit should succeed");
+
+    let names = vec!["f0".into(), "f1".into()];
+    let result = detector
+        .transform(&mut data, 2, &names)
+        .expect("Transform should succeed");
+
+    // Verify outliers were capped
+    if let TransformResult::Capped { outlier_count } = result {
+        assert!(outlier_count >= 2, "Should have capped at least 2 outliers");
+    } else {
+        panic!("Expected Capped result");
+    }
+
+    // Verify capped values are within bounds
+    for feat in 0..2 {
+        let bounds = &detector.bounds()[feat];
+        for row in 0..102 {
+            let val = data[row * 2 + feat];
+            assert!(
+                val >= bounds.lower && val <= bounds.upper,
+                "Value {} should be within bounds [{}, {}]",
+                val,
+                bounds.lower,
+                bounds.upper
+            );
+        }
+    }
+}
+
+/// Test Z-score based outlier detection with flagging
+#[test]
+fn test_outlier_zscore_flag_workflow() {
+    // Create dataset with clear outliers
+    let num_rows = 50;
+    let mut data: Vec<f32> = Vec::with_capacity(num_rows * 2);
+
+    // Normal data centered around 50
+    for i in 0..num_rows - 2 {
+        data.push(50.0 + (i as f32 % 10.0) - 5.0); // f0: 45-54
+        data.push(100.0 + (i as f32 % 5.0)); // f1: 100-104
+    }
+
+    // Add outliers (> 3σ from mean)
+    data.push(200.0); // f0 extreme outlier
+    data.push(102.0); // f1 normal
+    data.push(47.0); // f0 normal
+    data.push(500.0); // f1 extreme outlier
+
+    let mut detector = OutlierDetector::new(OutlierMethod::zscore())
+        .with_action(OutlierAction::Flag);
+
+    detector.fit(&data, 2).expect("Fit should succeed");
+
+    let names = vec!["feature_0".into(), "feature_1".into()];
+    let result = detector
+        .transform(&mut data, 2, &names)
+        .expect("Transform should succeed");
+
+    if let TransformResult::Flagged {
+        indicators,
+        indicator_names,
+    } = result
+    {
+        // Verify indicator names
+        assert_eq!(indicator_names.len(), 2);
+        assert_eq!(indicator_names[0], "feature_0_outlier");
+        assert_eq!(indicator_names[1], "feature_1_outlier");
+
+        // Count flagged outliers
+        let flagged: usize = indicators.iter().filter(|&&v| v > 0.0).count();
+        assert!(flagged >= 2, "Should flag at least 2 outliers, got {}", flagged);
+    } else {
+        panic!("Expected Flagged result");
+    }
+}
+
+/// Test outlier removal workflow
+#[test]
+fn test_outlier_remove_workflow() {
+    // Create dataset: 10 normal rows + 2 outlier rows
+    let mut data: Vec<f32> = Vec::new();
+
+    // 10 normal rows
+    for i in 0..10 {
+        data.push(i as f32 + 1.0); // f0: 1-10
+        data.push((i as f32 + 1.0) * 10.0); // f1: 10-100
+    }
+
+    // 2 outlier rows
+    data.push(1000.0); // f0 outlier
+    data.push(50.0); // f1 normal
+    data.push(5.0); // f0 normal
+    data.push(10000.0); // f1 outlier
+
+    let mut detector = OutlierDetector::new(OutlierMethod::iqr())
+        .with_action(OutlierAction::Remove);
+
+    detector.fit(&data, 2).expect("Fit should succeed");
+
+    let names = vec!["f0".into(), "f1".into()];
+    let result = detector
+        .transform(&mut data, 2, &names)
+        .expect("Transform should succeed");
+
+    if let TransformResult::Removed {
+        cleaned_data,
+        kept_indices,
+        removed_count,
+    } = result
+    {
+        // Should have removed the outlier rows
+        assert!(removed_count >= 1, "Should remove at least 1 row");
+        assert!(kept_indices.len() < 12, "Should have fewer than 12 rows");
+        assert_eq!(
+            cleaned_data.len(),
+            kept_indices.len() * 2,
+            "Cleaned data should match kept indices"
+        );
+
+        // Verify remaining data has no outliers
+        for row in 0..kept_indices.len() {
+            for feat in 0..2 {
+                let val = cleaned_data[row * 2 + feat];
+                assert!(
+                    !detector.is_outlier(val, feat),
+                    "Cleaned data should have no outliers"
+                );
+            }
+        }
+    } else {
+        panic!("Expected Removed result");
+    }
+}
+
+/// Test combining outlier detection with scaling
+#[test]
+fn test_outlier_then_scale_pipeline() {
+    // Create dataset with outliers
+    let mut data: Vec<f32> = Vec::new();
+
+    for i in 0..50 {
+        data.push(i as f32 * 2.0); // f0: 0-98
+    }
+    data.push(10000.0); // extreme outlier
+
+    // Step 1: Cap outliers
+    let mut detector = OutlierDetector::new(OutlierMethod::iqr())
+        .with_action(OutlierAction::Cap);
+    detector.fit(&data, 1).expect("Fit should succeed");
+    detector
+        .transform(&mut data, 1, &["f0".into()])
+        .expect("Transform should succeed");
+
+    // Step 2: Scale the capped data
+    let mut scaler = StandardScaler::new();
+    scaler.fit(&data, 1).expect("Fit should succeed");
+    scaler.transform(&mut data, 1).expect("Transform should succeed");
+
+    // Verify: scaled data should have reasonable values
+    for val in &data {
+        assert!(
+            val.abs() < 10.0,
+            "Scaled values should be reasonable, got {}",
+            val
+        );
+    }
+
+    // Mean should be ~0
+    let mean: f32 = data.iter().sum::<f32>() / data.len() as f32;
+    assert!(mean.abs() < 0.1, "Mean should be ~0, got {}", mean);
+}
+
+/// Test outlier detection with multifeature data
+#[test]
+fn test_outlier_multifeature() {
+    // 20 rows × 4 features
+    let num_rows = 20;
+    let num_features = 4;
+    let mut data: Vec<f32> = Vec::with_capacity(num_rows * num_features);
+
+    for i in 0..num_rows - 1 {
+        data.push(i as f32); // f0
+        data.push(i as f32 * 2.0); // f1
+        data.push(100.0 - i as f32); // f2
+        data.push((i % 5) as f32); // f3
+    }
+
+    // One row with outliers in multiple features
+    data.push(1000.0); // f0 outlier
+    data.push(5000.0); // f1 outlier
+    data.push(50.0); // f2 normal
+    data.push(2.0); // f3 normal
+
+    let mut detector = OutlierDetector::new(OutlierMethod::iqr());
+    detector.fit(&data, num_features).expect("Fit should succeed");
+
+    let counts = detector
+        .outlier_counts(&data, num_features)
+        .expect("Count should succeed");
+
+    assert_eq!(counts.len(), num_features);
+    assert!(counts[0] >= 1, "f0 should have outliers");
+    assert!(counts[1] >= 1, "f1 should have outliers");
 }

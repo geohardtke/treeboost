@@ -25,6 +25,10 @@
 //! - **EwmaGenerator**: Exponentially weighted moving average
 //! - **SeasonalGenerator**: Extract datetime components with cyclical encoding
 //!
+//! ## Outlier Detection
+//! - **OutlierDetector**: Detect and handle outliers with IQR or Z-score methods
+//!   - Actions: Cap (winsorize), Flag (indicator columns), Remove (filter rows)
+//!
 //! ## Design Philosophy
 //!
 //! All preprocessors follow the fit-transform pattern:
@@ -65,6 +69,7 @@
 
 pub mod encoding;
 pub mod imputer;
+pub mod outliers;
 pub mod pipeline;
 pub mod polars_ext;
 pub mod scaler;
@@ -73,6 +78,7 @@ pub mod transforms;
 
 pub use encoding::{FrequencyEncoder, LabelEncoder, OneHotEncoder, UnknownStrategy};
 pub use imputer::{ImputeStrategy, IndicatorImputer, SimpleImputer};
+pub use outliers::{FeatureBounds, OutlierAction, OutlierDetector, OutlierMethod, TransformResult};
 pub use pipeline::{PipelineBuilder, Preprocessor};
 pub use polars_ext::{
     column_to_f32, column_to_strings, df_column_names, df_to_features, df_to_target, features_to_df,
