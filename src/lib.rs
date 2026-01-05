@@ -43,7 +43,9 @@ pub mod ensemble;
 pub mod features;
 pub mod histogram;
 pub mod inference;
+pub mod learner;
 pub mod loss;
+pub mod model;
 pub mod monitoring;
 pub mod preprocessing;
 pub mod serialize;
@@ -64,7 +66,9 @@ pub use ensemble::{EnsembleBuilder, StackedEnsemble, MultiSeedConfig, SelectionC
 pub use features::{FeatureGenerationConfig, FeatureGenerator, FeatureSelector, PolynomialGenerator, RatioGenerator, SelectionConfig};
 pub use histogram::HistogramBuilder;
 pub use inference::Prediction;
+pub use learner::{Booster, LinearBooster, LinearConfig, TreeBooster, TreeConfig, WeakLearner};
 pub use loss::{sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, PseudoHuberLoss};
+pub use model::{BoostingMode, UniversalConfig, UniversalModel};
 pub use monitoring::{AlertLevel, CVHoldoutTracker, ShiftDetector, ShiftResult};
 pub use preprocessing::{
     FrequencyEncoder, ImputeStrategy, IndicatorImputer, LabelEncoder, MinMaxScaler, OneHotEncoder,
