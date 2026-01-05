@@ -83,7 +83,7 @@ impl GBDTModel {
     ///
     /// # Arguments
     /// * `features` - Row-major feature matrix: `features[row * num_features + feature]`
-    ///                Shape: `(num_rows, num_features)` flattened to 1D
+    ///   Shape: `(num_rows, num_features)` flattened to 1D
     /// * `num_features` - Number of features (columns)
     /// * `targets` - Target values, one per row
     /// * `config` - Training configuration
@@ -897,8 +897,8 @@ impl GBDTModel {
             tree.predict_batch_add(train_dataset, &mut predictions);
 
             // Update validation predictions using external val_dataset
-            for i in 0..val_dataset.num_rows() {
-                val_predictions[i] += tree.predict_row(val_dataset, i);
+            for (i, pred) in val_predictions.iter_mut().enumerate() {
+                *pred += tree.predict_row(val_dataset, i);
             }
 
             trees.push(tree);
@@ -1165,6 +1165,7 @@ impl GBDTModel {
     /// Uses partial sorting (select_nth_unstable) for O(n) instead of O(n log n).
     ///
     /// This version reuses pre-allocated buffers to avoid per-round allocation.
+    #[allow(clippy::too_many_arguments)]
     fn goss_sample_into(
         train_indices: &[usize],
         gradients: &mut [f32],
@@ -1324,8 +1325,8 @@ impl GBDTModel {
 
         for row_idx in 0..num_rows {
             // Cache all bins for this row
-            for f in 0..num_features {
-                row_bins[f] = dataset.get_bin(row_idx, f);
+            for (f, bin) in row_bins.iter_mut().enumerate() {
+                *bin = dataset.get_bin(row_idx, f);
             }
 
             // Traverse all trees with cached bins
@@ -1521,7 +1522,7 @@ impl GBDTModel {
     ///
     /// # Arguments
     /// * `features` - Row-major feature matrix: features[row * num_features + feature]
-    ///                Shape: (num_rows, num_features)
+    ///   Shape: (num_rows, num_features)
     ///
     /// # Returns
     /// Vector of predictions for each row

@@ -69,7 +69,7 @@ pub trait BinStorage: Sync {
 
     /// Get bytes per row in 4-bit packed format.
     fn bytes_per_row_4bit(&self) -> usize {
-        (self.num_features() + 1) / 2
+        self.num_features().div_ceil(2)
     }
 }
 
@@ -243,9 +243,9 @@ pub trait HistogramBackend: Send + Sync {
             let era = era_indices[row] as usize;
             let (g, h) = grad_hess[row];
 
-            for f in 0..num_features {
+            for (f, hist) in result[era].iter_mut().enumerate() {
                 let bin = bins.get_bin(row, f);
-                result[era][f].accumulate(bin, g, h);
+                hist.accumulate(bin, g, h);
             }
         }
 

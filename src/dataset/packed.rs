@@ -13,18 +13,15 @@ use rkyv::{Archive, Deserialize, Serialize};
 
 /// Storage mode for binned features
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum StorageMode {
     /// Standard u8 storage (256 bins max)
+    #[default]
     U8,
     /// Packed 4-bit storage (16 bins max, 2x memory savings)
     Packed4Bit,
 }
 
-impl Default for StorageMode {
-    fn default() -> Self {
-        StorageMode::U8
-    }
-}
 
 /// Packed column storing two 4-bit bins per byte
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
@@ -42,7 +39,7 @@ impl PackedColumn {
     /// Panics if any bin value exceeds 15 (4-bit max)
     pub fn from_bins(bins: &[u8]) -> Self {
         let num_rows = bins.len();
-        let packed_len = (num_rows + 1) / 2;
+        let packed_len = num_rows.div_ceil(2);
         let mut data = Vec::with_capacity(packed_len);
 
         for chunk in bins.chunks(2) {
@@ -67,7 +64,7 @@ impl PackedColumn {
         debug_assert!(row_idx < self.num_rows);
         let byte_idx = row_idx / 2;
         let byte = self.data[byte_idx];
-        if row_idx % 2 == 0 {
+        if row_idx.is_multiple_of(2) {
             byte >> 4
         } else {
             byte & 0x0F
@@ -132,7 +129,7 @@ impl PackedColumn {
         debug_assert!(buffer.len() >= count);
 
         // Fast path: if start is even and count is even, we can use SIMD directly
-        if start_row % 2 == 0 && count % 2 == 0 {
+        if start_row.is_multiple_of(2) && count.is_multiple_of(2) {
             let start_byte = start_row / 2;
             let byte_count = count / 2;
             crate::kernel::unpack_4bit(&self.data[start_byte..start_byte + byte_count], &mut buffer[..count]);
@@ -140,8 +137,8 @@ impl PackedColumn {
         }
 
         // Fallback: handle unaligned access
-        for i in 0..count {
-            buffer[i] = self.get(start_row + i);
+        for (i, buf) in buffer[..count].iter_mut().enumerate() {
+            *buf = self.get(start_row + i);
         }
     }
 
