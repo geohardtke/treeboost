@@ -67,12 +67,20 @@ impl ShiftResult {
 /// }
 /// ```
 /// Maximum number of histogram bins supported (matches u8 range from BinnedDataset)
+///
+/// Used as an upper bound for validation. Actual allocations use per-feature `num_bins`
+/// from FeatureInfo for memory efficiency.
 pub const MAX_HISTOGRAM_BINS: usize = 256;
 
 pub struct ShiftDetector {
     /// Reference feature histograms (bin counts per feature)
-    /// Uses fixed-size array matching u8 bin range from BinnedDataset
-    reference_histograms: Vec<[u32; MAX_HISTOGRAM_BINS]>,
+    ///
+    /// **Memory-efficient design**: Each histogram is dynamically sized based on
+    /// `feature_info[i].num_bins`, not fixed at 256. This saves significant memory
+    /// for datasets with fewer bins (e.g., 32 bins saves 224 × 4 = 896 bytes/feature).
+    reference_histograms: Vec<Vec<u32>>,
+    /// Actual number of bins per feature (cached from FeatureInfo for fast access)
+    bins_per_feature: Vec<usize>,
     /// Reference sample count per feature (for sample-size-aware threshold adjustment)
     reference_counts: Vec<usize>,
     /// Feature information (names and bin boundaries)
@@ -90,23 +98,48 @@ impl ShiftDetector {
     ///
     /// Pre-computes histograms from the training data for efficient
     /// comparison with inference data.
+    ///
+    /// Uses dynamic histogram sizing based on each feature's actual `num_bins`
+    /// to minimize memory usage (vs fixed 256-bin arrays).
     pub fn from_dataset(dataset: &BinnedDataset) -> Self {
         let num_features = dataset.num_features();
         let num_rows = dataset.num_rows();
+        let feature_info = dataset.all_feature_info().to_vec();
 
-        // Compute bin histograms for each feature
-        let mut reference_histograms = vec![[0u32; MAX_HISTOGRAM_BINS]; num_features];
+        // Extract actual bin counts per feature (dynamic sizing)
+        let bins_per_feature: Vec<usize> = feature_info
+            .iter()
+            .map(|info| {
+                // Use num_bins from FeatureInfo, defaulting to MAX_HISTOGRAM_BINS if 0
+                // (0 indicates unknown/unbinned data)
+                let bins = info.num_bins as usize;
+                if bins == 0 {
+                    MAX_HISTOGRAM_BINS
+                } else {
+                    bins
+                }
+            })
+            .collect();
 
+        // Allocate histograms with exact size needed per feature
+        let mut reference_histograms: Vec<Vec<u32>> = bins_per_feature
+            .iter()
+            .map(|&bins| vec![0u32; bins])
+            .collect();
+
+        // Build histograms
         #[allow(clippy::needless_range_loop)] // Direct indexing is optimal for histogram building
         for row in 0..num_rows {
             for feature in 0..num_features {
                 let bin = dataset.get_bin(row, feature) as usize;
-                reference_histograms[feature][bin] += 1;
+                // Safety: bin values are guaranteed to be < num_bins by BinnedDataset
+                if bin < reference_histograms[feature].len() {
+                    reference_histograms[feature][bin] += 1;
+                }
             }
         }
 
         let reference_counts = vec![num_rows; num_features];
-        let feature_info = dataset.all_feature_info().to_vec();
 
         let metric = Box::new(PSI::default());
         let warning_threshold = metric.warning_threshold();
@@ -114,6 +147,7 @@ impl ShiftDetector {
 
         Self {
             reference_histograms,
+            bins_per_feature,
             reference_counts,
             feature_info,
             metric,
@@ -128,6 +162,9 @@ impl ShiftDetector {
     /// * `features` - Row-major feature matrix
     /// * `num_features` - Number of features
     /// * `feature_names` - Optional feature names
+    ///
+    /// Note: Raw data uses MAX_HISTOGRAM_BINS (256) since actual bin count is unknown.
+    /// For memory efficiency with binned data, use `from_dataset` instead.
     pub fn from_raw(
         features: &[f32],
         num_features: usize,
@@ -139,9 +176,12 @@ impl ShiftDetector {
             0
         };
 
+        // For raw data without binning info, use MAX_HISTOGRAM_BINS as default
+        let bins_per_feature = vec![MAX_HISTOGRAM_BINS; num_features];
+
         // Store raw values for each feature (simplified - no binning)
         // For raw data, we'll use empty histograms and store feature stats
-        let reference_histograms = vec![[0u32; MAX_HISTOGRAM_BINS]; num_features];
+        let reference_histograms = vec![vec![0u32; MAX_HISTOGRAM_BINS]; num_features];
         let reference_counts = vec![num_rows; num_features];
 
         let feature_info: Vec<FeatureInfo> = (0..num_features)
@@ -164,6 +204,7 @@ impl ShiftDetector {
 
         Self {
             reference_histograms,
+            bins_per_feature,
             reference_counts,
             feature_info,
             metric,
@@ -221,6 +262,8 @@ impl ShiftDetector {
     /// Compares each feature's distribution in the inference data against
     /// the reference (training) distribution. Automatically adjusts thresholds
     /// based on sample size differences.
+    ///
+    /// Uses dynamic histogram sizing matching reference histograms for memory efficiency.
     pub fn check(&self, inference_data: &BinnedDataset) -> ShiftResult {
         let num_features = self.feature_info.len().min(inference_data.num_features());
         let num_rows = inference_data.num_rows();
@@ -235,13 +278,22 @@ impl ShiftDetector {
             };
         }
 
-        // Compute inference histograms
-        let mut inference_histograms = vec![[0u32; MAX_HISTOGRAM_BINS]; num_features];
+        // Compute inference histograms with dynamic sizing (matching reference)
+        let mut inference_histograms: Vec<Vec<u32>> = self
+            .bins_per_feature
+            .iter()
+            .take(num_features)
+            .map(|&bins| vec![0u32; bins])
+            .collect();
+
         #[allow(clippy::needless_range_loop)] // Direct indexing is optimal for histogram building
         for row in 0..num_rows {
             for feature in 0..num_features {
                 let bin = inference_data.get_bin(row, feature) as usize;
-                inference_histograms[feature][bin] += 1;
+                // Safety: bin values should be within range, but clamp to be safe
+                if bin < inference_histograms[feature].len() {
+                    inference_histograms[feature][bin] += 1;
+                }
             }
         }
 
@@ -263,6 +315,7 @@ impl ShiftDetector {
             }
 
             // Convert to probability distributions (normalized histograms)
+            // Only iterate over actual bins, not fixed 256
             let ref_probs: Vec<f32> = self.reference_histograms[i]
                 .iter()
                 .map(|&c| c as f32 / ref_total)
@@ -386,7 +439,8 @@ mod tests {
         }];
 
         let detector = ShiftDetector {
-            reference_histograms: vec![[0; MAX_HISTOGRAM_BINS]],
+            reference_histograms: vec![vec![0; 2]], // Dynamic sizing: only 2 bins
+            bins_per_feature: vec![2],
             reference_counts: vec![1000], // 1000 training samples
             feature_info,
             metric: Box::new(PSI::default()),
