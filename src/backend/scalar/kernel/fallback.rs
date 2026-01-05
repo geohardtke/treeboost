@@ -51,19 +51,33 @@ impl SplitCandidate {
     }
 }
 
+/// Parameters for split finding
+#[derive(Clone, Copy)]
+pub struct SplitParams {
+    pub total_gradient: f32,
+    pub total_hessian: f32,
+    pub total_count: u32,
+    pub lambda: f32,
+    pub min_samples_leaf: u32,
+    pub min_hessian_leaf: f32,
+}
+
 /// Find the best split for a histogram using scalar code
 #[inline]
 pub fn find_best_split_scalar(
     hist_grads: &[f32; 256],
     hist_hess: &[f32; 256],
     hist_counts: &[u32; 256],
-    total_gradient: f32,
-    total_hessian: f32,
-    total_count: u32,
-    lambda: f32,
-    min_samples_leaf: u32,
-    min_hessian_leaf: f32,
+    params: SplitParams,
 ) -> Option<SplitCandidate> {
+    let SplitParams {
+        total_gradient,
+        total_hessian,
+        total_count,
+        lambda,
+        min_samples_leaf,
+        min_hessian_leaf,
+    } = params;
     let mut best = SplitCandidate::default();
 
     // Parent score (constant, compute once)
@@ -131,18 +145,9 @@ pub fn find_best_split_simd(
     hist_grads: &[f32; 256],
     hist_hess: &[f32; 256],
     hist_counts: &[u32; 256],
-    total_gradient: f32,
-    total_hessian: f32,
-    total_count: u32,
-    lambda: f32,
-    min_samples_leaf: u32,
-    min_hessian_leaf: f32,
+    params: SplitParams,
 ) -> Option<SplitCandidate> {
-    find_best_split_scalar(
-        hist_grads, hist_hess, hist_counts,
-        total_gradient, total_hessian, total_count,
-        lambda, min_samples_leaf, min_hessian_leaf,
-    )
+    find_best_split_scalar(hist_grads, hist_hess, hist_counts, params)
 }
 
 // ============================================================================
@@ -170,21 +175,34 @@ pub fn unpack_4bit(packed: &[u8], output: &mut [u8]) {
 // Histogram Accumulation
 // ============================================================================
 
+/// Parameters for histogram accumulation
+pub struct HistogramAccumParams {
+    pub feature_bins: *const u8,
+    pub row_indices: *const usize,
+    pub num_rows: usize,
+    pub gradients: *const f32,
+    pub hessians: *const f32,
+    pub hist_grads: *mut f32,
+    pub hist_hess: *mut f32,
+    pub hist_counts: *mut u32,
+}
+
 /// Scalar histogram accumulation with indexed rows
 ///
 /// # Safety
 /// All pointers must be valid and properly sized.
 #[inline]
-pub unsafe fn histogram_accumulate_scalar(
-    feature_bins: *const u8,
-    row_indices: *const usize,
-    num_rows: usize,
-    gradients: *const f32,
-    hessians: *const f32,
-    hist_grads: *mut f32,
-    hist_hess: *mut f32,
-    hist_counts: *mut u32,
-) {
+pub unsafe fn histogram_accumulate_scalar(params: HistogramAccumParams) {
+    let HistogramAccumParams {
+        feature_bins,
+        row_indices,
+        num_rows,
+        gradients,
+        hessians,
+        hist_grads,
+        hist_hess,
+        hist_counts,
+    } = params;
     // 8x unrolled for better ILP (matches our current best implementation)
     let chunks = num_rows / 8;
     let remainder = num_rows % 8;
@@ -490,16 +508,16 @@ mod tests {
         let mut hist_counts = [0u32; 256];
 
         unsafe {
-            histogram_accumulate_scalar(
-                feature_bins.as_ptr(),
-                row_indices.as_ptr(),
-                10,
-                gradients.as_ptr(),
-                hessians.as_ptr(),
-                hist_grads.as_mut_ptr(),
-                hist_hess.as_mut_ptr(),
-                hist_counts.as_mut_ptr(),
-            );
+            histogram_accumulate_scalar(HistogramAccumParams {
+                feature_bins: feature_bins.as_ptr(),
+                row_indices: row_indices.as_ptr(),
+                num_rows: 10,
+                gradients: gradients.as_ptr(),
+                hessians: hessians.as_ptr(),
+                hist_grads: hist_grads.as_mut_ptr(),
+                hist_hess: hist_hess.as_mut_ptr(),
+                hist_counts: hist_counts.as_mut_ptr(),
+            });
         }
 
         // Bin 0: rows 0, 3, 6 -> grads 1+4+7=12

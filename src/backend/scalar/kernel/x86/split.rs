@@ -24,6 +24,8 @@
 //! 2. **Parallel gain**: Compute gain for 8 bins at a time using AVX2
 //! 3. **Horizontal max**: Find the maximum gain across all bins
 
+use crate::backend::scalar::kernel::fallback::SplitParams;
+
 /// Result of split finding for a single feature
 #[derive(Debug, Clone, Copy)]
 pub struct SplitCandidate {
@@ -90,13 +92,16 @@ pub fn find_best_split_scalar(
     hist_grads: &[f32; 256],
     hist_hess: &[f32; 256],
     hist_counts: &[u32; 256],
-    total_gradient: f32,
-    total_hessian: f32,
-    total_count: u32,
-    lambda: f32,
-    min_samples_leaf: u32,
-    min_hessian_leaf: f32,
+    params: SplitParams,
 ) -> Option<SplitCandidate> {
+    let SplitParams {
+        total_gradient,
+        total_hessian,
+        total_count,
+        lambda,
+        min_samples_leaf,
+        min_hessian_leaf,
+    } = params;
     let mut best = SplitCandidate::default();
 
     // Parent score (constant, compute once)
@@ -173,13 +178,16 @@ pub unsafe fn find_best_split_simd(
     hist_grads: &[f32; 256],
     hist_hess: &[f32; 256],
     hist_counts: &[u32; 256],
-    total_gradient: f32,
-    total_hessian: f32,
-    total_count: u32,
-    lambda: f32,
-    min_samples_leaf: u32,
-    min_hessian_leaf: f32,
+    params: SplitParams,
 ) -> Option<SplitCandidate> {
+    let SplitParams {
+        total_gradient,
+        total_hessian,
+        total_count,
+        lambda,
+        min_samples_leaf,
+        min_hessian_leaf,
+    } = params;
     use std::arch::x86_64::*;
 
     // Step 1: Compute prefix sums for all 256 bins
@@ -354,18 +362,9 @@ pub fn find_best_split_simd(
     hist_grads: &[f32; 256],
     hist_hess: &[f32; 256],
     hist_counts: &[u32; 256],
-    total_gradient: f32,
-    total_hessian: f32,
-    total_count: u32,
-    lambda: f32,
-    min_samples_leaf: u32,
-    min_hessian_leaf: f32,
+    params: SplitParams,
 ) -> Option<SplitCandidate> {
-    find_best_split_scalar(
-        hist_grads, hist_hess, hist_counts,
-        total_gradient, total_hessian, total_count,
-        lambda, min_samples_leaf, min_hessian_leaf,
-    )
+    find_best_split_scalar(hist_grads, hist_hess, hist_counts, params)
 }
 
 #[cfg(test)]
@@ -397,13 +396,17 @@ mod tests {
         let (grads, hess, counts) = create_test_histogram();
 
         let result = find_best_split_scalar(
-            &grads, &hess, &counts,
-            0.0,   // total gradient (balanced)
-            256.0, // total hessian
-            256,   // total count
-            0.0,   // lambda
-            1,     // min_samples_leaf
-            1.0,   // min_hessian_leaf
+            &grads,
+            &hess,
+            &counts,
+            SplitParams {
+                total_gradient: 0.0,
+                total_hessian: 256.0,
+                total_count: 256,
+                lambda: 0.0,
+                min_samples_leaf: 1,
+                min_hessian_leaf: 1.0,
+            },
         );
 
         assert!(result.is_some());
@@ -420,21 +423,22 @@ mod tests {
     fn test_simd_matches_scalar() {
         let (grads, hess, counts) = create_test_histogram();
 
-        let scalar_result = find_best_split_scalar(
-            &grads, &hess, &counts,
-            0.0, 256.0, 256,
-            1.0, 1, 1.0,
-        );
+        let params = SplitParams {
+            total_gradient: 0.0,
+            total_hessian: 256.0,
+            total_count: 256,
+            lambda: 1.0,
+            min_samples_leaf: 1,
+            min_hessian_leaf: 1.0,
+        };
+
+        let scalar_result = find_best_split_scalar(&grads, &hess, &counts, params);
 
         #[cfg(target_arch = "x86_64")]
         {
             if std::arch::is_x86_feature_detected!("avx2") {
                 let simd_result = unsafe {
-                    find_best_split_simd(
-                        &grads, &hess, &counts,
-                        0.0, 256.0, 256,
-                        1.0, 1, 1.0,
-                    )
+                    find_best_split_simd(&grads, &hess, &counts, params)
                 };
 
                 assert!(scalar_result.is_some());
@@ -468,9 +472,17 @@ mod tests {
 
         // With min_samples_leaf = 5, no valid split should exist
         let result = find_best_split_scalar(
-            &grads, &hess, &counts,
-            0.0, 2.0, 2,
-            0.0, 5, 1.0, // min_samples_leaf = 5
+            &grads,
+            &hess,
+            &counts,
+            SplitParams {
+                total_gradient: 0.0,
+                total_hessian: 2.0,
+                total_count: 2,
+                lambda: 0.0,
+                min_samples_leaf: 5,
+                min_hessian_leaf: 1.0,
+            },
         );
 
         assert!(result.is_none());
@@ -483,9 +495,17 @@ mod tests {
         let counts = [0u32; 256];
 
         let result = find_best_split_scalar(
-            &grads, &hess, &counts,
-            0.0, 0.0, 0,
-            1.0, 1, 1.0,
+            &grads,
+            &hess,
+            &counts,
+            SplitParams {
+                total_gradient: 0.0,
+                total_hessian: 0.0,
+                total_count: 0,
+                lambda: 1.0,
+                min_samples_leaf: 1,
+                min_hessian_leaf: 1.0,
+            },
         );
 
         assert!(result.is_none());
@@ -503,9 +523,17 @@ mod tests {
         counts[100] = 100;
 
         let result = find_best_split_scalar(
-            &grads, &hess, &counts,
-            10.0, 100.0, 100,
-            1.0, 1, 1.0,
+            &grads,
+            &hess,
+            &counts,
+            SplitParams {
+                total_gradient: 10.0,
+                total_hessian: 100.0,
+                total_count: 100,
+                lambda: 1.0,
+                min_samples_leaf: 1,
+                min_hessian_leaf: 1.0,
+            },
         );
 
         // No valid split since all samples are in one bin
@@ -541,18 +569,19 @@ mod tests {
             let total_right = (255 - split_point) as f32;
             let total_g = total_right - total_left;
 
-            let scalar = find_best_split_scalar(
-                &grads, &hess, &counts,
-                total_g, 256.0, 256,
-                0.0, 1, 1.0,
-            );
+            let params = SplitParams {
+                total_gradient: total_g,
+                total_hessian: 256.0,
+                total_count: 256,
+                lambda: 0.0,
+                min_samples_leaf: 1,
+                min_hessian_leaf: 1.0,
+            };
+
+            let scalar = find_best_split_scalar(&grads, &hess, &counts, params);
 
             let simd = unsafe {
-                find_best_split_simd(
-                    &grads, &hess, &counts,
-                    total_g, 256.0, 256,
-                    0.0, 1, 1.0,
-                )
+                find_best_split_simd(&grads, &hess, &counts, params)
             };
 
             assert!(scalar.is_some(), "Scalar should find split at {}", split_point);

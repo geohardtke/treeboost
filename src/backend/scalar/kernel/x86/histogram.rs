@@ -19,6 +19,8 @@
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+use crate::backend::scalar::kernel::fallback::HistogramAccumParams;
+
 /// AVX2 histogram accumulation with indexed rows
 ///
 /// Uses AVX2 gather to load 8 gradients/hessians at once, then scatters
@@ -29,17 +31,19 @@ use std::arch::x86_64::*;
 /// - All pointers must be valid and properly sized
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-pub unsafe fn histogram_accumulate_avx2(
-    feature_bins: *const u8,
-    row_indices: *const usize,
-    num_rows: usize,
-    gradients: *const f32,
-    hessians: *const f32,
-    hist_grads: *mut f32,
-    hist_hess: *mut f32,
-    hist_counts: *mut u32,
-) {
+pub unsafe fn histogram_accumulate_avx2(params: HistogramAccumParams) {
     const PREFETCH_DISTANCE: usize = 64; // Prefetch 64 iterations ahead
+
+    let HistogramAccumParams {
+        feature_bins,
+        row_indices,
+        num_rows,
+        gradients,
+        hessians,
+        hist_grads,
+        hist_hess,
+        hist_counts,
+    } = params;
 
     let chunks = num_rows / 8;
     let remainder = num_rows % 8;
@@ -341,16 +345,16 @@ mod tests {
         let mut hist_counts = [0u32; 256];
 
         unsafe {
-            histogram_accumulate_avx2(
-                feature_bins.as_ptr(),
-                row_indices.as_ptr(),
-                10,
-                gradients.as_ptr(),
-                hessians.as_ptr(),
-                hist_grads.as_mut_ptr(),
-                hist_hess.as_mut_ptr(),
-                hist_counts.as_mut_ptr(),
-            );
+            histogram_accumulate_avx2(HistogramAccumParams {
+                feature_bins: feature_bins.as_ptr(),
+                row_indices: row_indices.as_ptr(),
+                num_rows: 10,
+                gradients: gradients.as_ptr(),
+                hessians: hessians.as_ptr(),
+                hist_grads: hist_grads.as_mut_ptr(),
+                hist_hess: hist_hess.as_mut_ptr(),
+                hist_counts: hist_counts.as_mut_ptr(),
+            });
         }
 
         // Bin 0: rows 0, 3, 6 -> grads 1+4+7=12
@@ -426,16 +430,16 @@ mod tests {
         let mut hist_counts = [0u32; 256];
 
         unsafe {
-            histogram_accumulate_avx2(
-                feature_bins.as_ptr(),
-                row_indices.as_ptr(),
+            histogram_accumulate_avx2(HistogramAccumParams {
+                feature_bins: feature_bins.as_ptr(),
+                row_indices: row_indices.as_ptr(),
                 num_rows,
-                gradients.as_ptr(),
-                hessians.as_ptr(),
-                hist_grads.as_mut_ptr(),
-                hist_hess.as_mut_ptr(),
-                hist_counts.as_mut_ptr(),
-            );
+                gradients: gradients.as_ptr(),
+                hessians: hessians.as_ptr(),
+                hist_grads: hist_grads.as_mut_ptr(),
+                hist_hess: hist_hess.as_mut_ptr(),
+                hist_counts: hist_counts.as_mut_ptr(),
+            });
         }
 
         // Each bin should have ~390 or 391 rows (100000/256)

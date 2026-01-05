@@ -127,7 +127,10 @@ pub fn has_neon() -> bool {
 ///
 /// # Returns
 /// The best split candidate, or None if no valid split exists
+///
+/// Public API maintains individual parameters for backward compatibility and clarity.
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub fn find_best_split(
     hist_grads: &[f32; 256],
     hist_hess: &[f32; 256],
@@ -139,25 +142,26 @@ pub fn find_best_split(
     min_samples_leaf: u32,
     min_hessian_leaf: f32,
 ) -> Option<SplitCandidate> {
+    let params = fallback::SplitParams {
+        total_gradient,
+        total_hessian,
+        total_count,
+        lambda,
+        min_samples_leaf,
+        min_hessian_leaf,
+    };
+
     #[cfg(target_arch = "x86_64")]
     {
         if has_avx2() {
             // Safety: we just checked for AVX2 support
             return unsafe {
-                find_best_split_simd(
-                    hist_grads, hist_hess, hist_counts,
-                    total_gradient, total_hessian, total_count,
-                    lambda, min_samples_leaf, min_hessian_leaf,
-                )
+                find_best_split_simd(hist_grads, hist_hess, hist_counts, params)
             };
         }
     }
 
-    find_best_split_scalar(
-        hist_grads, hist_hess, hist_counts,
-        total_gradient, total_hessian, total_count,
-        lambda, min_samples_leaf, min_hessian_leaf,
-    )
+    find_best_split_scalar(hist_grads, hist_hess, hist_counts, params)
 }
 
 // ============================================================================
@@ -183,7 +187,10 @@ pub fn find_best_split(
 ///
 /// # Safety
 /// All pointers must be valid and properly sized.
+///
+/// Public API maintains individual pointer parameters for FFI compatibility.
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn histogram_accumulate(
     feature_bins: *const u8,
     row_indices: *const usize,
@@ -198,18 +205,28 @@ pub unsafe fn histogram_accumulate(
     {
         match simd_level() {
             SimdLevel::Avx512 | SimdLevel::Avx2 => {
-                x86::histogram_accumulate_avx2(
-                    feature_bins, row_indices, num_rows,
-                    gradients, hessians,
-                    hist_grads, hist_hess, hist_counts,
-                )
+                x86::histogram_accumulate_avx2(fallback::HistogramAccumParams {
+                    feature_bins,
+                    row_indices,
+                    num_rows,
+                    gradients,
+                    hessians,
+                    hist_grads,
+                    hist_hess,
+                    hist_counts,
+                })
             }
             _ => {
-                fallback::histogram_accumulate_scalar(
-                    feature_bins, row_indices, num_rows,
-                    gradients, hessians,
-                    hist_grads, hist_hess, hist_counts,
-                )
+                fallback::histogram_accumulate_scalar(fallback::HistogramAccumParams {
+                    feature_bins,
+                    row_indices,
+                    num_rows,
+                    gradients,
+                    hessians,
+                    hist_grads,
+                    hist_hess,
+                    hist_counts,
+                })
             }
         }
     }
@@ -218,20 +235,30 @@ pub unsafe fn histogram_accumulate(
     {
         // NEON histogram uses scalar fallback (scatter is inherently sequential)
         // NEON is used for grad/hess loading in copy_gh_interleaved
-        fallback::histogram_accumulate_scalar(
-            feature_bins, row_indices, num_rows,
-            gradients, hessians,
-            hist_grads, hist_hess, hist_counts,
-        )
+        fallback::histogram_accumulate_scalar(fallback::HistogramAccumParams {
+            feature_bins,
+            row_indices,
+            num_rows,
+            gradients,
+            hessians,
+            hist_grads,
+            hist_hess,
+            hist_counts,
+        })
     }
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        fallback::histogram_accumulate_scalar(
-            feature_bins, row_indices, num_rows,
-            gradients, hessians,
-            hist_grads, hist_hess, hist_counts,
-        )
+        fallback::histogram_accumulate_scalar(fallback::HistogramAccumParams {
+            feature_bins,
+            row_indices,
+            num_rows,
+            gradients,
+            hessians,
+            hist_grads,
+            hist_hess,
+            hist_counts,
+        })
     }
 }
 
