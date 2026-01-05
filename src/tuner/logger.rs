@@ -3,7 +3,7 @@
 //! Provides streaming CSV output and result export functionality.
 
 use std::fs::{self, File};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::booster::GBDTModel;
@@ -29,7 +29,7 @@ pub(crate) struct TrialLogger {
 
 impl TrialLogger {
     /// Create a new trial logger with timestamped run directory
-    pub fn new(output_dir: &PathBuf, param_names: Vec<String>) -> Result<Self> {
+    pub fn new(output_dir: &Path, param_names: Vec<String>) -> Result<Self> {
         // Create timestamped run directory with milliseconds to avoid collisions
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S%.3f");
         let run_dir = output_dir.join(format!("run_{}", timestamp));

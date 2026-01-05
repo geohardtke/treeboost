@@ -100,6 +100,9 @@ impl FusedHistogramBuilder {
     ///
     /// # Returns
     /// `FusedResult` containing histograms and gradient sums
+    ///
+    /// Parameters represent distinct algorithm inputs that cannot be meaningfully grouped.
+    #[allow(clippy::too_many_arguments)]
     pub fn build_root(
         &self,
         dataset: &BinnedDataset,
@@ -150,6 +153,7 @@ impl FusedHistogramBuilder {
     }
 
     /// Fused build for contiguous rows (optimized path)
+    #[allow(clippy::too_many_arguments)]
     fn build_blocked_contiguous(
         &self,
         dataset: &BinnedDataset,
@@ -298,6 +302,7 @@ impl FusedHistogramBuilder {
     }
 
     /// Fused build for indexed (non-contiguous) rows
+    #[allow(clippy::too_many_arguments)]
     fn build_blocked_indexed(
         &self,
         dataset: &BinnedDataset,
@@ -444,6 +449,7 @@ impl FusedHistogramBuilder {
     }
 
     /// Single block build for small datasets
+    #[allow(clippy::too_many_arguments)]
     fn build_single_block(
         &self,
         dataset: &BinnedDataset,
@@ -548,6 +554,7 @@ impl FusedHistogramBuilder {
     ///
     /// Only iterates non-default entries in the block, then computes
     /// the default bin by subtraction: default = total - sum(non_default)
+    #[allow(clippy::too_many_arguments)]
     fn build_sparse_histogram_block(
         hist: &mut crate::histogram::Histogram,
         sparse_col: &SparseColumn,
@@ -605,6 +612,7 @@ impl FusedHistogramBuilder {
     }
 
     /// Build histogram for a sparse feature with indexed rows
+    #[allow(clippy::too_many_arguments)]
     fn build_sparse_histogram_indexed(
         hist: &mut crate::histogram::Histogram,
         sparse_col: &SparseColumn,

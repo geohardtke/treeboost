@@ -447,6 +447,7 @@ impl HistogramBuilder {
     ///
     /// Only iterates non-default entries, then computes default bin by:
     /// `default_bin = total - sum(non_default_bins)`
+    #[allow(clippy::too_many_arguments)]
     fn build_sparse_histogram(
         hist: &mut Histogram,
         sparse_col: &SparseColumn,

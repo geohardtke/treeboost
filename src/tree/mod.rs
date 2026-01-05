@@ -8,6 +8,7 @@
 mod grow;
 mod node;
 mod split;
+#[allow(clippy::module_inception)]
 mod tree;
 
 pub use grow::TreeGrower;

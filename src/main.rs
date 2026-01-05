@@ -417,7 +417,7 @@ fn main() -> Result<()> {
                     .collect();
 
                 let json = serde_json::to_string_pretty(&results)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                    .map_err(std::io::Error::other)?;
                 std::fs::write(&output, json)?;
                 println!("Predictions with intervals saved to {:?}", output);
 
@@ -459,7 +459,7 @@ fn main() -> Result<()> {
                     .collect();
 
                 let json = serde_json::to_string_pretty(&results)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                    .map_err(std::io::Error::other)?;
                 std::fs::write(&output, json)?;
                 println!("Predictions saved to {:?}", output);
 

@@ -56,6 +56,10 @@ impl Node {
     }
 
     /// Create a new internal node
+    ///
+    /// All 9 parameters represent distinct, fundamental node properties.
+    /// Grouping them into sub-structs would increase verbosity without improving clarity.
+    #[allow(clippy::too_many_arguments)]
     pub fn internal(
         feature_idx: usize,
         bin_threshold: u8,

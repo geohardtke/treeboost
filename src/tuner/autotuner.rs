@@ -60,6 +60,12 @@ enum EvalInput<'a> {
     },
 }
 
+/// Evaluation metrics tuple: (val_metric, train_metric, num_trees, f1_score, roc_auc)
+type EvalMetrics = (f32, f32, usize, Option<f32>, Option<f64>);
+
+/// Result of model evaluation
+type EvalResult = Result<EvalMetrics>;
+
 // =============================================================================
 // Helper Functions
 // =============================================================================
@@ -1125,7 +1131,7 @@ impl AutoTuner {
         params: &HashMap<String, f32>,
         validation_ratio: f32,
         folds: usize,
-    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
+    ) -> EvalResult {
         if folds == 1 {
             self.evaluate_holdout(dataset, params, validation_ratio)
         } else {
@@ -1141,7 +1147,7 @@ impl AutoTuner {
         dataset: &BinnedDataset,
         params: &HashMap<String, f32>,
         validation_ratio: f32,
-    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
+    ) -> EvalResult {
         // Build config with proper validation for early stopping
         // Use tuner's seed for consistency between training and evaluation splits
         let mut config = self.build_config(params);
@@ -1176,7 +1182,7 @@ impl AutoTuner {
         dataset: &BinnedDataset,
         params: &HashMap<String, f32>,
         k: usize,
-    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
+    ) -> EvalResult {
         let kfold = split_kfold(dataset.num_rows(), k, self.config.seed);
         let config = self.build_config(params);
         let metric = self.select_metric(&config);
@@ -1214,7 +1220,7 @@ impl AutoTuner {
         calibration_ratio: f32,
         quantile: f32,
         folds: usize,
-    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
+    ) -> EvalResult {
         if folds == 1 {
             self.evaluate_conformal(dataset, params, calibration_ratio, quantile)
         } else {
@@ -1260,7 +1266,7 @@ impl AutoTuner {
         params: &HashMap<String, f32>,
         calibration_ratio: f32,
         quantile: f32,
-    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
+    ) -> EvalResult {
         // Build config with conformal calibration
         let mut config = self.build_config(params);
         config.calibration_ratio = calibration_ratio;
@@ -1401,7 +1407,7 @@ impl AutoTuner {
         val_dataset: &BinnedDataset,
         val_targets: &[f32],
         params: &HashMap<String, f32>,
-    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
+    ) -> EvalResult {
         let mut config = self.build_config(params);
         config.validation_ratio = 0.0;
         config.min_early_stopping_trees = TUNER_MIN_EARLY_STOPPING_TREES;
@@ -1433,7 +1439,7 @@ impl AutoTuner {
         val_targets: &[f32],
         params: &HashMap<String, f32>,
         quantile: f32,
-    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
+    ) -> EvalResult {
         let mut config = self.build_config(params);
         config.validation_ratio = 0.0;
         config.conformal_quantile = quantile;
@@ -1469,8 +1475,8 @@ impl AutoTuner {
     ///
     /// Computes average metrics across k-fold results.
     fn aggregate_fold_results(
-        results: &[(f32, f32, usize, Option<f32>, Option<f64>)],
-    ) -> (f32, f32, usize, Option<f32>, Option<f64>) {
+        results: &[EvalMetrics],
+    ) -> EvalMetrics {
         let k = results.len();
         if k == 0 {
             return (f32::MAX, f32::MAX, 0, None, None);
@@ -1732,7 +1738,7 @@ impl AutoTuner {
         params: &HashMap<String, f32>,
         validation_ratio: f32,
         folds: usize,
-    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
+    ) -> EvalResult {
         if folds == 1 {
             self.evaluate_holdout_realistic(raw_data, realistic_cfg, params, validation_ratio)
         } else {
@@ -1754,7 +1760,7 @@ impl AutoTuner {
         realistic_cfg: &RealisticModeConfig,
         params: &HashMap<String, f32>,
         validation_ratio: f32,
-    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
+    ) -> EvalResult {
         // Split data
         let split = split_holdout(raw_data.height(), validation_ratio, 0.0, self.config.seed);
         let (train_df, val_df) = split_dataframe_by_indices(raw_data, &split.train, &split.validation)?;
@@ -1774,7 +1780,7 @@ impl AutoTuner {
         realistic_cfg: &RealisticModeConfig,
         params: &HashMap<String, f32>,
         k: usize,
-    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
+    ) -> EvalResult {
         let kfold = split_kfold(raw_data.height(), k, self.config.seed);
         let mut fold_results = Vec::with_capacity(k);
 
@@ -1802,7 +1808,7 @@ impl AutoTuner {
         calibration_ratio: f32,
         quantile: f32,
         folds: usize,
-    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
+    ) -> EvalResult {
         if folds == 1 {
             self.evaluate_conformal_realistic(raw_data, realistic_cfg, params, calibration_ratio, quantile)
         } else {
@@ -1840,7 +1846,7 @@ impl AutoTuner {
         params: &HashMap<String, f32>,
         calibration_ratio: f32,
         quantile: f32,
-    ) -> Result<(f32, f32, usize, Option<f32>, Option<f64>)> {
+    ) -> EvalResult {
         // Split data
         let split = split_holdout(raw_data.height(), calibration_ratio, 0.0, self.config.seed);
         let (train_df, cal_df) = split_dataframe_by_indices(raw_data, &split.train, &split.validation)?;

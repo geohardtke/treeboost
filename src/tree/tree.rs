@@ -173,8 +173,8 @@ impl Tree {
             });
         } else {
             // Sequential for small datasets
-            for row_idx in 0..num_rows {
-                predictions[row_idx] += self.predict_row_raw_inner(features, num_features, row_idx);
+            for (row_idx, pred) in predictions.iter_mut().enumerate() {
+                *pred += self.predict_row_raw_inner(features, num_features, row_idx);
             }
         }
     }
@@ -234,8 +234,8 @@ impl Tree {
             });
         } else {
             // Sequential for small datasets
-            for row_idx in 0..num_rows {
-                predictions[row_idx] += self.predict_row_inner(dataset, row_idx);
+            for (row_idx, pred) in predictions.iter_mut().enumerate() {
+                *pred += self.predict_row_inner(dataset, row_idx);
             }
         }
     }

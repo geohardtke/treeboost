@@ -645,7 +645,7 @@ impl TreeGrower {
 
                 // Check if candidate has valid split
                 let split_info = match &candidate.split_info {
-                    Some(info) if info.is_valid() => info.clone(),
+                    Some(info) if info.is_valid() => *info,
                     _ => continue, // No valid split, try next candidate
                 };
 
@@ -991,7 +991,7 @@ impl TreeGrower {
 
             // Check if candidate has valid split
             let split_info = match &candidate.split_info {
-                Some(info) if info.is_valid() => info.clone(),
+                Some(info) if info.is_valid() => *info,
                 _ => continue,
             };
 
@@ -1192,6 +1192,7 @@ impl TreeGrower {
     ///
     /// This method provides ~40-80% speedup over separate gradient+histogram computation
     /// on large datasets (500k+ rows) by eliminating cache pollution.
+    #[allow(clippy::too_many_arguments)]
     pub fn grow_fused(
         &self,
         dataset: &BinnedDataset,
@@ -1307,7 +1308,7 @@ impl TreeGrower {
                 let candidate = candidates.pop().unwrap();
 
                 let split_info = match &candidate.split_info {
-                    Some(info) if info.is_valid() => info.clone(),
+                    Some(info) if info.is_valid() => *info,
                     _ => continue,
                 };
 

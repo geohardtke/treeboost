@@ -20,6 +20,14 @@ use crate::histogram::{
 use crate::kernel::find_best_split as kernel_find_best_split;
 use rkyv::{Archive, Deserialize, Serialize};
 
+/// Split statistics for a node partition (used in gain computation)
+#[derive(Clone, Copy)]
+struct PartitionStats {
+    gradient: f32,
+    hessian: f32,
+    count: u32,
+}
+
 /// Monotonic constraint for a feature
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -491,8 +499,10 @@ impl SplitFinder {
         total_hessian: f32,
         total_count: u32,
     ) -> Option<SplitInfo> {
-        let mut best_split = SplitInfo::default();
-        best_split.feature_idx = feature_idx;
+        let mut best_split = SplitInfo {
+            feature_idx,
+            ..Default::default()
+        };
 
         // Cumulative sums for left child
         let mut left_gradient = 0.0f32;
@@ -537,15 +547,21 @@ impl SplitFinder {
 
             // Compute gain with entropy regularization
             let gain = self.compute_gain(
-                left_gradient,
-                left_hessian,
-                right_gradient,
-                right_hessian,
-                total_gradient,
-                total_hessian,
-                left_count,
-                right_count,
-                total_count,
+                PartitionStats {
+                    gradient: left_gradient,
+                    hessian: left_hessian,
+                    count: left_count,
+                },
+                PartitionStats {
+                    gradient: right_gradient,
+                    hessian: right_hessian,
+                    count: right_count,
+                },
+                PartitionStats {
+                    gradient: total_gradient,
+                    hessian: total_hessian,
+                    count: total_count,
+                },
             );
 
             if gain > best_split.gain {
@@ -578,26 +594,20 @@ impl SplitFinder {
     /// Where H(split) = -p*log(p) - (1-p)*log(1-p), p = n_L/n
     fn compute_gain(
         &self,
-        left_g: f32,
-        left_h: f32,
-        right_g: f32,
-        right_h: f32,
-        total_g: f32,
-        total_h: f32,
-        left_count: u32,
-        right_count: u32,
-        total_count: u32,
+        left: PartitionStats,
+        right: PartitionStats,
+        total: PartitionStats,
     ) -> f32 {
         // Friedman MSE gain (standard GBDT gain)
-        let left_score = (left_g * left_g) / (left_h + self.lambda);
-        let right_score = (right_g * right_g) / (right_h + self.lambda);
-        let parent_score = (total_g * total_g) / (total_h + self.lambda);
+        let left_score = (left.gradient * left.gradient) / (left.hessian + self.lambda);
+        let right_score = (right.gradient * right.gradient) / (right.hessian + self.lambda);
+        let parent_score = (total.gradient * total.gradient) / (total.hessian + self.lambda);
 
         let standard_gain = 0.5 * (left_score + right_score - parent_score);
 
         // Add Shannon Entropy regularization if enabled
         if self.entropy_weight > 0.0 {
-            let entropy = self.split_entropy(left_count, right_count, total_count);
+            let entropy = self.split_entropy(left.count, right.count, total.count);
             standard_gain + self.entropy_weight * entropy
         } else {
             standard_gain
@@ -619,13 +629,13 @@ impl SplitFinder {
         let q = 1.0 - p;
 
         // Use safe log computation
-        let h = if p > 0.0 && q > 0.0 {
+        
+
+        if p > 0.0 && q > 0.0 {
             -(p * p.log2() + q * q.log2())
         } else {
             0.0
-        };
-
-        h
+        }
     }
 
     // ============================================================
@@ -705,8 +715,10 @@ impl SplitFinder {
         per_era_totals: &[(f32, f32, u32)],
     ) -> Option<SplitInfo> {
         let num_eras = era_histograms.num_eras();
-        let mut best_split = SplitInfo::default();
-        best_split.feature_idx = feature_idx;
+        let mut best_split = SplitInfo {
+            feature_idx,
+            ..Default::default()
+        };
 
         // Per-era cumulative sums
         let mut era_left_grads = vec![0.0f32; num_eras];
