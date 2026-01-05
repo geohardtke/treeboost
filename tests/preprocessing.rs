@@ -288,3 +288,276 @@ fn test_preprocessing_simple_imputer_strategies() {
         "Row 1, f1 should be imputed to mean"
     );
 }
+
+// ============================================================================
+// Time-Series Feature Integration Tests
+// ============================================================================
+
+use treeboost::preprocessing::{
+    EwmaGenerator, LagGenerator, NaNStrategy, RollingGenerator, RollingStat, SeasonalComponent,
+    SeasonalGenerator,
+};
+
+/// Test LagGenerator end-to-end with realistic time-series data
+#[test]
+fn test_timeseries_lag_generator_workflow() {
+    // Simulate daily stock prices for 30 days (row-major: 30 rows × 2 features)
+    let num_rows = 30;
+    let num_features = 2;
+    let mut prices: Vec<f32> = Vec::with_capacity(num_rows * num_features);
+
+    for i in 0..num_rows {
+        prices.push(100.0 + (i as f32) * 0.5 + (i as f32 * 0.3).sin() * 5.0); // Price
+        prices.push(1000.0 + (i as f32) * 100.0); // Volume
+    }
+
+    // Create lags for t-1, t-7 (daily, weekly)
+    let gen = LagGenerator::new(vec![1, 7]);
+    let lagged = gen.transform(&prices, num_features).expect("Transform should succeed");
+
+    // Output: 30 rows × 6 features (2 original + 2 lag1 + 2 lag7)
+    assert_eq!(lagged.len(), 30 * 6);
+
+    // Verify lag values at row 10
+    let row10_start = 10 * 6;
+    let original_price = prices[10 * 2]; // row 10, feature 0
+    let lag1_price = prices[9 * 2]; // row 9, feature 0
+    let lag7_price = prices[3 * 2]; // row 3, feature 0
+
+    assert_eq!(lagged[row10_start], original_price);
+    assert_eq!(lagged[row10_start + 2], lag1_price); // lag1 feat0
+    assert_eq!(lagged[row10_start + 4], lag7_price); // lag7 feat0
+
+    // First 7 rows should have NaN for lag7
+    for row in 0..7 {
+        let lag7_idx = row * 6 + 4;
+        assert!(lagged[lag7_idx].is_nan(), "Row {} lag7 should be NaN", row);
+    }
+}
+
+/// Test LagGenerator with NaN strategy options
+#[test]
+fn test_timeseries_lag_generator_nan_strategies() {
+    let data = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+
+    // Keep NaN (default)
+    let gen_keep = LagGenerator::new(vec![2]);
+    let result_keep = gen_keep.transform(&data, 1).unwrap();
+    assert!(result_keep[1].is_nan()); // row 0, lag2
+    assert!(result_keep[3].is_nan()); // row 1, lag2
+
+    // Forward fill
+    let gen_ff = LagGenerator::new(vec![2]).with_nan_strategy(NaNStrategy::ForwardFill);
+    let result_ff = gen_ff.transform(&data, 1).unwrap();
+    assert_eq!(result_ff[1], 10.0); // row 0, lag2 = first value
+    assert_eq!(result_ff[3], 10.0); // row 1, lag2 = first value
+
+    // Constant fill
+    let gen_const = LagGenerator::new(vec![2]).with_nan_strategy(NaNStrategy::constant(0.0));
+    let result_const = gen_const.transform(&data, 1).unwrap();
+    assert_eq!(result_const[1], 0.0); // row 0, lag2 = 0
+}
+
+/// Test RollingGenerator with multiple statistics
+#[test]
+fn test_timeseries_rolling_generator_workflow() {
+    // Create sample time-series data (100 rows × 1 feature)
+    let num_rows = 100;
+    let data: Vec<f32> = (0..num_rows).map(|i| 100.0 + (i as f32) * 2.0).collect();
+
+    let gen = RollingGenerator::new(5)
+        .with_stats(vec![RollingStat::Mean, RollingStat::Std, RollingStat::Min, RollingStat::Max])
+        .with_min_periods(3);
+
+    let rolled = gen.transform(&data, 1).expect("Transform should succeed");
+
+    // Output: 100 rows × 5 features (1 original + 4 stats)
+    assert_eq!(rolled.len(), 100 * 5);
+
+    // Check values at row 50 (full window available)
+    // Window: rows 46-50, values: 192, 194, 196, 198, 200
+    let row50_start = 50 * 5;
+    let expected_mean = (192.0 + 194.0 + 196.0 + 198.0 + 200.0) / 5.0; // 196.0
+    let expected_min = 192.0;
+    let expected_max = 200.0;
+
+    assert_eq!(rolled[row50_start], 200.0); // original value
+    assert!((rolled[row50_start + 1] - expected_mean).abs() < 0.01); // rolling mean
+    // std has more tolerance due to sample vs population
+    assert!((rolled[row50_start + 3] - expected_min).abs() < 0.01); // rolling min
+    assert!((rolled[row50_start + 4] - expected_max).abs() < 0.01); // rolling max
+
+    // First 2 rows should have NaN (min_periods=3)
+    assert!(rolled[1].is_nan()); // row 0, stat 0
+    assert!(rolled[6].is_nan()); // row 1, stat 0
+}
+
+/// Test EWMA generator for trend smoothing
+#[test]
+fn test_timeseries_ewma_workflow() {
+    // Noisy data with trend
+    let data: Vec<f32> = (0..50).map(|i| 10.0 * i as f32 + ((i * 7) % 13) as f32).collect();
+
+    // Create EWMA with alpha=0.3
+    let gen = EwmaGenerator::new(0.3);
+    let smoothed = gen.transform(&data, 1).expect("Transform should succeed");
+
+    assert_eq!(smoothed.len(), 50);
+
+    // Smoothed values should have less variance than original
+    let orig_var = variance(&data);
+    let smooth_var = variance(&smoothed);
+
+    assert!(
+        smooth_var < orig_var,
+        "EWMA should reduce variance: orig={}, smooth={}",
+        orig_var,
+        smooth_var
+    );
+
+    // All values should be finite
+    for &v in &smoothed {
+        assert!(v.is_finite(), "EWMA value should be finite");
+    }
+}
+
+/// Test SeasonalGenerator with realistic timestamps
+#[test]
+fn test_timeseries_seasonal_generator_workflow() {
+    // Create timestamps for one week (168 hours), hourly
+    let base_ts = 1705276800.0; // 2024-01-15 00:00:00 UTC (Monday)
+    let timestamps: Vec<f64> = (0..168)
+        .map(|h| base_ts + (h * 3600) as f64)
+        .collect();
+
+    let gen = SeasonalGenerator::new(vec![
+        SeasonalComponent::Hour,
+        SeasonalComponent::DayOfWeek,
+        SeasonalComponent::IsWeekend,
+    ]);
+
+    let features = gen.transform_timestamps(&timestamps);
+
+    // Output: 168 rows × 3 features
+    assert_eq!(features.len(), 168 * 3);
+
+    // Check hour cycles (should go 0-23 repeatedly)
+    assert_eq!(features[0], 0.0); // Hour 0
+    assert_eq!(features[12 * 3], 12.0); // Hour 12
+    assert_eq!(features[23 * 3], 23.0); // Hour 23
+    assert_eq!(features[24 * 3], 0.0); // Hour 0 (next day)
+
+    // Check day of week (Monday=0, ..., Sunday=6)
+    assert_eq!(features[1], 0.0); // Monday (first hour)
+    assert_eq!(features[24 * 3 + 1], 1.0); // Tuesday (24 hours later)
+    assert_eq!(features[5 * 24 * 3 + 1], 5.0); // Saturday (5 days later)
+
+    // Check is_weekend
+    assert_eq!(features[2], 0.0); // Monday - not weekend
+    assert_eq!(features[5 * 24 * 3 + 2], 1.0); // Saturday - weekend
+    assert_eq!(features[6 * 24 * 3 + 2], 1.0); // Sunday - weekend
+}
+
+/// Test cyclical encoding for seasonal features
+#[test]
+fn test_timeseries_seasonal_cyclical_encoding() {
+    let gen = SeasonalGenerator::new(vec![SeasonalComponent::Hour]).with_cyclical(true);
+
+    // Output should be 2 features (sin, cos) per component
+    assert_eq!(gen.num_features(), 2);
+
+    // Test specific hours
+    // Hour 0: sin(0) = 0, cos(0) = 1
+    // Hour 6: sin(π/2) = 1, cos(π/2) = 0
+    // Hour 12: sin(π) = 0, cos(π) = -1
+    // Hour 18: sin(3π/2) = -1, cos(3π/2) = 0
+
+    let base_ts = 1705276800.0; // 2024-01-15 00:00:00 UTC
+    let timestamps = vec![
+        base_ts,          // Hour 0
+        base_ts + 21600.0, // Hour 6
+        base_ts + 43200.0, // Hour 12
+        base_ts + 64800.0, // Hour 18
+    ];
+
+    let features = gen.transform_timestamps(&timestamps);
+    assert_eq!(features.len(), 8); // 4 timestamps × 2 features
+
+    // Hour 0
+    assert!(features[0].abs() < 0.01); // sin ≈ 0
+    assert!((features[1] - 1.0).abs() < 0.01); // cos ≈ 1
+
+    // Hour 6
+    assert!((features[2] - 1.0).abs() < 0.01); // sin ≈ 1
+    assert!(features[3].abs() < 0.01); // cos ≈ 0
+
+    // Hour 12
+    assert!(features[4].abs() < 0.01); // sin ≈ 0
+    assert!((features[5] + 1.0).abs() < 0.01); // cos ≈ -1
+
+    // Hour 18
+    assert!((features[6] + 1.0).abs() < 0.01); // sin ≈ -1
+    assert!(features[7].abs() < 0.01); // cos ≈ 0
+}
+
+/// Test combining time-series features for forecasting workflow
+#[test]
+fn test_timeseries_combined_feature_engineering() {
+    // Simulate 60 days of daily data
+    let num_rows = 60;
+    let data: Vec<f32> = (0..num_rows)
+        .map(|i| {
+            // Trend + weekly seasonality + noise
+            let trend = 100.0 + (i as f32) * 0.5;
+            let seasonal = 10.0 * ((i % 7) as f32 / 3.0).sin();
+            let noise = ((i * 17) % 11) as f32 - 5.0;
+            trend + seasonal + noise
+        })
+        .collect();
+
+    // Apply lag features
+    let lag_gen = LagGenerator::new(vec![1, 7]);
+    let lagged = lag_gen.transform(&data, 1).expect("Lag transform should succeed");
+
+    // Apply rolling features to lagged data (on original feature only)
+    // Note: in real workflow, you'd apply to specific columns
+    let roll_gen = RollingGenerator::new(7)
+        .with_stats(vec![RollingStat::Mean, RollingStat::Std])
+        .with_min_periods(3);
+    let rolled = roll_gen.transform(&data, 1).expect("Roll transform should succeed");
+
+    // Both should have correct number of rows
+    assert_eq!(lagged.len() / 3, num_rows); // 1 orig + 2 lags
+    assert_eq!(rolled.len() / 3, num_rows); // 1 orig + 2 stats
+
+    // After row 7, all features should be available
+    for row in 7..num_rows {
+        // Lag features
+        let lag_start = row * 3;
+        assert!(!lagged[lag_start + 1].is_nan(), "Lag1 at row {} should be valid", row);
+        assert!(!lagged[lag_start + 2].is_nan(), "Lag7 at row {} should be valid", row);
+
+        // Rolling features
+        let roll_start = row * 3;
+        assert!(
+            !rolled[roll_start + 1].is_nan(),
+            "Rolling mean at row {} should be valid",
+            row
+        );
+        assert!(
+            !rolled[roll_start + 2].is_nan(),
+            "Rolling std at row {} should be valid",
+            row
+        );
+    }
+}
+
+/// Helper function to calculate variance
+fn variance(data: &[f32]) -> f32 {
+    let valid: Vec<f32> = data.iter().filter(|x| x.is_finite()).cloned().collect();
+    if valid.is_empty() {
+        return 0.0;
+    }
+    let mean: f32 = valid.iter().sum::<f32>() / valid.len() as f32;
+    valid.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / valid.len() as f32
+}

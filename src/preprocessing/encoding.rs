@@ -55,7 +55,6 @@ use crate::{Result, TreeBoostError};
 /// FrequencyEncoder: Maps category → count (frequency) in training set
 ///
 /// Optimal for GBDTs because trees can easily split on "rare vs common" categories.
-/// Extremely effective in Kaggle competitions.
 ///
 /// # Example
 ///
@@ -524,7 +523,11 @@ impl OneHotEncoder {
 
         match self.category_to_idx.get(category) {
             Some(&idx) => {
-                let adjusted_idx = if self.drop_first { idx.saturating_sub(1) } else { idx };
+                let adjusted_idx = if self.drop_first {
+                    idx.saturating_sub(1)
+                } else {
+                    idx
+                };
                 // If drop_first and this is the first category, all zeros (it's the reference)
                 if !(self.drop_first && idx == 0) && adjusted_idx < num_cols {
                     result[adjusted_idx] = 1.0;

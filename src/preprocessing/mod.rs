@@ -19,6 +19,12 @@
 //! ## Power Transforms
 //! - **YeoJohnsonTransform**: Normalize skewed distributions (handles negatives)
 //!
+//! ## Time-Series Features
+//! - **LagGenerator**: Create lagged features (x_{t-1}, x_{t-2}, etc.)
+//! - **RollingGenerator**: Rolling statistics (mean, std, min, max, sum, median)
+//! - **EwmaGenerator**: Exponentially weighted moving average
+//! - **SeasonalGenerator**: Extract datetime components with cyclical encoding
+//!
 //! ## Design Philosophy
 //!
 //! All preprocessors follow the fit-transform pattern:
@@ -62,6 +68,7 @@ pub mod imputer;
 pub mod pipeline;
 pub mod polars_ext;
 pub mod scaler;
+pub mod timeseries;
 pub mod transforms;
 
 pub use encoding::{FrequencyEncoder, LabelEncoder, OneHotEncoder, UnknownStrategy};
@@ -72,4 +79,8 @@ pub use polars_ext::{
     is_categorical, is_numeric, series_to_f32, series_to_strings, split_by_dtype,
 };
 pub use scaler::{MinMaxScaler, RobustScaler, Scaler, StandardScaler};
+pub use timeseries::{
+    EwmaGenerator, LagGenerator, NaNStrategy, RollingGenerator, RollingStat, SeasonalComponent,
+    SeasonalGenerator,
+};
 pub use transforms::YeoJohnsonTransform;
