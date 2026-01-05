@@ -141,7 +141,8 @@ impl DataPipeline {
         target_column: &str,
         categorical_columns: Option<&[&str]>,
     ) -> Result<(BinnedDataset, PipelineState)> {
-        let df = LazyFrame::scan_parquet(path, Default::default())?.collect()?;
+        let pl_path = PlPath::new(&path.as_ref().to_string_lossy());
+        let df = LazyFrame::scan_parquet(pl_path, Default::default())?.collect()?;
         self.process_for_training(df, target_column, categorical_columns)
     }
 
@@ -252,7 +253,8 @@ impl DataPipeline {
         path: impl AsRef<Path>,
         state: &PipelineState,
     ) -> Result<BinnedDataset> {
-        let df = LazyFrame::scan_parquet(path, Default::default())?.collect()?;
+        let pl_path = PlPath::new(&path.as_ref().to_string_lossy());
+        let df = LazyFrame::scan_parquet(pl_path, Default::default())?.collect()?;
         self.process_for_inference(df, state)
     }
 

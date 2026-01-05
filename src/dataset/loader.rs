@@ -28,7 +28,8 @@ impl DatasetLoader {
         target_column: &str,
         feature_columns: Option<&[&str]>,
     ) -> Result<BinnedDataset> {
-        let df = LazyFrame::scan_parquet(path, Default::default())?
+        let pl_path = PlPath::new(&path.as_ref().to_string_lossy());
+        let df = LazyFrame::scan_parquet(pl_path, Default::default())?
             .collect()?;
         self.from_dataframe(df, target_column, feature_columns)
     }
@@ -144,13 +145,39 @@ impl DatasetLoader {
     /// Convert categorical to numeric (simple ordinal encoding)
     /// Full Ordered Target Encoding is in encoding module
     fn categorical_to_numeric(&self, series: &Series) -> Result<Vec<f64>> {
-        // Simple approach: convert to categorical and use codes
-        let cat = series
-            .cast(&DataType::Categorical(None, Default::default()))
-            .map_err(|e| TreeBoostError::Data(format!("Failed to cast to categorical: {}", e)))?;
+        // Simple ordinal encoding using a hash map
+        use std::collections::HashMap;
 
-        let physical = cat.to_physical_repr();
-        self.series_to_f64(&physical)
+        let str_series = series
+            .cast(&DataType::String)
+            .map_err(|e| TreeBoostError::Data(format!("Failed to cast to string: {}", e)))?;
+
+        let str_ca = str_series
+            .str()
+            .map_err(|e| TreeBoostError::Data(format!("Failed to get string chunked: {}", e)))?;
+
+        // Build mapping from unique values to indices
+        let mut mapping: HashMap<String, u32> = HashMap::new();
+        let mut next_idx = 0u32;
+
+        let values: Vec<f64> = str_ca
+            .into_iter()
+            .map(|opt| {
+                match opt {
+                    Some(s) => {
+                        let idx = *mapping.entry(s.to_string()).or_insert_with(|| {
+                            let idx = next_idx;
+                            next_idx += 1;
+                            idx
+                        });
+                        idx as f64
+                    }
+                    None => f64::NAN,
+                }
+            })
+            .collect();
+
+        Ok(values)
     }
 
     /// Load a Parquet file for prediction using existing bin boundaries
@@ -159,7 +186,8 @@ impl DatasetLoader {
         path: impl AsRef<Path>,
         feature_info: &[FeatureInfo],
     ) -> Result<BinnedDataset> {
-        let df = LazyFrame::scan_parquet(path, Default::default())?
+        let pl_path = PlPath::new(&path.as_ref().to_string_lossy());
+        let df = LazyFrame::scan_parquet(pl_path, Default::default())?
             .collect()?;
         self.from_dataframe_for_prediction(df, feature_info)
     }

@@ -377,7 +377,8 @@ fn main() -> Result<()> {
             let actual_targets: Option<Vec<f32>> = if let Some(ref target_col) = target {
                 use polars::prelude::*;
                 let df = if data.extension().and_then(|s| s.to_str()) == Some("parquet") {
-                    LazyFrame::scan_parquet(&data, Default::default())?.collect()?
+                    let pl_path = PlPath::new(&data.to_string_lossy());
+                    LazyFrame::scan_parquet(pl_path, Default::default())?.collect()?
                 } else {
                     CsvReadOptions::default()
                         .try_into_reader_with_file_path(Some(data.clone()))?
