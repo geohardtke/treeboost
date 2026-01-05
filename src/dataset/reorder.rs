@@ -10,8 +10,10 @@ use rkyv::{Archive, Deserialize, Serialize};
 /// Column ordering strategy
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
 #[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 pub enum OrderingStrategy {
     /// Original ordering (no reordering)
+    #[default]
     Original,
     /// Order by feature importance (most important first)
     ByImportance,
@@ -19,11 +21,6 @@ pub enum OrderingStrategy {
     ByAccessFrequency,
 }
 
-impl Default for OrderingStrategy {
-    fn default() -> Self {
-        OrderingStrategy::Original
-    }
-}
 
 /// Tracks feature access patterns during tree traversal
 #[derive(Debug, Clone)]

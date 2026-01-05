@@ -17,8 +17,10 @@ pub const DEFAULT_MIN_EARLY_STOPPING_TREES: usize = 20;
 /// Loss function type for serialization
 #[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]
 #[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 pub enum LossType {
     /// Mean Squared Error (regression)
+    #[default]
     Mse,
     /// Pseudo-Huber Loss with given delta (robust regression)
     PseudoHuber { delta: f32 },
@@ -28,11 +30,6 @@ pub enum LossType {
     MultiClassLogLoss { num_classes: usize },
 }
 
-impl Default for LossType {
-    fn default() -> Self {
-        Self::Mse
-    }
-}
 
 impl LossType {
     /// Create a boxed loss function for regression and binary classification
@@ -375,7 +372,7 @@ impl GBDTConfig {
 
     /// Enable conformal prediction
     pub fn with_conformal(mut self, calibration_ratio: f32, quantile: f32) -> Self {
-        assert!(calibration_ratio >= 0.0 && calibration_ratio < 1.0);
+        assert!((0.0..1.0).contains(&calibration_ratio));
         assert!(quantile > 0.0 && quantile < 1.0);
         self.calibration_ratio = calibration_ratio;
         self.conformal_quantile = quantile;
