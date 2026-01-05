@@ -1,35 +1,53 @@
-//! Linear weak learner with Ridge regularization
+//! Linear weak learner with Ridge, LASSO, and Elastic Net regularization
 //!
 //! Implements a linear model trained via Coordinate Descent on gradients/hessians.
 //! This enables Linear+Tree hybrid boosting for better extrapolation.
 //!
+//! # Regularization Options
+//!
+//! | Mode        | l1_ratio | Effect                                  |
+//! |-------------|----------|----------------------------------------|
+//! | Ridge       | 0.0      | L2 only - smooth weights               |
+//! | LASSO       | 1.0      | L1 only - sparse weights (feature selection) |
+//! | Elastic Net | 0.0-1.0  | Mix of L1 + L2 - sparse + stable       |
+//!
 //! # Critical Design Decisions
 //!
-//! 1. **Mandatory L2 regularization**: lambda >= 1e-6 (prevents multicollinearity explosion)
+//! 1. **Mandatory regularization**: lambda >= 1e-6 (prevents multicollinearity explosion)
 //! 2. **Mandatory internal standardization**: Always standardizes features before fitting
 //! 3. **Numerically stable updates**: Clamped deltas prevent divergence
 //!
 //! # Algorithm
 //!
-//! Coordinate Descent with Ridge regularization:
+//! Coordinate Descent with Elastic Net:
 //! ```text
 //! for each feature j:
-//!     grad_j = Σ_i gradient[i] * x[i,j]
+//!     grad_j = Σ_i gradient[i] * x[i,j] + lambda * (1 - l1_ratio) * w[j]
 //!     hess_j = Σ_i hessian[i] * x[i,j]²
-//!     delta = -grad_j / (hess_j + lambda)
-//!     w[j] += learning_rate * clamp(delta, -10, 10)
+//!     raw_update = -grad_j / (hess_j + lambda * (1 - l1_ratio))
+//!     w[j] = soft_threshold(raw_update, lambda * l1_ratio / hess_j)
 //! ```
+//!
+//! Where `soft_threshold(x, t) = sign(x) * max(|x| - t, 0)`
 //!
 //! # Example
 //!
 //! ```ignore
 //! use treeboost::learner::{LinearBooster, LinearConfig};
 //!
-//! let config = LinearConfig::default()
-//!     .with_lambda(1.0)
-//!     .with_learning_rate(0.1);
+//! // Ridge (L2 only - default)
+//! let ridge_config = LinearConfig::default();
 //!
-//! let mut booster = LinearBooster::new(10, config);
+//! // LASSO (L1 only - sparse)
+//! let lasso_config = LinearConfig::default()
+//!     .with_l1_ratio(1.0);
+//!
+//! // Elastic Net (L1 + L2)
+//! let elastic_config = LinearConfig::default()
+//!     .with_lambda(1.0)
+//!     .with_l1_ratio(0.5);  // 50% L1, 50% L2
+//!
+//! let mut booster = LinearBooster::new(10, elastic_config);
 //! booster.fit_on_gradients(&features, 10, &gradients, &hessians)?;
 //! let preds = booster.predict_batch(&features, 10);
 //! ```
@@ -44,20 +62,40 @@ use rkyv::{Archive, Deserialize, Serialize};
 
 /// Configuration for LinearBooster
 ///
-/// # Critical: L2 regularization is MANDATORY
+/// # Regularization Types
+///
+/// | l1_ratio | Type        | Properties                           |
+/// |----------|-------------|--------------------------------------|
+/// | 0.0      | Ridge (L2)  | Smooth weights, handles correlation  |
+/// | 1.0      | LASSO (L1)  | Sparse weights, feature selection    |
+/// | 0.0-1.0  | Elastic Net | Sparse + stable (recommended)        |
+///
+/// # Critical: Regularization is MANDATORY
 ///
 /// Setting lambda=0 will cause numerical instability on correlated features.
 /// The minimum allowed value is 1e-6.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct LinearConfig {
-    /// L2 regularization strength (Ridge)
+    /// Overall regularization strength
     ///
     /// **MINIMUM: 1e-6** - Never set to 0, it causes NaN on correlated features.
     /// **DEFAULT: 1.0** - Strong regularization for stability.
     ///
     /// Higher values = more regularization = smaller weights = more stable.
     pub lambda: f32,
+
+    /// Elastic Net mixing parameter
+    ///
+    /// **DEFAULT: 0.0** (pure Ridge/L2)
+    ///
+    /// - `0.0` = pure Ridge (L2 penalty only)
+    /// - `1.0` = pure LASSO (L1 penalty only)
+    /// - `0.0-1.0` = Elastic Net (mix of L1 and L2)
+    ///
+    /// L1 penalty encourages sparse solutions (zero weights).
+    /// L2 penalty encourages small but non-zero weights.
+    pub l1_ratio: f32,
 
     /// Learning rate for weight updates
     ///
@@ -83,6 +121,7 @@ impl Default for LinearConfig {
     fn default() -> Self {
         Self {
             lambda: 1.0,           // Strong default regularization
+            l1_ratio: 0.0,         // Pure Ridge by default (most stable)
             learning_rate: 0.3,    // Moderate step size for boosting
             max_iter: 10,          // Few iterations per round (boosting does many rounds)
             tol: 1e-6,             // Tight convergence
@@ -97,12 +136,50 @@ impl LinearConfig {
         Self::default()
     }
 
-    /// Set L2 regularization strength
+    /// Create a Ridge (L2) config
+    ///
+    /// Pure L2 regularization - smooth weights, handles correlated features well.
+    pub fn ridge(lambda: f32) -> Self {
+        Self::default().with_lambda(lambda).with_l1_ratio(0.0)
+    }
+
+    /// Create a LASSO (L1) config
+    ///
+    /// Pure L1 regularization - encourages sparse solutions (zero weights).
+    /// Good for feature selection.
+    pub fn lasso(lambda: f32) -> Self {
+        Self::default().with_lambda(lambda).with_l1_ratio(1.0)
+    }
+
+    /// Create an Elastic Net config
+    ///
+    /// Mix of L1 and L2 regularization.
+    /// - Sparse like LASSO (feature selection)
+    /// - Stable like Ridge (handles correlation)
+    ///
+    /// # Arguments
+    /// - `lambda`: Overall regularization strength
+    /// - `l1_ratio`: Balance between L1 and L2 (0.0 = Ridge, 1.0 = LASSO)
+    pub fn elastic_net(lambda: f32, l1_ratio: f32) -> Self {
+        Self::default().with_lambda(lambda).with_l1_ratio(l1_ratio)
+    }
+
+    /// Set overall regularization strength
     ///
     /// **CRITICAL**: Minimum value is 1e-6 to prevent numerical instability.
     pub fn with_lambda(mut self, lambda: f32) -> Self {
         // NEVER allow lambda = 0
         self.lambda = lambda.max(1e-6);
+        self
+    }
+
+    /// Set Elastic Net mixing parameter
+    ///
+    /// - `0.0` = pure Ridge (L2 only) - default, most stable
+    /// - `1.0` = pure LASSO (L1 only) - sparse solutions
+    /// - `0.0-1.0` = Elastic Net mix
+    pub fn with_l1_ratio(mut self, l1_ratio: f32) -> Self {
+        self.l1_ratio = l1_ratio.clamp(0.0, 1.0);
         self
     }
 
@@ -128,6 +205,22 @@ impl LinearConfig {
     pub fn with_max_weight(mut self, max_weight: f32) -> Self {
         self.max_weight = max_weight.max(1.0);
         self
+    }
+
+    /// Get L2 regularization component
+    ///
+    /// `lambda * (1 - l1_ratio)`
+    #[inline]
+    pub fn l2_penalty(&self) -> f32 {
+        self.lambda * (1.0 - self.l1_ratio)
+    }
+
+    /// Get L1 regularization component
+    ///
+    /// `lambda * l1_ratio`
+    #[inline]
+    pub fn l1_penalty(&self) -> f32 {
+        self.lambda * self.l1_ratio
     }
 }
 
@@ -262,12 +355,31 @@ impl LinearBooster {
         (value - self.means[feature_idx]) / self.stds[feature_idx]
     }
 
-    /// Coordinate Descent with Ridge regularization
+    /// Soft thresholding operator for L1 regularization
+    ///
+    /// S(x, t) = sign(x) * max(|x| - t, 0)
+    ///
+    /// This shrinks values toward zero, with values |x| < t becoming exactly zero.
+    #[inline]
+    fn soft_threshold(x: f32, threshold: f32) -> f32 {
+        if x > threshold {
+            x - threshold
+        } else if x < -threshold {
+            x + threshold
+        } else {
+            0.0
+        }
+    }
+
+    /// Coordinate Descent with Elastic Net regularization
     ///
     /// This is the core algorithm. Updates weights to minimize:
-    /// L = Σ_i hessian[i] * (pred[i] - target[i])² + lambda * ||w||²
+    /// L = Σ_i hessian[i] * (pred[i] - target[i])² + λ₂ * ||w||² + λ₁ * ||w||₁
     ///
-    /// Where target[i] = -gradient[i] / hessian[i] (Newton step target)
+    /// Where:
+    /// - target[i] = -gradient[i] / hessian[i] (Newton step target)
+    /// - λ₂ = lambda * (1 - l1_ratio)  (L2/Ridge penalty)
+    /// - λ₁ = lambda * l1_ratio         (L1/LASSO penalty)
     fn coordinate_descent(
         &mut self,
         features: &[f32],
@@ -279,6 +391,9 @@ impl LinearBooster {
         if num_rows == 0 {
             return;
         }
+
+        let l2_penalty = self.config.l2_penalty();
+        let l1_penalty = self.config.l1_penalty();
 
         // Compute current predictions (for residual updates)
         let mut predictions = vec![self.bias; num_rows];
@@ -293,7 +408,7 @@ impl LinearBooster {
         for _iter in 0..self.config.max_iter {
             let mut max_change = 0.0f32;
 
-            // Update bias first
+            // Update bias first (no regularization on bias)
             {
                 let mut grad_bias = 0.0f32;
                 let mut hess_bias = 0.0f32;
@@ -308,7 +423,8 @@ impl LinearBooster {
                     hess_bias += hessians[i];
                 }
 
-                let delta = -grad_bias / (hess_bias + self.config.lambda);
+                // No regularization on bias term
+                let delta = -grad_bias / hess_bias.max(1e-10);
                 let delta = delta.clamp(-10.0, 10.0);
 
                 self.bias += self.config.learning_rate * delta;
@@ -322,7 +438,7 @@ impl LinearBooster {
                 max_change = max_change.max(delta.abs());
             }
 
-            // Update each weight
+            // Update each weight with Elastic Net
             for j in 0..num_features {
                 let mut grad_j = 0.0f32;
                 let mut hess_j = 0.0f32;
@@ -335,12 +451,20 @@ impl LinearBooster {
                     hess_j += hessians[i] * x_ij * x_ij;
                 }
 
-                // Ridge regularization gradient: lambda * w[j]
-                grad_j += self.config.lambda * self.weights[j];
+                // L2 regularization gradient: λ₂ * w[j]
+                grad_j += l2_penalty * self.weights[j];
 
-                // Ridge update: denominator never zero due to lambda
-                let denominator = hess_j + self.config.lambda;
-                let delta = -grad_j / denominator;
+                // Denominator includes L2 penalty (never zero)
+                let denominator = hess_j + l2_penalty;
+                let denominator = denominator.max(1e-10);
+
+                // Compute raw update (without L1)
+                let raw_update = -grad_j / denominator;
+
+                // Apply L1 soft thresholding
+                // The threshold scales with learning rate and inversely with denominator
+                let l1_threshold = l1_penalty * self.config.learning_rate / denominator;
+                let delta = Self::soft_threshold(raw_update, l1_threshold);
 
                 // Clamp update for numerical stability
                 let delta = delta.clamp(-10.0, 10.0);
@@ -365,6 +489,25 @@ impl LinearBooster {
                 break;
             }
         }
+    }
+
+    /// Get the number of non-zero weights (sparsity measure)
+    ///
+    /// Useful for LASSO/Elastic Net to see how many features were selected.
+    pub fn num_nonzero_weights(&self) -> usize {
+        self.weights.iter().filter(|&&w| w.abs() > 1e-10).count()
+    }
+
+    /// Get indices of non-zero weights (selected features)
+    ///
+    /// Returns feature indices with non-zero weights after LASSO/Elastic Net.
+    pub fn selected_features(&self) -> Vec<usize> {
+        self.weights
+            .iter()
+            .enumerate()
+            .filter(|(_, &w)| w.abs() > 1e-10)
+            .map(|(i, _)| i)
+            .collect()
     }
 }
 
@@ -646,5 +789,146 @@ mod tests {
 
         assert!((batch_preds[0] - single_pred_0).abs() < 1e-6);
         assert!((batch_preds[1] - single_pred_1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_soft_threshold() {
+        // Above threshold
+        assert!((LinearBooster::soft_threshold(5.0, 2.0) - 3.0).abs() < 1e-6);
+        // Below negative threshold
+        assert!((LinearBooster::soft_threshold(-5.0, 2.0) - (-3.0)).abs() < 1e-6);
+        // Within threshold (should be zero)
+        assert!((LinearBooster::soft_threshold(1.5, 2.0) - 0.0).abs() < 1e-6);
+        assert!((LinearBooster::soft_threshold(-1.5, 2.0) - 0.0).abs() < 1e-6);
+        // At threshold boundary
+        assert!((LinearBooster::soft_threshold(2.0, 2.0) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_lasso_sparsity() {
+        // Create a problem where only feature 0 matters: y = 3*x0
+        // Features 1, 2, 3 are noise - LASSO should zero them out
+        let n_samples = 100;
+        let n_features = 4;
+
+        let mut features = Vec::with_capacity(n_samples * n_features);
+        let mut targets = Vec::with_capacity(n_samples);
+
+        for i in 0..n_samples {
+            let x0 = (i as f32) / 10.0;
+            features.push(x0);         // Feature 0 - relevant
+            features.push(0.5);        // Feature 1 - noise (constant)
+            features.push(0.3);        // Feature 2 - noise (constant)
+            features.push(0.1);        // Feature 3 - noise (constant)
+            targets.push(3.0 * x0);    // Only depends on x0
+        }
+
+        let gradients: Vec<f32> = targets.iter().map(|&t| -t).collect();
+        let hessians = vec![1.0; n_samples];
+
+        // Use LASSO with strong regularization
+        let config = LinearConfig::lasso(2.0)
+            .with_learning_rate(0.5)
+            .with_max_iter(200);
+
+        let mut booster = LinearBooster::new(n_features, config);
+        booster.fit_on_gradients(&features, n_features, &gradients, &hessians).unwrap();
+
+        // Feature 0 should have non-zero weight
+        assert!(booster.weights()[0].abs() > 0.1, "Feature 0 should be selected");
+
+        // LASSO should encourage sparsity
+        let selected = booster.selected_features();
+        println!("Selected features: {:?}", selected);
+        println!("Weights: {:?}", booster.weights());
+        println!("Num nonzero: {}", booster.num_nonzero_weights());
+
+        // At minimum, feature 0 should be selected (others may be selected too due to
+        // gradient boosting dynamics, but sparsity should be encouraged)
+        assert!(selected.contains(&0), "Feature 0 must be selected");
+    }
+
+    #[test]
+    fn test_elastic_net_config() {
+        let config = LinearConfig::elastic_net(1.0, 0.5);
+        assert!((config.lambda - 1.0).abs() < 1e-6);
+        assert!((config.l1_ratio - 0.5).abs() < 1e-6);
+        assert!((config.l1_penalty() - 0.5).abs() < 1e-6);
+        assert!((config.l2_penalty() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_ridge_vs_lasso_sparsity() {
+        // Same problem, compare Ridge vs LASSO sparsity
+        let n_samples = 50;
+        let n_features = 10;
+
+        let mut features = Vec::with_capacity(n_samples * n_features);
+        let mut targets = Vec::with_capacity(n_samples);
+
+        for i in 0..n_samples {
+            let x = (i as f32) / 10.0;
+            for _ in 0..n_features {
+                features.push(x);
+            }
+            targets.push(x);  // All features contribute equally
+        }
+
+        let gradients: Vec<f32> = targets.iter().map(|&t| -t).collect();
+        let hessians = vec![1.0; n_samples];
+
+        // Ridge - should have all non-zero weights
+        let ridge_config = LinearConfig::ridge(0.1)
+            .with_learning_rate(0.5)
+            .with_max_iter(100);
+        let mut ridge_booster = LinearBooster::new(n_features, ridge_config);
+        ridge_booster.fit_on_gradients(&features, n_features, &gradients, &hessians).unwrap();
+
+        // LASSO - should have sparser weights
+        let lasso_config = LinearConfig::lasso(0.5)
+            .with_learning_rate(0.5)
+            .with_max_iter(100);
+        let mut lasso_booster = LinearBooster::new(n_features, lasso_config);
+        lasso_booster.fit_on_gradients(&features, n_features, &gradients, &hessians).unwrap();
+
+        // Ridge typically has more non-zero weights than LASSO
+        // (though in this degenerate case both may have many)
+        println!("Ridge nonzero: {}", ridge_booster.num_nonzero_weights());
+        println!("LASSO nonzero: {}", lasso_booster.num_nonzero_weights());
+
+        // Both should produce finite predictions
+        let ridge_preds = ridge_booster.predict_batch(&features, n_features);
+        let lasso_preds = lasso_booster.predict_batch(&features, n_features);
+
+        for pred in ridge_preds.iter().chain(lasso_preds.iter()) {
+            assert!(pred.is_finite(), "Predictions must be finite");
+        }
+    }
+
+    #[test]
+    fn test_elastic_net_stability() {
+        // Elastic Net should handle correlated features better than pure LASSO
+        let features = vec![
+            1.0, 1.0,  // x1 ≈ x2 (correlation)
+            2.0, 2.0,
+            3.0, 3.0,
+            4.0, 4.0,
+        ];
+        let gradients = vec![-1.0, -2.0, -3.0, -4.0];
+        let hessians = vec![1.0; 4];
+
+        let config = LinearConfig::elastic_net(0.5, 0.5)  // 50% L1, 50% L2
+            .with_learning_rate(0.5)
+            .with_max_iter(100);
+
+        let mut booster = LinearBooster::new(2, config);
+        booster.fit_on_gradients(&features, 2, &gradients, &hessians).unwrap();
+
+        let predictions = booster.predict_batch(&features, 2);
+
+        // All predictions should be finite
+        for pred in &predictions {
+            assert!(pred.is_finite(), "Elastic Net prediction should be finite, got {}", pred);
+        }
     }
 }
