@@ -52,7 +52,9 @@ mod stats;
 mod probes;
 mod analyzer;
 mod report;
+pub mod profiler;
 
 pub use analyzer::{DatasetAnalysis, AnalysisConfig, Recommendation, Confidence, ModeScores};
 pub use report::{AnalysisReport, compact_summary};
-pub use stats::{compute_r2, compute_correlation, compute_variance, compute_mean, compute_std};
+pub use stats::{compute_r2, compute_correlation, compute_correlation_mixed, compute_variance, compute_mean, compute_std, compute_range};
+pub use profiler::{DataFrameProfile, ColumnProfile, ColumnDataType, TaskType, DropReason, DroppedColumn};

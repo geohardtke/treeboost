@@ -74,6 +74,7 @@ pub mod outliers;
 pub mod pipeline;
 pub mod polars_ext;
 pub mod scaler;
+pub mod smart;
 pub mod timeseries;
 pub mod transforms;
 
@@ -94,3 +95,7 @@ pub use timeseries::{
     SeasonalGenerator,
 };
 pub use transforms::YeoJohnsonTransform;
+pub use smart::{
+    SmartPreprocessor, SmartPreprocessConfig, PreprocessingPlan, PreprocessingStep,
+    LttPreprocessingPlan, ModelType, EncodingType, ScalerType,
+};

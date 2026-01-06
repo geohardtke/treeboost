@@ -31,12 +31,16 @@ mod interaction;
 mod polynomial;
 mod ratio;
 mod selector;
+pub mod smart;
 mod stats;
 
 pub use interaction::{InteractionGenerator, InteractionType, PairSelection};
 pub use polynomial::PolynomialGenerator;
 pub use ratio::RatioGenerator;
 pub use selector::{FeatureSelector, SelectionConfig};
+pub use smart::{
+    SmartFeatureEngine, SmartFeatureConfig, FeaturePlan, LttFeaturePlan, TimeFeatureType,
+};
 
 /// Trait for feature generation strategies
 pub trait FeatureGenerator: Send + Sync {

@@ -99,6 +99,52 @@ pub fn compute_std(x: &[f32]) -> f32 {
     compute_variance(x).sqrt()
 }
 
+/// Compute range (max - min)
+#[inline]
+pub fn compute_range(x: &[f32]) -> f32 {
+    if x.is_empty() {
+        return 0.0;
+    }
+    let min = x.iter().copied().fold(f32::INFINITY, f32::min);
+    let max = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    max - min
+}
+
+/// Compute Pearson correlation with mixed types (f64 feature, f32 target)
+///
+/// This is useful for profiling where numeric columns are often f64 but
+/// targets are converted to f32.
+#[inline]
+pub fn compute_correlation_mixed(x: &[f64], y: &[f32]) -> f32 {
+    if x.len() != y.len() || x.len() < 2 {
+        return 0.0;
+    }
+
+    let n = x.len() as f64;
+    let x_mean = x.iter().sum::<f64>() / n;
+    let y_mean = y.iter().map(|&yi| yi as f64).sum::<f64>() / n;
+
+    let mut cov = 0.0f64;
+    let mut var_x = 0.0f64;
+    let mut var_y = 0.0f64;
+
+    for (&xi, &yi) in x.iter().zip(y.iter()) {
+        let yi_f64 = yi as f64;
+        let dx = xi - x_mean;
+        let dy = yi_f64 - y_mean;
+        cov += dx * dy;
+        var_x += dx * dx;
+        var_y += dy * dy;
+    }
+
+    let denom = (var_x * var_y).sqrt();
+    if denom < 1e-10 {
+        return 0.0;
+    }
+
+    ((cov / denom) as f32).clamp(-1.0, 1.0)
+}
+
 /// Compute Mean Squared Error
 #[inline]
 pub fn compute_mse(y_true: &[f32], y_pred: &[f32]) -> f32 {
