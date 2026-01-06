@@ -32,6 +32,8 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+use crate::utils::approx_equal_relative;
+
 /// Manages row indices during tree growth with zero-allocation partitioning.
 ///
 /// Instead of storing row indices per node, we maintain a single sorted array
@@ -117,11 +119,9 @@ struct SplitCandidate {
     histograms: Option<NodeHistogramStorage>,
     /// Best split info (if computed)
     split_info: Option<SplitInfo>,
-    /// Gradient sum
-    #[allow(dead_code)]
+    /// Total gradient sum for this node (used for debug validation)
     sum_gradients: f32,
-    /// Hessian sum
-    #[allow(dead_code)]
+    /// Total hessian sum for this node (used for debug validation)
     sum_hessians: f32,
     /// Features used in ancestors (for interaction constraints)
     ancestor_features: Vec<usize>,
@@ -153,12 +153,6 @@ impl Ord for SplitCandidate {
 impl SplitCandidate {
     fn gain(&self) -> f32 {
         self.split_info.as_ref().map(|s| s.gain).unwrap_or(f32::NEG_INFINITY)
-    }
-
-    #[inline]
-    #[allow(dead_code)]
-    fn row_count(&self) -> usize {
-        self.row_end - self.row_start
     }
 }
 
@@ -649,6 +643,19 @@ impl TreeGrower {
                     _ => continue, // No valid split, try next candidate
                 };
 
+                // Validate gradient/hessian sums (catches histogram computation bugs)
+                // Use relative error (1e-3 = 0.1%) to handle both large and small values
+                debug_assert!(
+                    approx_equal_relative(candidate.sum_gradients, split_info.left_gradient + split_info.right_gradient, 1e-3),
+                    "Gradient sum mismatch in node {}: left({}) + right({}) != parent({})",
+                    candidate.node_idx, split_info.left_gradient, split_info.right_gradient, candidate.sum_gradients
+                );
+                debug_assert!(
+                    approx_equal_relative(candidate.sum_hessians, split_info.left_hessian + split_info.right_hessian, 1e-3),
+                    "Hessian sum mismatch in node {}: left({}) + right({}) != parent({})",
+                    candidate.node_idx, split_info.left_hessian, split_info.right_hessian, candidate.sum_hessians
+                );
+
                 // Check depth constraint
                 let current_node = tree.get_node(candidate.node_idx);
                 if current_node.depth >= self.max_depth {
@@ -995,6 +1002,19 @@ impl TreeGrower {
                 _ => continue,
             };
 
+            // Validate gradient/hessian sums (catches histogram computation bugs)
+            // Use relative error (1e-3 = 0.1%) to handle both large and small values
+            debug_assert!(
+                approx_equal_relative(candidate.sum_gradients, split_info.left_gradient + split_info.right_gradient, 1e-3),
+                "Gradient sum mismatch in node {}: left({}) + right({}) != parent({})",
+                candidate.node_idx, split_info.left_gradient, split_info.right_gradient, candidate.sum_gradients
+            );
+            debug_assert!(
+                approx_equal_relative(candidate.sum_hessians, split_info.left_hessian + split_info.right_hessian, 1e-3),
+                "Hessian sum mismatch in node {}: left({}) + right({}) != parent({})",
+                candidate.node_idx, split_info.left_hessian, split_info.right_hessian, candidate.sum_hessians
+            );
+
             // Check depth constraint
             let current_node = tree.get_node(candidate.node_idx);
             if current_node.depth >= self.max_depth {
@@ -1311,6 +1331,19 @@ impl TreeGrower {
                     Some(info) if info.is_valid() => *info,
                     _ => continue,
                 };
+
+                // Validate gradient/hessian sums (catches histogram computation bugs)
+                // Use relative error (1e-3 = 0.1%) to handle both large and small values
+                debug_assert!(
+                    approx_equal_relative(candidate.sum_gradients, split_info.left_gradient + split_info.right_gradient, 1e-3),
+                    "Gradient sum mismatch in node {}: left({}) + right({}) != parent({})",
+                    candidate.node_idx, split_info.left_gradient, split_info.right_gradient, candidate.sum_gradients
+                );
+                debug_assert!(
+                    approx_equal_relative(candidate.sum_hessians, split_info.left_hessian + split_info.right_hessian, 1e-3),
+                    "Hessian sum mismatch in node {}: left({}) + right({}) != parent({})",
+                    candidate.node_idx, split_info.left_hessian, split_info.right_hessian, candidate.sum_hessians
+                );
 
                 let current_node = tree.get_node(candidate.node_idx);
                 if current_node.depth >= self.max_depth {

@@ -17,6 +17,7 @@ use super::partition::{NodeSplit, PartitionKernel, PartitionResult};
 use crate::dataset::BinnedDataset;
 use crate::histogram::Histogram;
 use crate::tree::{Node, NodeType, SplitInfo, Tree};
+use crate::utils::approx_equal_relative;
 use std::sync::Arc;
 use wgpu::Buffer;
 
@@ -431,7 +432,6 @@ impl FullGpuTreeBuilder {
 
         // Priority queue entry
         #[derive(Clone)]
-        #[allow(dead_code)]
         struct SplitCandidate {
             gain: f32,
             node_idx: usize,
@@ -439,7 +439,9 @@ impl FullGpuTreeBuilder {
             row_end: usize,
             split_info: SplitInfo,
             histograms: Vec<Histogram>,
+            /// Total gradient sum for this node (used for debug validation)
             sum_gradients: f32,
+            /// Total hessian sum for this node (used for debug validation)
             sum_hessians: f32,
         }
 
@@ -491,6 +493,19 @@ impl FullGpuTreeBuilder {
             }
 
             let split = &candidate.split_info;
+
+            // Validate gradient/hessian sums (catches histogram computation bugs)
+            // Use relative error (1e-3 = 0.1%) to handle both large and small values
+            debug_assert!(
+                approx_equal_relative(candidate.sum_gradients, split.left_gradient + split.right_gradient, 1e-3),
+                "Gradient sum mismatch in node {}: left({}) + right({}) != parent({})",
+                candidate.node_idx, split.left_gradient, split.right_gradient, candidate.sum_gradients
+            );
+            debug_assert!(
+                approx_equal_relative(candidate.sum_hessians, split.left_hessian + split.right_hessian, 1e-3),
+                "Hessian sum mismatch in node {}: left({}) + right({}) != parent({})",
+                candidate.node_idx, split.left_hessian, split.right_hessian, candidate.sum_hessians
+            );
 
             // Partition rows in-place
             let (left_count, right_count) = self.partition_in_place(

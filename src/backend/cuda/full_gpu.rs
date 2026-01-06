@@ -16,6 +16,7 @@ use super::partition::{NodeSplit, PartitionKernel};
 use crate::dataset::BinnedDataset;
 use crate::histogram::Histogram;
 use crate::tree::{Node, NodeType, SplitInfo, Tree};
+use crate::utils::approx_equal_relative;
 use cudarc::driver::CudaSlice;
 use std::sync::Arc;
 
@@ -309,6 +310,20 @@ impl FullCudaTreeBuilder {
                 }
 
                 let node = &current_level[*orig_node_idx];
+
+                // Validate gradient/hessian sums (catches histogram computation bugs)
+                // Use relative error (1e-3 = 0.1%) to handle both large and small values
+                debug_assert!(
+                    approx_equal_relative(node.sum_gradients, split.left_gradient + split.right_gradient, 1e-3),
+                    "Gradient sum mismatch in node {}: left({}) + right({}) != parent({})",
+                    node.node_idx, split.left_gradient, split.right_gradient, node.sum_gradients
+                );
+                debug_assert!(
+                    approx_equal_relative(node.sum_hessians, split.left_hessian + split.right_hessian, 1e-3),
+                    "Hessian sum mismatch in node {}: left({}) + right({}) != parent({})",
+                    node.node_idx, split.left_hessian, split.right_hessian, node.sum_hessians
+                );
+
                 let current_node = tree.get_node(node.node_idx);
                 let child_depth = current_node.depth + 1;
 
