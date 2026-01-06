@@ -5,4 +5,4 @@
 
 mod universal;
 
-pub use universal::{BoostingMode, UniversalConfig, UniversalModel};
+pub use universal::{BoostingMode, ModeSelection, UniversalConfig, UniversalModel};

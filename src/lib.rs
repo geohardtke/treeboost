@@ -1,40 +1,72 @@
-//! TreeBoost: High-performance Gradient Boosted Decision Tree engine
+//! TreeBoost: Universal Tabular Learning Engine
 //!
-//! A pure Rust GBDT implementation designed for large-scale tabular data
-//! with robust handling of dirty/noisy data.
+//! Combines linear models, gradient boosted trees, and random forests in a
+//! single unified interface. Pick the right tool for your data—or let the
+//! AutoTuner figure it out.
 //!
-//! # Key Features
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                      UniversalModel                         │
+//! ├──────────────┬──────────────────────┬───────────────────────┤
+//! │   PureTree   │   LinearThenTree     │    RandomForest       │
+//! │   (GBDT)     │   (Hybrid)           │    (Bagging)          │
+//! └──────────────┴──────────────────────┴───────────────────────┘
+//! ```
+//!
+//! # Quick Start
+//!
+//! ```ignore
+//! use treeboost::{UniversalConfig, UniversalModel, BoostingMode};
+//! use treeboost::dataset::DatasetLoader;
+//! use treeboost::loss::MseLoss;
+//!
+//! let loader = DatasetLoader::new(255);
+//! let dataset = loader.load_parquet("data.parquet", "target", None)?;
+//!
+//! let config = UniversalConfig::new()
+//!     .with_mode(BoostingMode::LinearThenTree)  // Hybrid mode
+//!     .with_num_rounds(100)
+//!     .with_linear_rounds(10);
+//!
+//! let model = UniversalModel::train(&dataset, config, &MseLoss)?;
+//! let predictions = model.predict(&dataset);
+//! ```
+//!
+//! # Boosting Modes
+//!
+//! | Mode | Best For |
+//! |------|----------|
+//! | [`BoostingMode::PureTree`] | General tabular, categorical features |
+//! | [`BoostingMode::LinearThenTree`] | Time-series, trending data, extrapolation |
+//! | [`BoostingMode::RandomForest`] | Noisy data, variance reduction |
+//!
+//! # Weak Learners
+//!
+//! - [`LinearBooster`]: Ridge/LASSO/ElasticNet via Coordinate Descent
+//! - [`LinearTreeBooster`]: Decision trees with linear regression in leaves
+//! - [`TreeBooster`]: Standard histogram-based GBDT trees
+//!
+//! # Preprocessing
+//!
+//! The [`preprocessing`] module provides transforms that serialize with your model:
+//!
+//! - Scalers: [`StandardScaler`], [`MinMaxScaler`], [`RobustScaler`]
+//! - Encoders: [`FrequencyEncoder`], [`LabelEncoder`], [`OneHotEncoder`]
+//! - Imputers: [`SimpleImputer`], [`IndicatorImputer`]
+//! - Time-series: [`LagGenerator`], [`RollingGenerator`], [`EwmaGenerator`]
+//!
+//! # Additional Features
 //!
 //! - **Histogram-based training**: u8 bins for memory efficiency
 //! - **Shannon Entropy regularized splits**: Drift-resilient objective
 //! - **Pseudo-Huber loss**: Robust to outliers
-//! - **Ordered Target Encoding**: High-cardinality categoricals without leakage
 //! - **Split Conformal Prediction**: Distribution-free prediction intervals
 //! - **Zero-copy serialization**: Fast model loading via rkyv
-//!
-//! # Example
-//!
-//! ```ignore
-//! use treeboost::{GBDTConfig, GBDTModel};
-//! use treeboost::dataset::DatasetLoader;
-//!
-//! // Load data
-//! let loader = DatasetLoader::new(255);
-//! let dataset = loader.load_parquet("data.parquet", "target", None)?;
-//!
-//! // Configure and train
-//! let config = GBDTConfig::new()
-//!     .with_num_rounds(100)
-//!     .with_max_depth(6)
-//!     .with_pseudo_huber_loss(1.0)
-//!     .with_entropy_weight(0.1);
-//!
-//! let model = GBDTModel::train_binned(&dataset, config)?;
-//!
-//! // Predict
-//! let predictions = model.predict(&dataset);
-//! ```
+//! - **GPU acceleration**: WGPU (all GPUs), CUDA (NVIDIA)
 
+pub mod analysis;
 pub mod backend;
 pub mod booster;
 pub mod dataset;
@@ -72,8 +104,14 @@ pub use learner::{
     TreeBooster, TreeConfig, WeakLearner,
 };
 pub use loss::{sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, PseudoHuberLoss};
-pub use model::{BoostingMode, UniversalConfig, UniversalModel};
+pub use model::{BoostingMode, ModeSelection, UniversalConfig, UniversalModel};
 pub use monitoring::{AlertLevel, CVHoldoutTracker, ShiftDetector, ShiftResult};
+
+// Analysis module exports
+pub use analysis::{
+    AnalysisConfig, AnalysisReport, Confidence, DatasetAnalysis, Recommendation,
+    compute_correlation, compute_r2, compute_variance,
+};
 pub use preprocessing::{
     EncodingMap, FrequencyEncoder, ImputeStrategy, IndicatorImputer, LabelEncoder, MinMaxScaler,
     OneHotEncoder, OrderedTargetEncoder, PipelineBuilder, Preprocessor, RobustScaler, Scaler,
