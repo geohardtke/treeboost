@@ -52,6 +52,7 @@ mod autotuner;
 mod config;
 mod history;
 mod logger;
+pub mod ltt;
 mod metrics;
 mod realistic;
 mod traits;
