@@ -181,7 +181,7 @@ pub fn features_to_df(
         return Ok(DataFrame::empty());
     }
 
-    if data.len() % num_features != 0 {
+    if !data.len().is_multiple_of(num_features) {
         return Err(TreeBoostError::Data(format!(
             "Data length {} not divisible by num_features {}",
             data.len(),

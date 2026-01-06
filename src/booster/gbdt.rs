@@ -1959,6 +1959,23 @@ impl TunableModel for GBDTModel {
     fn save_bincode(&self, path: &std::path::Path) -> Result<()> {
         crate::serialize::save_model_bincode(self, path)
     }
+
+    fn supports_conformal() -> bool {
+        true
+    }
+
+    fn conformal_quantile(&self) -> Option<f32> {
+        self.conformal_q
+    }
+
+    fn configure_conformal(
+        config: &mut Self::Config,
+        calibration_ratio: f32,
+        quantile: f32,
+    ) {
+        config.calibration_ratio = calibration_ratio;
+        config.conformal_quantile = quantile;
+    }
 }
 
 #[cfg(test)]

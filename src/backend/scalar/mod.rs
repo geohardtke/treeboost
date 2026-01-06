@@ -23,24 +23,16 @@ use crate::histogram::Histogram;
 /// - Histogram Subtraction Trick for sibling nodes
 /// - Sparse feature optimization (>90% sparsity)
 /// - Parallel block processing via Rayon
-#[derive(Debug, Clone, Default)]
-pub struct ScalarBackend {
-    /// Number of threads for parallel processing.
-    /// 0 means use Rayon's default (typically number of CPU cores).
-    _num_threads: usize,
-}
+///
+/// Thread count is controlled globally via `rayon::ThreadPoolBuilder` or
+/// the `RAYON_NUM_THREADS` environment variable.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScalarBackend;
 
 impl ScalarBackend {
-    /// Create a new scalar backend with default thread count.
+    /// Create a new scalar backend.
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Create a scalar backend with a specific thread count.
-    pub fn with_threads(num_threads: usize) -> Self {
-        Self {
-            _num_threads: num_threads,
-        }
+        Self
     }
 }
 

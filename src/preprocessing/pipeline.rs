@@ -351,7 +351,7 @@ impl PipelineBuilder {
     }
 
     /// Add a preprocessor to the pipeline
-    pub fn add(mut self, preprocessor: Preprocessor) -> Self {
+    pub fn with_preprocessor(mut self, preprocessor: Preprocessor) -> Self {
         self.steps.push(preprocessor);
         self
     }

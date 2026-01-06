@@ -223,6 +223,32 @@ pub trait TunableModel: Clone + Send + Sync + Sized {
             "Model serialization not supported for this model type".to_string(),
         ))
     }
+
+    /// Check if this model type supports conformal prediction
+    ///
+    /// Default returns false. Override for models with conformal support.
+    fn supports_conformal() -> bool {
+        false
+    }
+
+    /// Get the conformal quantile from a trained model
+    ///
+    /// Returns `None` if conformal prediction is not supported or not calibrated.
+    /// Override for models that support conformal prediction (e.g., GBDTModel).
+    fn conformal_quantile(&self) -> Option<f32> {
+        None
+    }
+
+    /// Configure conformal prediction settings in the model config
+    ///
+    /// Default implementation does nothing. Override for models that support conformal.
+    fn configure_conformal(
+        config: &mut Self::Config,
+        calibration_ratio: f32,
+        quantile: f32,
+    ) {
+        let _ = (config, calibration_ratio, quantile);
+    }
 }
 
 /// Helper trait to convert legacy f32 param maps to ParamValue maps

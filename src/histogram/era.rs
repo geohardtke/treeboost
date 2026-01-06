@@ -224,10 +224,12 @@ pub fn average_era_gain(era_stats: &[EraSplitStats]) -> f32 {
 }
 
 /// Builder for era-stratified histograms
-pub struct EraHistogramBuilder {
-    /// Number of threads for parallel construction
-    num_threads: usize,
-}
+///
+/// Uses Rayon's work-stealing thread pool for parallelism.
+/// Thread count is controlled globally via `rayon::ThreadPoolBuilder` or
+/// the `RAYON_NUM_THREADS` environment variable.
+#[derive(Debug, Clone, Copy)]
+pub struct EraHistogramBuilder;
 
 impl Default for EraHistogramBuilder {
     fn default() -> Self {
@@ -238,15 +240,7 @@ impl Default for EraHistogramBuilder {
 impl EraHistogramBuilder {
     /// Create a new era histogram builder
     pub fn new() -> Self {
-        Self {
-            num_threads: rayon::current_num_threads(),
-        }
-    }
-
-    /// Set number of threads
-    pub fn with_num_threads(mut self, num_threads: usize) -> Self {
-        self.num_threads = num_threads;
-        self
+        Self
     }
 
     /// Build era-stratified histograms for all features at a node

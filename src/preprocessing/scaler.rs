@@ -130,7 +130,7 @@ impl Scaler for StandardScaler {
             return Err(TreeBoostError::Data("num_features must be > 0".into()));
         }
 
-        if data.len() % num_features != 0 {
+        if !data.len().is_multiple_of(num_features) {
             return Err(TreeBoostError::Data(format!(
                 "Data length {} not divisible by num_features {}",
                 data.len(),
@@ -189,7 +189,7 @@ impl Scaler for StandardScaler {
             )));
         }
 
-        if data.len() % num_features != 0 {
+        if !data.len().is_multiple_of(num_features) {
             return Err(TreeBoostError::Data(format!(
                 "Data length {} not divisible by num_features {}",
                 data.len(),
@@ -289,7 +289,7 @@ impl Scaler for MinMaxScaler {
             return Err(TreeBoostError::Data("num_features must be > 0".into()));
         }
 
-        if data.len() % num_features != 0 {
+        if !data.len().is_multiple_of(num_features) {
             return Err(TreeBoostError::Data(format!(
                 "Data length {} not divisible by num_features {}",
                 data.len(),
@@ -339,7 +339,7 @@ impl Scaler for MinMaxScaler {
             )));
         }
 
-        if data.len() % num_features != 0 {
+        if !data.len().is_multiple_of(num_features) {
             return Err(TreeBoostError::Data(format!(
                 "Data length {} not divisible by num_features {}",
                 data.len(),
@@ -434,7 +434,7 @@ impl Scaler for RobustScaler {
             return Err(TreeBoostError::Data("num_features must be > 0".into()));
         }
 
-        if data.len() % num_features != 0 {
+        if !data.len().is_multiple_of(num_features) {
             return Err(TreeBoostError::Data(format!(
                 "Data length {} not divisible by num_features {}",
                 data.len(),
@@ -500,7 +500,7 @@ impl Scaler for RobustScaler {
             )));
         }
 
-        if data.len() % num_features != 0 {
+        if !data.len().is_multiple_of(num_features) {
             return Err(TreeBoostError::Data(format!(
                 "Data length {} not divisible by num_features {}",
                 data.len(),

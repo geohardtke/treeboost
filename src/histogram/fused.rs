@@ -57,10 +57,12 @@ pub struct FusedResult {
 ///
 /// Computes gradients AND builds histograms in a single pass over the data,
 /// eliminating cache pollution between the two phases.
-pub struct FusedHistogramBuilder {
-    /// Number of threads for parallel construction
-    num_threads: usize,
-}
+///
+/// Uses Rayon's work-stealing thread pool for parallelism.
+/// Thread count is controlled globally via `rayon::ThreadPoolBuilder` or
+/// the `RAYON_NUM_THREADS` environment variable.
+#[derive(Debug, Clone, Copy)]
+pub struct FusedHistogramBuilder;
 
 impl Default for FusedHistogramBuilder {
     fn default() -> Self {
@@ -71,15 +73,7 @@ impl Default for FusedHistogramBuilder {
 impl FusedHistogramBuilder {
     /// Create a new fused builder
     pub fn new() -> Self {
-        Self {
-            num_threads: rayon::current_num_threads(),
-        }
-    }
-
-    /// Set number of threads
-    pub fn with_num_threads(mut self, num_threads: usize) -> Self {
-        self.num_threads = num_threads;
-        self
+        Self
     }
 
     /// Build root histograms with fused gradient computation

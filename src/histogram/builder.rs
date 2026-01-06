@@ -34,10 +34,12 @@ use rayon::prelude::*;
 const BLOCK_SIZE: usize = 2048;
 
 /// Histogram builder with feature-parallel construction
-pub struct HistogramBuilder {
-    /// Number of threads for parallel construction
-    num_threads: usize,
-}
+///
+/// Uses Rayon's work-stealing thread pool for parallelism.
+/// Thread count is controlled globally via `rayon::ThreadPoolBuilder` or
+/// the `RAYON_NUM_THREADS` environment variable.
+#[derive(Debug, Clone, Copy)]
+pub struct HistogramBuilder;
 
 impl Default for HistogramBuilder {
     fn default() -> Self {
@@ -48,15 +50,7 @@ impl Default for HistogramBuilder {
 impl HistogramBuilder {
     /// Create a new histogram builder
     pub fn new() -> Self {
-        Self {
-            num_threads: rayon::current_num_threads(),
-        }
-    }
-
-    /// Set number of threads
-    pub fn with_num_threads(mut self, num_threads: usize) -> Self {
-        self.num_threads = num_threads;
-        self
+        Self
     }
 
     /// Build histograms for all features at a node using cache-blocked approach

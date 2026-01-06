@@ -28,9 +28,10 @@ use std::collections::HashMap;
 // =============================================================================
 
 /// Strategy for imputing missing values
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub enum ImputeStrategy {
     /// Replace with column mean (numerical features)
+    #[default]
     Mean,
     /// Replace with column median (robust to outliers)
     Median,
@@ -38,12 +39,6 @@ pub enum ImputeStrategy {
     Mode,
     /// Replace with a constant value
     Constant(f32),
-}
-
-impl Default for ImputeStrategy {
-    fn default() -> Self {
-        Self::Mean
-    }
 }
 
 // =============================================================================
@@ -392,7 +387,7 @@ fn compute_median(values: &[f32]) -> f32 {
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let len = sorted.len();
-    if len % 2 == 0 {
+    if len.is_multiple_of(2) {
         (sorted[len / 2 - 1] + sorted[len / 2]) / 2.0
     } else {
         sorted[len / 2]
