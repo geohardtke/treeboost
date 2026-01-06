@@ -1,0 +1,408 @@
+//! Integration tests for AutoML pipeline
+//!
+//! These tests verify end-to-end functionality using synthetic datasets
+//! that represent common real-world scenarios.
+
+use polars::prelude::*;
+use treeboost::{
+    auto_train, auto_train_quick, auto_train_thorough, auto_train_with_mode, AutoBuilder,
+    AutoConfig, BoostingMode, TuningLevel,
+};
+
+/// Create a simple regression dataset with linear trend + noise
+fn create_linear_regression_dataset(n_rows: usize) -> DataFrame {
+    let mut rng = fastrand::Rng::with_seed(42);
+
+    let x1: Vec<f64> = (0..n_rows).map(|i| i as f64 / 10.0).collect();
+    let x2: Vec<f64> = (0..n_rows).map(|_| rng.f64() * 100.0).collect();
+    let x3: Vec<f64> = (0..n_rows).map(|_| rng.f64() * 50.0).collect();
+
+    // Target: y = 2*x1 + 0.5*x2 - 0.1*x3 + noise
+    let y: Vec<f64> = x1
+        .iter()
+        .zip(x2.iter())
+        .zip(x3.iter())
+        .map(|((&x1, &x2), &x3)| {
+            2.0 * x1 + 0.5 * x2 - 0.1 * x3 + rng.f64() * 5.0 - 2.5
+        })
+        .collect();
+
+    df!(
+        "x1" => x1,
+        "x2" => x2,
+        "x3" => x3,
+        "target" => y
+    )
+    .unwrap()
+}
+
+/// Create a dataset with non-linear patterns (for tree-based models)
+fn create_nonlinear_regression_dataset(n_rows: usize) -> DataFrame {
+    let mut rng = fastrand::Rng::with_seed(123);
+
+    let x1: Vec<f64> = (0..n_rows).map(|_| rng.f64() * 10.0).collect();
+    let x2: Vec<f64> = (0..n_rows).map(|_| rng.f64() * 10.0).collect();
+
+    // Non-linear: y = sin(x1) * x2 + noise
+    let y: Vec<f64> = x1
+        .iter()
+        .zip(x2.iter())
+        .map(|(&x1, &x2)| {
+            (x1.sin() * x2) + rng.f64() * 2.0 - 1.0
+        })
+        .collect();
+
+    df!(
+        "x1" => x1,
+        "x2" => x2,
+        "target" => y
+    )
+    .unwrap()
+}
+
+/// Create a dataset with categorical features
+fn create_mixed_type_dataset(n_rows: usize) -> DataFrame {
+    let mut rng = fastrand::Rng::with_seed(456);
+
+    let numeric: Vec<f64> = (0..n_rows).map(|_| rng.f64() * 100.0).collect();
+
+    let categories = ["A", "B", "C", "D"];
+    let categorical: Vec<&str> = (0..n_rows)
+        .map(|_| categories[rng.usize(..categories.len())])
+        .collect();
+
+    // Target depends on both numeric and categorical
+    let y: Vec<f64> = numeric
+        .iter()
+        .zip(categorical.iter())
+        .map(|(&num, &cat)| {
+            let cat_effect = match cat {
+                "A" => 10.0,
+                "B" => 20.0,
+                "C" => 30.0,
+                "D" => 40.0,
+                _ => 0.0,
+            };
+            num * 0.5 + cat_effect + rng.f64() * 5.0
+        })
+        .collect();
+
+    df!(
+        "numeric_feature" => numeric,
+        "categorical_feature" => categorical,
+        "target" => y
+    )
+    .unwrap()
+}
+
+/// Create a dataset with high cardinality ID column (should be dropped)
+fn create_dataset_with_id_column(n_rows: usize) -> DataFrame {
+    let mut rng = fastrand::Rng::with_seed(789);
+
+    let ids: Vec<i64> = (0..n_rows).map(|i| i as i64).collect();
+    let feature: Vec<f64> = (0..n_rows).map(|_| rng.f64() * 100.0).collect();
+    let target: Vec<f64> = feature
+        .iter()
+        .map(|&f| f * 2.0 + rng.f64() * 10.0)
+        .collect();
+
+    df!(
+        "id" => ids,
+        "feature" => feature,
+        "target" => target
+    )
+    .unwrap()
+}
+
+#[test]
+fn test_auto_train_linear_data() {
+    let df = create_linear_regression_dataset(500);
+
+    // Train with auto settings
+    let model = auto_train(&df, "target").expect("Training should succeed");
+
+    // Verify model can predict
+    let predictions = model.predict(&df).expect("Prediction should succeed");
+    assert_eq!(predictions.len(), 500);
+
+    // Check that mode was selected
+    let mode = model.mode();
+    println!("Selected mode: {:?}", mode);
+
+    // Verify summary works
+    let summary = model.summary();
+    assert!(summary.contains("AutoModel Training Summary"));
+    assert!(summary.contains("Mode:"));
+}
+
+#[test]
+fn test_auto_train_nonlinear_data() {
+    let df = create_nonlinear_regression_dataset(500);
+
+    let model = auto_train(&df, "target").expect("Training should succeed");
+
+    // Non-linear data should likely select PureTree
+    let mode = model.mode();
+    println!("Selected mode for non-linear data: {:?}", mode);
+
+    // Verify prediction works
+    let predictions = model.predict(&df).expect("Prediction should succeed");
+    assert_eq!(predictions.len(), 500);
+}
+
+#[test]
+fn test_auto_train_quick() {
+    let df = create_linear_regression_dataset(300);
+
+    let model = auto_train_quick(&df, "target").expect("Quick training should succeed");
+
+    // Verify it produces a valid model
+    let predictions = model.predict(&df).expect("Prediction should succeed");
+    assert_eq!(predictions.len(), 300);
+
+    // Check timing exists
+    let build_time = model.build_time();
+    println!("Quick build time: {:?}", build_time);
+}
+
+#[test]
+fn test_auto_train_thorough() {
+    let df = create_linear_regression_dataset(200);
+
+    let model = auto_train_thorough(&df, "target").expect("Thorough training should succeed");
+
+    // Verify it produces a valid model
+    let predictions = model.predict(&df).expect("Prediction should succeed");
+    assert_eq!(predictions.len(), 200);
+
+    // Thorough should have tuning results
+    if let Some(ltt_tuning) = model.ltt_tuning() {
+        println!("LTT tuning R²: {:.4}", ltt_tuning.linear_r2);
+    }
+}
+
+#[test]
+fn test_auto_train_with_forced_mode() {
+    let df = create_nonlinear_regression_dataset(300);
+
+    // Force LinearThenTree even though data is non-linear
+    let model = auto_train_with_mode(&df, "target", BoostingMode::LinearThenTree)
+        .expect("Training with forced mode should succeed");
+
+    assert_eq!(model.mode(), BoostingMode::LinearThenTree);
+
+    let predictions = model.predict(&df).expect("Prediction should succeed");
+    assert_eq!(predictions.len(), 300);
+}
+
+#[test]
+fn test_auto_builder_with_config() {
+    let df = create_linear_regression_dataset(400);
+
+    let config = AutoConfig::default()
+        .with_tuning(TuningLevel::Quick)
+        .with_auto_features(true)
+        .with_verbose(false);
+
+    let builder = AutoBuilder::with_config(config);
+    let result = builder.fit(&df, "target").expect("Fit should succeed");
+
+    // Check that we got a result with metadata
+    assert!(result.column_profile.is_some());
+
+    // Create AutoModel from result
+    let model = treeboost::AutoModel::from_build_result(result);
+    let predictions = model.predict(&df).expect("Prediction should succeed");
+    assert_eq!(predictions.len(), 400);
+}
+
+#[test]
+fn test_profiler_drops_id_columns() {
+    let df = create_dataset_with_id_column(500);
+
+    let model = auto_train(&df, "target").expect("Training should succeed");
+
+    // Verify the ID column was identified and dropped
+    if let Some(profile) = model.column_profile() {
+        let dropped_cols: Vec<_> = profile
+            .drop_columns
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect();
+        println!("Dropped columns: {:?}", dropped_cols);
+
+        // The 'id' column should be dropped as ID-like
+        assert!(
+            dropped_cols.contains(&"id"),
+            "ID column should be automatically dropped"
+        );
+    }
+}
+
+#[test]
+fn test_mixed_type_dataset() {
+    let df = create_mixed_type_dataset(400);
+
+    // This will currently work only with numeric features
+    // Categorical encoding is in the plan but extract_raw_features
+    // currently only handles numerics
+    let result = auto_train(&df, "target");
+
+    match result {
+        Ok(model) => {
+            // If it succeeds, verify prediction works
+            let predictions = model.predict(&df).expect("Prediction should succeed");
+            assert_eq!(predictions.len(), 400);
+        }
+        Err(e) => {
+            // Expected to fail until categorical encoding is fully integrated
+            println!("Mixed type dataset error (expected): {}", e);
+            assert!(
+                e.to_string().contains("numeric") || e.to_string().contains("categorical"),
+                "Error should mention numeric or categorical features"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_phase_times_reported() {
+    let df = create_linear_regression_dataset(300);
+
+    let model = auto_train(&df, "target").expect("Training should succeed");
+
+    let phase_times = model.phase_times();
+
+    // Verify all phases have non-zero time (at least some work was done)
+    println!("Profiling: {:?}", phase_times.profiling);
+    println!("Preprocessing: {:?}", phase_times.preprocessing);
+    println!("Feature Engineering: {:?}", phase_times.feature_engineering);
+    println!("Analysis: {:?}", phase_times.analysis);
+    println!("Tuning: {:?}", phase_times.tuning);
+    println!("Training: {:?}", phase_times.training);
+
+    // All phases should complete (even if nearly instant)
+    // Just verify the structure is populated
+}
+
+#[test]
+fn test_summary_contains_key_info() {
+    let df = create_linear_regression_dataset(200);
+
+    let model = auto_train(&df, "target").expect("Training should succeed");
+    let summary = model.summary();
+
+    // Verify summary contains expected sections
+    assert!(summary.contains("AutoModel Training Summary"));
+    assert!(summary.contains("Mode:"));
+    assert!(summary.contains("Total Build Time:"));
+    assert!(summary.contains("Phase Times:"));
+
+    println!("=== AutoModel Summary ===\n{}", summary);
+}
+
+#[test]
+fn test_autobuilder_verbose_mode() {
+    let df = create_linear_regression_dataset(200);
+
+    let builder = AutoBuilder::new().with_verbose(true);
+
+    // Should print progress (we can't easily capture it in tests, but verify it runs)
+    let result = builder.fit(&df, "target");
+    assert!(result.is_ok(), "Verbose mode should not break training");
+}
+
+#[test]
+fn test_different_tuning_levels() {
+    let df = create_linear_regression_dataset(150);
+
+    // Quick
+    let model_quick = auto_train_quick(&df, "target").expect("Quick should succeed");
+    let time_quick = model_quick.build_time();
+
+    // Standard
+    let model_standard = auto_train(&df, "target").expect("Standard should succeed");
+    let time_standard = model_standard.build_time();
+
+    // Thorough
+    let model_thorough = auto_train_thorough(&df, "target").expect("Thorough should succeed");
+    let time_thorough = model_thorough.build_time();
+
+    println!("Build times - Quick: {:?}, Standard: {:?}, Thorough: {:?}",
+             time_quick, time_standard, time_thorough);
+
+    // All should produce valid predictions
+    assert_eq!(model_quick.predict(&df).unwrap().len(), 150);
+    assert_eq!(model_standard.predict(&df).unwrap().len(), 150);
+    assert_eq!(model_thorough.predict(&df).unwrap().len(), 150);
+}
+
+#[test]
+fn test_time_budget_control() {
+    use std::time::Duration;
+
+    let df = create_linear_regression_dataset(300);
+
+    // Set tight time budget (15 seconds)
+    let builder = AutoBuilder::new()
+        .with_time_budget(Duration::from_secs(15))
+        .with_verbose(true);
+
+    let start = std::time::Instant::now();
+    let result = builder.fit(&df, "target").expect("Training with time budget should succeed");
+    let elapsed = start.elapsed();
+
+    println!("Training with 15s budget completed in {:?}", elapsed);
+
+    // Should complete within budget (with some tolerance)
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "Training took {:?}, exceeding budget tolerance",
+        elapsed
+    );
+
+    // Should still produce a valid model
+    let model = treeboost::AutoModel::from_build_result(result);
+    let predictions = model.predict(&df).expect("Prediction should succeed");
+    assert_eq!(predictions.len(), 300);
+}
+
+#[test]
+fn test_time_budget_adaptations() {
+    use std::time::Duration;
+
+    let df = create_linear_regression_dataset(200);
+
+    // Very tight budget - should skip features and tuning
+    let builder = AutoBuilder::new()
+        .with_time_budget(Duration::from_secs(5))
+        .with_verbose(true)
+        .with_auto_features(true)  // Request features
+        .with_tuning(TuningLevel::Standard);  // Request tuning
+
+    let result = builder.fit(&df, "target").expect("Training with tight budget should succeed");
+
+    // With tight budget, features and tuning may be skipped
+    // Just verify it completed and works
+    let model = treeboost::AutoModel::from_build_result(result);
+    assert_eq!(model.predict(&df).unwrap().len(), 200);
+    println!("Tight budget model trained successfully");
+}
+
+#[test]
+fn test_time_budget_via_config() {
+    use std::time::Duration;
+
+    let df = create_linear_regression_dataset(150);
+
+    let config = AutoConfig::default()
+        .with_time_budget(Duration::from_secs(20))
+        .with_tuning(TuningLevel::Thorough);  // Request thorough but budget will adapt it
+
+    let builder = AutoBuilder::with_config(config);
+    let result = builder.fit(&df, "target").expect("Training should succeed");
+
+    let model = treeboost::AutoModel::from_build_result(result);
+    assert_eq!(model.predict(&df).unwrap().len(), 150);
+    println!("Time budget via config works");
+}

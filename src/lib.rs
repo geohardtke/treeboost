@@ -15,7 +15,28 @@
 //! └──────────────┴──────────────────────┴───────────────────────┘
 //! ```
 //!
-//! # Quick Start
+//! # Quick Start (AutoML - Recommended)
+//!
+//! ```ignore
+//! use polars::prelude::*;
+//! use treeboost::auto_train;
+//!
+//! // Load data
+//! let df = CsvReadOptions::default()
+//!     .try_into_reader_with_file_path(Some("housing.csv".into()))?
+//!     .finish()?;
+//!
+//! // One-line training - analyzes data, selects mode, tunes params
+//! let model = auto_train(&df, "price")?;
+//!
+//! // Predict
+//! let predictions = model.predict(&test_df)?;
+//!
+//! // See what AutoML did
+//! println!("{}", model.summary());
+//! ```
+//!
+//! # Manual Configuration (Advanced)
 //!
 //! ```ignore
 //! use treeboost::{UniversalConfig, UniversalModel, BoostingMode};
@@ -104,7 +125,7 @@ pub use learner::{
     TreeBooster, TreeConfig, WeakLearner,
 };
 pub use loss::{sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, PseudoHuberLoss};
-pub use model::{BoostingMode, ModeSelection, UniversalConfig, UniversalModel};
+pub use model::{AutoBuilder, AutoConfig, AutoModel, BoostingMode, BuildPhaseTimes, BuildResult, ModeSelection, TuningLevel, UniversalConfig, UniversalModel};
 pub use monitoring::{AlertLevel, CVHoldoutTracker, ShiftDetector, ShiftResult};
 
 // Analysis module exports
@@ -143,6 +164,147 @@ pub enum TreeBoostError {
 }
 
 pub type Result<T> = std::result::Result<T, TreeBoostError>;
+
+//=============================================================================
+// Convenience Entry Points (Level 0 API)
+//=============================================================================
+
+/// Train a model with automatic configuration (the simplest API)
+///
+/// This is the recommended entry point for most users. It automatically:
+/// - Profiles the dataset to understand column types and characteristics
+/// - Applies smart preprocessing based on data patterns
+/// - Generates useful features (polynomial, ratio, interactions)
+/// - Analyzes data to recommend the optimal boosting mode
+/// - Tunes hyperparameters for the selected mode
+/// - Trains the final model
+///
+/// # Arguments
+///
+/// * `df` - Input DataFrame with features and target
+/// * `target_col` - Name of the target column
+///
+/// # Returns
+///
+/// A trained [`AutoModel`] ready for prediction, or an error if training fails
+///
+/// # Example
+///
+/// ```ignore
+/// use polars::prelude::*;
+/// use treeboost::auto_train;
+///
+/// // Load your data
+/// let df = LazyCsvReader::new("data.csv")
+///     .finish()?
+///     .collect()?;
+///
+/// // Train with defaults
+/// let model = auto_train(&df, "price")?;
+///
+/// // Predict
+/// let predictions = model.predict(&test_df)?;
+///
+/// // See what happened
+/// println!("{}", model.summary());
+/// ```
+pub fn auto_train(df: &polars::prelude::DataFrame, target_col: &str) -> Result<AutoModel> {
+    AutoModel::train(df, target_col)
+}
+
+/// Train a model from a CSV file with automatic configuration
+///
+/// Convenience wrapper that loads a CSV file and trains a model.
+/// Equivalent to loading the CSV with Polars and calling [`auto_train()`].
+///
+/// # Arguments
+///
+/// * `csv_path` - Path to CSV file
+/// * `target_col` - Name of the target column
+///
+/// # Returns
+///
+/// A trained [`AutoModel`] ready for prediction, or an error if loading or training fails
+///
+/// # Example
+///
+/// ```ignore
+/// use treeboost::auto_train_csv;
+///
+/// // One-liner training
+/// let model = auto_train_csv("housing.csv", "price")?;
+///
+/// // Load test data and predict
+/// let test_df = CsvReadOptions::default()
+///     .try_into_reader_with_file_path(Some("test.csv".into()))?
+///     .finish()?;
+/// let predictions = model.predict(&test_df)?;
+/// ```
+pub fn auto_train_csv(csv_path: impl AsRef<std::path::Path>, target_col: &str) -> Result<AutoModel> {
+    use polars::prelude::*;
+
+    let df = CsvReadOptions::default()
+        .try_into_reader_with_file_path(Some(csv_path.as_ref().into()))
+        .map_err(|e| TreeBoostError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?
+        .finish()?;
+
+    auto_train(&df, target_col)
+}
+
+/// Train quickly with minimal tuning (for fast experimentation)
+///
+/// Uses [`TuningLevel::Quick`] which performs minimal hyperparameter search.
+/// Ideal for rapid prototyping or when you want results in seconds rather than minutes.
+///
+/// # Example
+///
+/// ```ignore
+/// use treeboost::auto_train_quick;
+///
+/// // Fast training for experimentation
+/// let model = auto_train_quick(&df, "target")?;
+/// ```
+pub fn auto_train_quick(df: &polars::prelude::DataFrame, target_col: &str) -> Result<AutoModel> {
+    AutoModel::train_quick(df, target_col)
+}
+
+/// Train thoroughly with extensive tuning (for best accuracy)
+///
+/// Uses [`TuningLevel::Thorough`] which performs comprehensive hyperparameter search.
+/// Takes longer but may find better configurations, especially for complex datasets.
+///
+/// # Example
+///
+/// ```ignore
+/// use treeboost::auto_train_thorough;
+///
+/// // Extensive search for production model
+/// let model = auto_train_thorough(&df, "target")?;
+/// ```
+pub fn auto_train_thorough(df: &polars::prelude::DataFrame, target_col: &str) -> Result<AutoModel> {
+    AutoModel::train_thorough(df, target_col)
+}
+
+/// Train with a specific boosting mode (bypass auto-selection)
+///
+/// Use this when you know which mode you want (e.g., from domain knowledge
+/// or previous experiments) and want to skip the analysis phase.
+///
+/// # Example
+///
+/// ```ignore
+/// use treeboost::{auto_train_with_mode, BoostingMode};
+///
+/// // Force LinearThenTree for time-series data
+/// let model = auto_train_with_mode(&df, "target", BoostingMode::LinearThenTree)?;
+/// ```
+pub fn auto_train_with_mode(
+    df: &polars::prelude::DataFrame,
+    target_col: &str,
+    mode: BoostingMode,
+) -> Result<AutoModel> {
+    AutoModel::train_with_mode(df, target_col, mode)
+}
 
 // Python module entry point
 #[cfg(feature = "python")]

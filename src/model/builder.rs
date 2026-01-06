@@ -100,6 +100,10 @@ pub struct AutoConfig {
 
     /// Verbose output
     pub verbose: bool,
+
+    /// Maximum time budget for training (None = no limit)
+    /// AutoBuilder will adapt tuning intensity to fit within this budget
+    pub time_budget: Option<Duration>,
 }
 
 impl Default for AutoConfig {
@@ -114,6 +118,7 @@ impl Default for AutoConfig {
             max_generated_features: 50,
             seed: 42,
             verbose: false,
+            time_budget: None,
         }
     }
 }
@@ -170,6 +175,24 @@ impl AutoConfig {
     /// Enable verbose output
     pub fn with_verbose(mut self, verbose: bool) -> Self {
         self.verbose = verbose;
+        self
+    }
+
+    /// Set time budget for training
+    ///
+    /// AutoBuilder will adapt tuning intensity to fit within this budget.
+    /// For example, if 60 seconds is allocated and profiling takes 10 seconds,
+    /// the remaining 50 seconds will be split between tuning and training.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::time::Duration;
+    /// let config = AutoConfig::new()
+    ///     .with_time_budget(Duration::from_secs(60)); // 1 minute max
+    /// ```
+    pub fn with_time_budget(mut self, budget: Duration) -> Self {
+        self.time_budget = Some(budget);
         self
     }
 }
@@ -268,6 +291,25 @@ impl AutoBuilder {
         self
     }
 
+    /// Set time budget for training
+    ///
+    /// AutoBuilder will adapt its behavior to fit within this time limit:
+    /// - Skips feature engineering if time is tight (< 20s remaining)
+    /// - Reduces tuning intensity if time is limited (< 30s → Quick tuning)
+    /// - Skips tuning entirely if very low on time (< 10s)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::time::Duration;
+    /// let builder = AutoBuilder::new()
+    ///     .with_time_budget(Duration::from_secs(60));  // 1 minute max
+    /// ```
+    pub fn with_time_budget(mut self, budget: Duration) -> Self {
+        self.config.time_budget = Some(budget);
+        self
+    }
+
     /// Fit the model on a Polars DataFrame
     ///
     /// This is the main entry point. It:
@@ -280,6 +322,14 @@ impl AutoBuilder {
     pub fn fit(&self, df: &DataFrame, target_col: &str) -> Result<BuildResult> {
         let start = Instant::now();
         let mut phase_times = BuildPhaseTimes::default();
+
+        // Adapt configuration based on time budget
+        let mut adapted_config = self.config.clone();
+        if let Some(budget) = self.config.time_budget {
+            if self.config.verbose {
+                println!("AutoBuilder: Time budget set to {:?}", budget);
+            }
+        }
 
         if self.config.verbose {
             println!("AutoBuilder: Starting build process...");
@@ -313,8 +363,23 @@ impl AutoBuilder {
         }
 
         // === Phase 3: Feature Engineering ===
+        // Adapt feature engineering based on remaining time
+        let mut skip_features = !adapted_config.auto_features;
+        if let Some(budget) = self.config.time_budget {
+            let elapsed = start.elapsed();
+            let remaining = budget.saturating_sub(elapsed);
+
+            // Skip feature engineering if time is tight
+            if remaining < Duration::from_secs(20) {
+                skip_features = true;
+                if self.config.verbose && adapted_config.auto_features {
+                    println!("  [Budget] Low time remaining, skipping feature engineering");
+                }
+            }
+        }
+
         let phase_start = Instant::now();
-        let feature_plan = if self.config.auto_features {
+        let feature_plan = if !skip_features {
             Some(self.plan_features(&profile)?)
         } else {
             None
@@ -349,14 +414,43 @@ impl AutoBuilder {
         }
 
         // === Phase 6: Hyperparameter Tuning ===
+        // Adapt tuning level based on remaining time
+        if let Some(budget) = self.config.time_budget {
+            let elapsed = start.elapsed();
+            let remaining = budget.saturating_sub(elapsed);
+
+            // Adjust tuning level based on remaining time
+            if remaining < Duration::from_secs(10) {
+                // Less than 10 seconds - skip tuning
+                adapted_config.tuning_level = TuningLevel::None;
+                if self.config.verbose {
+                    println!("  [Budget] Low time remaining, skipping tuning");
+                }
+            } else if remaining < Duration::from_secs(30) {
+                // Less than 30 seconds - use quick tuning
+                if adapted_config.tuning_level != TuningLevel::None {
+                    adapted_config.tuning_level = TuningLevel::Quick;
+                    if self.config.verbose {
+                        println!("  [Budget] Limited time, using quick tuning");
+                    }
+                }
+            }
+        }
+
         let phase_start = Instant::now();
-        let (universal_config, ltt_tuning) = self.tune_hyperparameters(
-            &dataset,
-            mode,
-            df,
-            target_col,
-            &profile,
-        )?;
+        let (universal_config, ltt_tuning) = if adapted_config.tuning_level == TuningLevel::None {
+            // Skip tuning, use defaults
+            let config = self.create_config_for_mode(mode, &dataset);
+            (config, None)
+        } else {
+            self.tune_hyperparameters(
+                &dataset,
+                mode,
+                df,
+                target_col,
+                &profile,
+            )?
+        };
         phase_times.tuning = phase_start.elapsed();
 
         if self.config.verbose {
