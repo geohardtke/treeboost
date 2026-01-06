@@ -601,6 +601,86 @@ impl BinnedDataset {
     pub fn bytes_per_row_4bit(&self) -> usize {
         self.num_features().div_ceil(2)
     }
+
+    /// Create a subset of this dataset containing only the specified rows.
+    ///
+    /// This is used for proper K-fold cross-validation where training must
+    /// be performed on a subset of the data (the training fold).
+    ///
+    /// # Arguments
+    /// * `indices` - Row indices to include in the subset (must be valid)
+    ///
+    /// # Returns
+    /// A new BinnedDataset containing only the specified rows
+    ///
+    /// # Panics
+    /// Panics if any index is out of bounds.
+    pub fn subset_by_indices(&self, indices: &[usize]) -> Self {
+        let new_num_rows = indices.len();
+        let num_features = self.num_features();
+
+        // Validate indices
+        for &idx in indices {
+            assert!(
+                idx < self.num_rows,
+                "Index {} out of bounds for dataset with {} rows",
+                idx,
+                self.num_rows
+            );
+        }
+
+        // Extract feature data for the selected rows (column-major)
+        let mut new_features = Vec::with_capacity(new_num_rows * num_features);
+        for f in 0..num_features {
+            let col_start = f * self.num_rows;
+            for &idx in indices {
+                new_features.push(self.features[col_start + idx]);
+            }
+        }
+
+        // Extract targets for the selected rows
+        let new_targets: Vec<f32> = indices.iter().map(|&idx| self.targets[idx]).collect();
+
+        // Extract era indices if present
+        let new_era_indices = self.era_indices.as_ref().map(|eras| {
+            indices.iter().map(|&idx| eras[idx]).collect::<Vec<u16>>()
+        });
+
+        // Recompute sparse columns for the new dataset
+        let sparse_columns: Vec<Option<SparseColumn>> = (0..num_features)
+            .map(|f| {
+                let start = f * new_num_rows;
+                let column = &new_features[start..start + new_num_rows];
+                let sparse = SparseColumn::from_dense(column, DEFAULT_BIN);
+
+                if sparse.is_sparse() {
+                    Some(sparse)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Compute new num_eras
+        let new_num_eras = new_era_indices
+            .as_ref()
+            .and_then(|eras| eras.iter().copied().max())
+            .map(|m| m as usize + 1)
+            .unwrap_or(0);
+
+        Self {
+            num_rows: new_num_rows,
+            features: new_features,
+            targets: new_targets,
+            feature_info: self.feature_info.clone(),
+            sparse_columns,
+            era_indices: new_era_indices,
+            num_eras: new_num_eras,
+            // Caches are not copied - will be recomputed if needed
+            row_major_cache: OnceLock::new(),
+            row_major_4bit_cache: OnceLock::new(),
+        }
+    }
 }
 
 // Implement BinStorage trait for use with backend abstraction
@@ -942,5 +1022,85 @@ mod tests {
         // Row 1: (6 << 4) | 2 = 0x62
         assert_eq!(data[0], 0x51);
         assert_eq!(data[1], 0x62);
+    }
+
+    #[test]
+    fn test_subset_by_indices() {
+        let num_rows = 5;
+
+        // Column-major: feature 0 = [0,1,2,3,4], feature 1 = [10,11,12,13,14]
+        let features = vec![0u8, 1, 2, 3, 4, 10, 11, 12, 13, 14];
+        let targets = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
+        let feature_info = vec![
+            FeatureInfo {
+                name: "f0".to_string(),
+                feature_type: FeatureType::Numeric,
+                num_bins: 5,
+                bin_boundaries: vec![0.5, 1.5, 2.5, 3.5],
+            },
+            FeatureInfo {
+                name: "f1".to_string(),
+                feature_type: FeatureType::Numeric,
+                num_bins: 5,
+                bin_boundaries: vec![10.5, 11.5, 12.5, 13.5],
+            },
+        ];
+
+        let dataset = BinnedDataset::new(num_rows, features, targets, feature_info);
+
+        // Take indices [1, 3, 4]
+        let subset = dataset.subset_by_indices(&[1, 3, 4]);
+
+        assert_eq!(subset.num_rows(), 3);
+        assert_eq!(subset.num_features(), 2);
+
+        // Check feature values: original rows 1, 3, 4 should become rows 0, 1, 2
+        assert_eq!(subset.get_bin(0, 0), 1); // Original row 1, feature 0
+        assert_eq!(subset.get_bin(1, 0), 3); // Original row 3, feature 0
+        assert_eq!(subset.get_bin(2, 0), 4); // Original row 4, feature 0
+
+        assert_eq!(subset.get_bin(0, 1), 11); // Original row 1, feature 1
+        assert_eq!(subset.get_bin(1, 1), 13); // Original row 3, feature 1
+        assert_eq!(subset.get_bin(2, 1), 14); // Original row 4, feature 1
+
+        // Check targets
+        assert_eq!(subset.targets(), &[2.0, 4.0, 5.0]);
+
+        // Check feature columns are consistent
+        assert_eq!(subset.feature_column(0), &[1, 3, 4]);
+        assert_eq!(subset.feature_column(1), &[11, 13, 14]);
+    }
+
+    #[test]
+    fn test_subset_by_indices_with_eras() {
+        let num_rows = 4;
+
+        let features = vec![0u8, 1, 2, 3, 10, 11, 12, 13];
+        let targets = vec![1.0f32, 2.0, 3.0, 4.0];
+        let feature_info = vec![
+            FeatureInfo {
+                name: "f0".to_string(),
+                feature_type: FeatureType::Numeric,
+                num_bins: 4,
+                bin_boundaries: vec![],
+            },
+            FeatureInfo {
+                name: "f1".to_string(),
+                feature_type: FeatureType::Numeric,
+                num_bins: 14,
+                bin_boundaries: vec![],
+            },
+        ];
+        let era_indices = vec![0u16, 1, 0, 2];
+
+        let dataset = BinnedDataset::new_with_eras(num_rows, features, targets, feature_info, era_indices);
+
+        // Take indices [0, 2] (both have era 0)
+        let subset = dataset.subset_by_indices(&[0, 2]);
+
+        assert_eq!(subset.num_rows(), 2);
+        assert!(subset.has_eras());
+        assert_eq!(subset.era_indices().unwrap(), &[0, 0]);
+        assert_eq!(subset.num_eras(), 1);
     }
 }

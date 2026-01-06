@@ -11,30 +11,11 @@ use rayon::prelude::*;
 
 /// Create a subset of a BinnedDataset by extracting only the specified row indices.
 ///
-/// This is used for K-fold cross-validation where we need to create training and
-/// validation subsets from the original dataset.
+/// This is a thin wrapper around `BinnedDataset::subset_by_indices()` for K-fold
+/// cross-validation where we need to create training and validation subsets.
+#[inline]
 fn subset_dataset(dataset: &BinnedDataset, indices: &[usize]) -> BinnedDataset {
-    let num_features = dataset.num_features();
-    let num_rows = indices.len();
-
-    // Extract features in column-major order
-    // Original: features[feature_idx * orig_num_rows + row_idx]
-    // New: features[feature_idx * new_num_rows + new_row_idx]
-    let mut features = Vec::with_capacity(num_features * num_rows);
-
-    for feature_idx in 0..num_features {
-        for &row_idx in indices {
-            features.push(dataset.get_bin(row_idx, feature_idx));
-        }
-    }
-
-    // Extract targets
-    let targets: Vec<f32> = indices.iter().map(|&i| dataset.targets()[i]).collect();
-
-    // Clone feature info (unchanged for subset)
-    let feature_info = dataset.all_feature_info().to_vec();
-
-    BinnedDataset::new(num_rows, features, targets, feature_info)
+    dataset.subset_by_indices(indices)
 }
 
 /// Configuration for multi-seed training

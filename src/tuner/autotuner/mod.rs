@@ -1259,6 +1259,9 @@ impl<M: TunableModel> AutoTuner<M> {
 
     /// Evaluate using K-fold cross-validation
     ///
+    /// Each fold trains on (k-1)/k of the data and validates on 1/k.
+    /// Returns the average metrics across all folds.
+    ///
     /// Returns: (val_metric, train_metric, num_trees, f1_score, roc_auc)
     fn evaluate_kfold(
         &self,
@@ -1275,17 +1278,38 @@ impl<M: TunableModel> AutoTuner<M> {
         for fold_idx in 0..k {
             let (train_idx, val_idx) = kfold.get_fold(fold_idx);
 
-            // Train model on full dataset with internal validation
-            // Note: For true K-fold, we'd need index-based training
-            // Current approach: train on full data, evaluate on fold splits
-            let model = M::train(dataset, &config)?;
-            let predictions = model.predict(dataset);
-            let targets = dataset.targets();
+            // Create subset datasets for training and validation
+            let train_dataset = dataset.subset_by_indices(&train_idx);
+            let val_dataset = dataset.subset_by_indices(&val_idx);
 
-            // Compute metrics using shared helper
-            let (val_metric, train_metric, f1_score, roc_auc) = self.compute_metrics_by_indices(
-                &predictions, targets, &train_idx, &val_idx, &metric,
-            );
+            // Train on training fold only
+            let model = M::train(&train_dataset, &config)?;
+
+            // Get predictions on both train and validation sets
+            let train_predictions = model.predict(&train_dataset);
+            let val_predictions = model.predict(&val_dataset);
+
+            // Compute metrics on respective sets
+            let train_targets = train_dataset.targets();
+            let val_targets = val_dataset.targets();
+
+            // Compute train metric
+            let train_metric = metric.compute(&train_predictions, train_targets);
+
+            // Compute validation metric
+            let val_metric = metric.compute(&val_predictions, val_targets);
+
+            // Compute F1 and ROC-AUC on validation set
+            let f1_score = if self.config.task_type.is_classification() {
+                self.compute_f1_score(&val_predictions, val_targets)
+            } else {
+                None
+            };
+            let roc_auc = if self.config.task_type.is_binary() {
+                Some(super::metrics::compute_roc_auc(&val_predictions, val_targets))
+            } else {
+                None
+            };
 
             fold_results.push((val_metric, train_metric, model.num_trees(), f1_score, roc_auc));
         }
@@ -1295,7 +1319,9 @@ impl<M: TunableModel> AutoTuner<M> {
 
     /// Evaluate using conformal prediction with optional k-fold
     ///
-    /// If folds == 1, uses simple conformal. If folds > 1, runs conformal k-fold CV.
+    /// If folds == 1, uses simple conformal. If folds > 1, runs conformal k-fold CV
+    /// where each fold trains on the training subset and computes conformal quantile
+    /// from predictions on the validation subset.
     fn evaluate_conformal_with_folds(
         &self,
         dataset: &BinnedDataset,
@@ -1304,6 +1330,8 @@ impl<M: TunableModel> AutoTuner<M> {
         quantile: f32,
         folds: usize,
     ) -> EvalResult {
+        Self::check_conformal_support()?;
+
         if folds == 1 {
             self.evaluate_conformal(dataset, params, calibration_ratio, quantile)
         } else {
@@ -1312,11 +1340,19 @@ impl<M: TunableModel> AutoTuner<M> {
             let mut fold_results = Vec::with_capacity(folds);
 
             for fold_idx in 0..folds {
-                let (_train_idx, _val_idx) = kfold.get_fold(fold_idx);
-                // For now, use full dataset training (same limitation as regular k-fold)
-                // TODO: Add BinnedDataset::subset_by_indices for proper k-fold
-                let result = self.evaluate_conformal(dataset, params, calibration_ratio, quantile)?;
-                fold_results.push(result);
+                let (train_idx, val_idx) = kfold.get_fold(fold_idx);
+
+                // Create subset datasets for training and validation
+                let train_dataset = dataset.subset_by_indices(&train_idx);
+                let val_dataset = dataset.subset_by_indices(&val_idx);
+
+                // Build config with conformal settings and train
+                let mut config = self.build_config(params);
+                M::configure_conformal(&mut config, calibration_ratio, quantile);
+                let model = M::train(&train_dataset, &config)?;
+
+                // Extract conformal metrics
+                fold_results.push(Self::extract_conformal_result(&model, &val_dataset, val_dataset.targets()));
             }
 
             Ok(Self::aggregate_fold_results(&fold_results))
@@ -1350,13 +1386,15 @@ impl<M: TunableModel> AutoTuner<M> {
         calibration_ratio: f32,
         quantile: f32,
     ) -> EvalResult {
-        // Conformal evaluation is currently only supported for GBDTModel
-        // TODO: Add conformal prediction support to TunableModel trait
-        let _ = (dataset, params, calibration_ratio, quantile); // Suppress warnings
-        Err(TreeBoostError::Config(
-            "Conformal evaluation is only supported for GBDTModel. \
-             Use EvalStrategy::Holdout for generic model tuning.".to_string()
-        ))
+        Self::check_conformal_support()?;
+
+        // Build config with conformal settings and train
+        let mut config = self.build_config(params);
+        M::configure_conformal(&mut config, calibration_ratio, quantile);
+        let model = M::train(dataset, &config)?;
+
+        // Extract conformal metrics (evaluate on training set)
+        Ok(Self::extract_conformal_result(&model, dataset, dataset.targets()))
     }
 
     /// Select appropriate metric based on task type
@@ -1447,6 +1485,31 @@ impl<M: TunableModel> AutoTuner<M> {
     // Evaluation Helpers (shared by holdout/kfold/conformal strategies)
     // =========================================================================
 
+    /// Check if model supports conformal prediction, returning error if not.
+    fn check_conformal_support() -> Result<()> {
+        if !M::supports_conformal() {
+            return Err(TreeBoostError::Config(
+                "Conformal evaluation is not supported for this model type. \
+                 Use EvalStrategy::Holdout for generic model tuning.".to_string()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Extract conformal metrics from a trained model.
+    ///
+    /// Returns (conformal_quantile, mse_on_eval_set, num_trees, None, None)
+    fn extract_conformal_result(
+        model: &M,
+        eval_dataset: &BinnedDataset,
+        eval_targets: &[f32],
+    ) -> EvalMetrics {
+        let conformal_q = model.conformal_quantile().unwrap_or(f32::MAX);
+        let predictions = model.predict(eval_dataset);
+        let mse = Metric::Mse.compute(&predictions, eval_targets);
+        (conformal_q, mse, model.num_trees(), None, None)
+    }
+
     /// Train model with external validation and compute metrics
     ///
     /// This is the core training loop for realistic mode evaluation.
@@ -1482,9 +1545,7 @@ impl<M: TunableModel> AutoTuner<M> {
     /// Specialized version for conformal prediction evaluation.
     /// Uses conformal quantile as the optimization metric instead of MSE/logloss.
     ///
-    /// Note: Conformal evaluation is currently only supported for GBDTModel.
-    ///
-    /// Returns: (conformal_quantile, conformal_quantile, num_trees, f1_score, roc_auc)
+    /// Returns: (conformal_quantile, val_mse, num_trees, None, None)
     fn train_and_evaluate_conformal(
         &self,
         train_dataset: &BinnedDataset,
@@ -1493,13 +1554,15 @@ impl<M: TunableModel> AutoTuner<M> {
         params: &HashMap<String, f32>,
         quantile: f32,
     ) -> EvalResult {
-        // Conformal evaluation is currently only supported for GBDTModel
-        // TODO: Add conformal prediction support to TunableModel trait
-        let _ = (train_dataset, val_dataset, val_targets, params, quantile);
-        Err(TreeBoostError::Config(
-            "Conformal evaluation is only supported for GBDTModel. \
-             Use EvalStrategy::Holdout for generic model tuning.".to_string()
-        ))
+        Self::check_conformal_support()?;
+
+        // Build config with conformal settings (20% of train for calibration)
+        let mut config = self.build_config(params);
+        M::configure_conformal(&mut config, 0.2, quantile);
+        let model = M::train(train_dataset, &config)?;
+
+        // Extract conformal metrics (evaluate on validation set)
+        Ok(Self::extract_conformal_result(&model, val_dataset, val_targets))
     }
 
     /// Aggregate results from multiple folds
@@ -1626,24 +1689,11 @@ impl<M: TunableModel> AutoTuner<M> {
         let use_parallel = self.config.parallel_trials && !self.is_gpu_backend();
 
         if use_parallel {
-            // Parallel evaluation for CPU backends
-            // n_parallel of 0 means "auto" (use all available threads)
-            let n_parallel = if self.config.n_parallel == 0 {
-                rayon::current_num_threads()
-            } else {
-                self.config.n_parallel
-            };
-
-            // Create a thread pool with limited parallelism if specified
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(n_parallel)
-                .build()
-                .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
-
             let results = Mutex::new(Vec::with_capacity(candidates.len()));
             let callback = &self.callback;
 
-            pool.install(|| {
+            // Closure that evaluates candidates in parallel
+            let eval_parallel = || {
                 candidates.par_iter().for_each(|params| {
                     match self.evaluate_single(EvalInput::Optimistic(dataset), params, iteration) {
                         Ok(result) => {
@@ -1664,7 +1714,20 @@ impl<M: TunableModel> AutoTuner<M> {
                         }
                     }
                 });
-            });
+            };
+
+            // Use global pool for auto parallelism (n_parallel == 0), otherwise create custom pool
+            if self.config.n_parallel == 0 {
+                // Use rayon's global pool directly (no pool creation overhead)
+                eval_parallel();
+            } else {
+                // Create custom pool only when specific parallelism is requested
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(self.config.n_parallel)
+                    .build()
+                    .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+                pool.install(eval_parallel);
+            }
 
             results.into_inner().unwrap()
         } else {
