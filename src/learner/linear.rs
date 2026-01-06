@@ -115,17 +115,33 @@ pub struct LinearConfig {
 
     /// Maximum absolute weight value (prevents explosion)
     pub max_weight: f32,
+
+    /// Prediction shrinkage (entropy-like regularization)
+    ///
+    /// **DEFAULT: 0.0** (no shrinkage)
+    ///
+    /// Shrinks predictions toward the target mean to reduce extrapolation:
+    /// `final_pred = pred * (1 - shrinkage) + target_mean * shrinkage`
+    ///
+    /// Higher values = more conservative predictions = less extrapolation.
+    /// Useful for preventing extreme predictions on out-of-distribution test data.
+    ///
+    /// - `0.0` = no shrinkage (use model predictions as-is)
+    /// - `0.5` = 50% model, 50% mean (strong shrinkage)
+    /// - `1.0` = always predict mean (no model contribution)
+    pub prediction_shrinkage: f32,
 }
 
 impl Default for LinearConfig {
     fn default() -> Self {
         Self {
-            lambda: 1.0,           // Strong default regularization
-            l1_ratio: 0.0,         // Pure Ridge by default (most stable)
-            learning_rate: 0.3,    // Moderate step size for boosting
-            max_iter: 10,          // Few iterations per round (boosting does many rounds)
-            tol: 1e-6,             // Tight convergence
-            max_weight: 100.0,     // Prevent extreme weights
+            lambda: 1.0,              // Strong default regularization
+            l1_ratio: 0.0,            // Pure Ridge by default (most stable)
+            learning_rate: 0.3,       // Moderate step size for boosting
+            max_iter: 100,            // Many iterations for single-round convergence
+            tol: 1e-6,                // Tight convergence
+            max_weight: 100.0,        // Prevent extreme weights
+            prediction_shrinkage: 0.0, // No shrinkage by default
         }
     }
 }
@@ -207,6 +223,19 @@ impl LinearConfig {
         self
     }
 
+    /// Set prediction shrinkage (entropy-like regularization)
+    ///
+    /// Shrinks predictions toward the target mean to prevent extreme extrapolation.
+    /// Values between 0.1-0.3 are recommended for modest shrinkage.
+    ///
+    /// - `0.0` = no shrinkage (default)
+    /// - `0.2` = 20% shrinkage toward mean (recommended starting point)
+    /// - `0.5` = 50% shrinkage (strong)
+    pub fn with_prediction_shrinkage(mut self, shrinkage: f32) -> Self {
+        self.prediction_shrinkage = shrinkage.clamp(0.0, 1.0);
+        self
+    }
+
     /// Get L2 regularization component
     ///
     /// `lambda * (1 - l1_ratio)`
@@ -276,6 +305,9 @@ pub struct LinearBooster {
 
     /// Whether scaler has been fitted
     scaler_fitted: bool,
+
+    /// Target mean (for prediction shrinkage)
+    target_mean: f32,
 }
 
 impl LinearBooster {
@@ -293,6 +325,7 @@ impl LinearBooster {
             config,
             num_features,
             scaler_fitted: false,
+            target_mean: 0.0,
         }
     }
 
@@ -380,6 +413,9 @@ impl LinearBooster {
     /// - target[i] = -gradient[i] / hessian[i] (Newton step target)
     /// - λ₂ = lambda * (1 - l1_ratio)  (L2/Ridge penalty)
     /// - λ₁ = lambda * l1_ratio         (L1/LASSO penalty)
+    ///
+    /// IMPORTANT: For MSE loss, gradient = pred - target, hessian = 1.
+    /// We fit to NEGATIVE gradients (the residuals = target - pred).
     fn coordinate_descent(
         &mut self,
         features: &[f32],
@@ -395,93 +431,78 @@ impl LinearBooster {
         let l2_penalty = self.config.l2_penalty();
         let l1_penalty = self.config.l1_penalty();
 
-        // Compute current predictions (for residual updates)
-        let mut predictions = vec![self.bias; num_rows];
+        // Convert gradients to residuals (what we want to fit)
+        // For MSE: g = pred - target, so residual = -g/h = (target - pred)/1
+        // This is the Newton step target that we fit the linear model to.
+        let mut residuals = vec![0.0f32; num_rows];
         for i in 0..num_rows {
-            for j in 0..num_features {
+            // FIXED: Negate gradient to get residuals (target - current_pred direction)
+            residuals[i] = -gradients[i] / hessians[i].max(1e-10);
+        }
+
+        // Precompute x_j^2 sums for denominator (hessian diagonal)
+        let mut x_sq_sums = vec![0.0f32; num_features];
+        for j in 0..num_features {
+            for i in 0..num_rows {
                 let x_ij = self.standardize(features[i * num_features + j], j);
-                predictions[i] += self.weights[j] * x_ij;
+                x_sq_sums[j] += hessians[i] * x_ij * x_ij;
             }
         }
 
-        // Coordinate Descent iterations
+        // Set bias = mean(targets) ONCE at the start (like sklearn Ridge)
+        // This is the optimal bias for standardized features (X_mean = 0)
+        {
+            let sum_residuals: f32 = residuals.iter().sum();
+            let sum_hessians: f32 = hessians.iter().sum();
+            self.bias = (sum_residuals / sum_hessians.max(1e-10))
+                .clamp(-self.config.max_weight, self.config.max_weight);
+
+            // Store target mean for prediction shrinkage
+            self.target_mean = self.bias;
+
+            // Center residuals around 0 for weight fitting
+            for r in residuals.iter_mut() {
+                *r -= self.bias;
+            }
+        }
+
+        // Coordinate Descent iterations (weights only, bias is fixed)
         for _iter in 0..self.config.max_iter {
             let mut max_change = 0.0f32;
 
-            // Update bias first (no regularization on bias)
-            {
-                let mut grad_bias = 0.0f32;
-                let mut hess_bias = 0.0f32;
-
-                for i in 0..num_rows {
-                    // Residual: what we need to fit
-                    // grad[i] is the negative gradient of the loss
-                    // We want to minimize: Σ h[i] * (pred[i] + delta - (-g[i]/h[i]))²
-                    // Which simplifies to fitting: target = -g[i]/h[i]
-                    let residual = predictions[i] + gradients[i] / hessians[i].max(1e-10);
-                    grad_bias += hessians[i] * residual;
-                    hess_bias += hessians[i];
-                }
-
-                // No regularization on bias term
-                let delta = -grad_bias / hess_bias.max(1e-10);
-                let delta = delta.clamp(-10.0, 10.0);
-
-                self.bias += self.config.learning_rate * delta;
-                self.bias = self.bias.clamp(-self.config.max_weight, self.config.max_weight);
-
-                // Update predictions
-                for pred in predictions.iter_mut() {
-                    *pred += self.config.learning_rate * delta;
-                }
-
-                max_change = max_change.max(delta.abs());
-            }
-
             // Update each weight with Elastic Net
             for j in 0..num_features {
-                let mut grad_j = 0.0f32;
-                let mut hess_j = 0.0f32;
-
+                // Compute rho = sum(residual * x_j) + x_sq_sum * current_weight
+                // This accounts for current weight contribution to residuals
+                let mut rho = 0.0f32;
                 for i in 0..num_rows {
                     let x_ij = self.standardize(features[i * num_features + j], j);
-                    let residual = predictions[i] + gradients[i] / hessians[i].max(1e-10);
-
-                    grad_j += hessians[i] * residual * x_ij;
-                    hess_j += hessians[i] * x_ij * x_ij;
+                    rho += hessians[i] * residuals[i] * x_ij;
                 }
+                rho += x_sq_sums[j] * self.weights[j];
 
-                // L2 regularization gradient: λ₂ * w[j]
-                grad_j += l2_penalty * self.weights[j];
+                // Denominator: sum(h * x^2) + L2 penalty
+                let denominator = (x_sq_sums[j] + l2_penalty).max(1e-10);
 
-                // Denominator includes L2 penalty (never zero)
-                let denominator = hess_j + l2_penalty;
-                let denominator = denominator.max(1e-10);
+                // Compute new weight (without L1)
+                let raw_weight = rho / denominator;
 
-                // Compute raw update (without L1)
-                let raw_update = -grad_j / denominator;
-
-                // Apply L1 soft thresholding
-                // The threshold scales with learning rate and inversely with denominator
-                let l1_threshold = l1_penalty * self.config.learning_rate / denominator;
-                let delta = Self::soft_threshold(raw_update, l1_threshold);
-
-                // Clamp update for numerical stability
-                let delta = delta.clamp(-10.0, 10.0);
+                // Apply L1 soft thresholding for Elastic Net
+                let l1_threshold = l1_penalty / denominator;
+                let new_weight = Self::soft_threshold(raw_weight, l1_threshold);
+                let new_weight = new_weight.clamp(-self.config.max_weight, self.config.max_weight);
 
                 let old_weight = self.weights[j];
-                self.weights[j] += self.config.learning_rate * delta;
-                self.weights[j] = self.weights[j].clamp(-self.config.max_weight, self.config.max_weight);
+                let weight_change = new_weight - old_weight;
+                self.weights[j] = new_weight;
 
-                let weight_change = self.weights[j] - old_weight;
-
-                // Update predictions incrementally
+                // Update residuals incrementally
                 for i in 0..num_rows {
                     let x_ij = self.standardize(features[i * num_features + j], j);
-                    predictions[i] += weight_change * x_ij;
+                    residuals[i] -= weight_change * x_ij;
                 }
 
-                max_change = max_change.max(delta.abs());
+                max_change = max_change.max(weight_change.abs());
             }
 
             // Check convergence
@@ -508,6 +529,134 @@ impl LinearBooster {
             .filter(|(_, &w)| w.abs() > 1e-10)
             .map(|(i, _)| i)
             .collect()
+    }
+
+    /// Fit directly to targets using closed-form Ridge regression
+    ///
+    /// Uses the normal equations: w = (X'X + λI)⁻¹ X'y
+    ///
+    /// This is the correct approach for LinearThenTree mode where we want
+    /// to capture all linear signal before fitting trees on residuals.
+    ///
+    /// # Arguments
+    /// - `features`: Row-major feature matrix (num_rows × num_features)
+    /// - `num_features`: Number of features per row
+    /// - `targets`: Target values to fit
+    ///
+    /// # Returns
+    /// Predictions on the training data after fitting
+    pub fn fit_direct(&mut self, features: &[f32], num_features: usize, targets: &[f32]) -> Result<Vec<f32>> {
+        let num_rows = targets.len();
+        if features.len() != num_rows * num_features {
+            return Err(TreeBoostError::Data(format!(
+                "Feature matrix size mismatch: expected {}, got {}",
+                num_rows * num_features,
+                features.len()
+            )));
+        }
+
+        // Fit scaler if not already fitted
+        if !self.scaler_fitted {
+            self.fit_scaler(features, num_features);
+        }
+
+        let lambda = self.config.lambda as f64;
+
+        // Compute X'X + λI and X'y using standardized features
+        let mut xtx = vec![0.0f64; num_features * num_features];
+        let mut xty = vec![0.0f64; num_features];
+
+        // Compute target mean for intercept calculation
+        let y_mean: f64 = targets.iter().map(|&y| y as f64).sum::<f64>() / num_rows as f64;
+
+        // Compute feature means (after standardization, should be ~0)
+        let mut x_means = vec![0.0f64; num_features];
+
+        for i in 0..num_rows {
+            let y = targets[i] as f64;
+            for j in 0..num_features {
+                let xj = self.standardize(features[i * num_features + j], j) as f64;
+                x_means[j] += xj;
+                xty[j] += xj * y;
+                for k in 0..num_features {
+                    let xk = self.standardize(features[i * num_features + k], k) as f64;
+                    xtx[j * num_features + k] += xj * xk;
+                }
+            }
+        }
+
+        // Finalize means
+        for x_mean in x_means.iter_mut() {
+            *x_mean /= num_rows as f64;
+        }
+
+        // Add regularization to diagonal
+        for j in 0..num_features {
+            xtx[j * num_features + j] += lambda;
+        }
+
+        // Solve (X'X + λI) w = X'y using Gauss-Jordan elimination
+        let mut aug = vec![0.0f64; num_features * (num_features + 1)];
+        for i in 0..num_features {
+            for j in 0..num_features {
+                aug[i * (num_features + 1) + j] = xtx[i * num_features + j];
+            }
+            aug[i * (num_features + 1) + num_features] = xty[i];
+        }
+
+        // Forward elimination with partial pivoting
+        for col in 0..num_features {
+            // Find pivot
+            let mut max_row = col;
+            for row in (col + 1)..num_features {
+                if aug[row * (num_features + 1) + col].abs() > aug[max_row * (num_features + 1) + col].abs() {
+                    max_row = row;
+                }
+            }
+            // Swap rows
+            for k in 0..=num_features {
+                aug.swap(
+                    col * (num_features + 1) + k,
+                    max_row * (num_features + 1) + k,
+                );
+            }
+            // Eliminate
+            let pivot = aug[col * (num_features + 1) + col];
+            if pivot.abs() < 1e-12 {
+                continue;
+            }
+            for row in 0..num_features {
+                if row != col {
+                    let factor = aug[row * (num_features + 1) + col] / pivot;
+                    for k in 0..=num_features {
+                        aug[row * (num_features + 1) + k] -= factor * aug[col * (num_features + 1) + k];
+                    }
+                }
+            }
+        }
+
+        // Extract solution
+        for i in 0..num_features {
+            let diag = aug[i * (num_features + 1) + i];
+            if diag.abs() > 1e-12 {
+                self.weights[i] = (aug[i * (num_features + 1) + num_features] / diag) as f32;
+            } else {
+                self.weights[i] = 0.0;
+            }
+        }
+
+        // Compute bias: intercept = mean(y) - dot(weights, mean(X))
+        let weights_dot_xmean: f64 = self.weights.iter()
+            .zip(x_means.iter())
+            .map(|(&w, &xm)| w as f64 * xm)
+            .sum();
+        self.bias = (y_mean - weights_dot_xmean) as f32;
+
+        // Store target mean for prediction shrinkage
+        self.target_mean = y_mean as f32;
+
+        // Return predictions on training data
+        Ok(self.predict_batch(features, num_features))
     }
 }
 
@@ -566,6 +715,17 @@ impl WeakLearner for LinearBooster {
             }
         }
 
+        // Apply prediction shrinkage (entropy-like regularization)
+        // Shrinks predictions toward target mean to reduce extrapolation
+        let shrinkage = self.config.prediction_shrinkage;
+        if shrinkage > 0.0 {
+            let scale = 1.0 - shrinkage;
+            let offset = shrinkage * self.target_mean;
+            for pred in predictions.iter_mut() {
+                *pred = scale * *pred + offset;
+            }
+        }
+
         predictions
     }
 
@@ -576,6 +736,12 @@ impl WeakLearner for LinearBooster {
         for j in 0..num_features {
             let x_ij = self.standardize(features[start + j], j);
             pred += self.weights[j] * x_ij;
+        }
+
+        // Apply prediction shrinkage
+        let shrinkage = self.config.prediction_shrinkage;
+        if shrinkage > 0.0 {
+            pred = (1.0 - shrinkage) * pred + shrinkage * self.target_mean;
         }
 
         pred
@@ -611,6 +777,7 @@ impl WeakLearner for LinearBooster {
     fn reset(&mut self) {
         self.weights.fill(0.0);
         self.bias = 0.0;
+        self.target_mean = 0.0;
         // Scaler preserved: based on data distribution, reusable across CV folds
     }
 }
