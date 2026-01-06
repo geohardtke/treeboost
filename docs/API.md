@@ -4,18 +4,508 @@ Complete API documentation for TreeBoost's Rust and Python interfaces.
 
 ## Table of Contents
 
-1. [Core Training](#core-training) - GBDTConfig, GBDTModel
-2. [AutoTuner](#autotuner) - Hyperparameter optimization
-3. [Dataset](#dataset) - Data loading and preparation
-4. [Loss Functions](#loss-functions) - Training objectives
-5. [Inference](#inference) - Prediction and uncertainty
-6. [Encoding](#encoding) - Categorical feature handling
-7. [Serialization](#serialization) - Model persistence
-8. [Backend Selection](#backend-selection) - Hardware acceleration
+1. [UniversalModel](#universalmodel) - **Start here.** The unified interface for all boosting modes
+2. [Learners](#learners) - LinearBooster, LinearTreeBooster, TreeBooster
+3. [Preprocessing](#preprocessing) - Scalers, encoders, imputers (serialize with model)
+4. [AutoTuner](#autotuner) - Hyperparameter optimization
+5. [Dataset](#dataset) - Data loading and preparation
+6. [Loss Functions](#loss-functions) - Training objectives
+7. [Inference](#inference) - Prediction and uncertainty
+8. [Encoding](#encoding) - Categorical feature handling
+9. [Serialization](#serialization) - Model persistence
+10. [Backend Selection](#backend-selection) - Hardware acceleration
+11. [GBDTModel (Classic)](#gbdtmodel-classic) - The original GBDT-only API (still available)
 
 ---
 
-## Core Training
+## UniversalModel
+
+**The main entry point.** Unified interface for all boosting modes.
+
+`UniversalModel` wraps `GBDTModel` internally—you get GPU acceleration, conformal prediction, and all mature features automatically. The hybrid modes (LinearThenTree, RandomForest) add specialized functionality on top.
+
+### BoostingMode
+
+```rust
+use treeboost::BoostingMode;
+
+BoostingMode::PureTree        // Standard GBDT (wraps GBDTModel - GPU, conformal, multi-class)
+BoostingMode::LinearThenTree  // Linear model + GBDTModel on residuals
+BoostingMode::RandomForest    // Parallel independent trees with averaging
+```
+
+| Mode | Best For | How It Works |
+|------|----------|--------------|
+| `PureTree` | General tabular, categoricals | Delegates to `GBDTModel` (full GPU/conformal support) |
+| `LinearThenTree` | Time-series, trending data, extrapolation | Linear phase → `GBDTModel` on residuals |
+| `RandomForest` | Noisy data, variance reduction | Bootstrap sampling, parallel trees, averaging |
+
+### UniversalConfig
+
+```rust
+use treeboost::{UniversalConfig, BoostingMode};
+use treeboost::learner::{TreeConfig, LinearConfig};
+
+let config = UniversalConfig::new()
+    .with_mode(BoostingMode::LinearThenTree)
+    .with_num_rounds(100)           // Number of tree rounds
+    .with_linear_rounds(10)         // Linear boosting iterations (LinearThenTree only)
+    .with_learning_rate(0.1)
+    .with_subsample(0.8)
+    .with_validation_ratio(0.2)
+    .with_early_stopping_rounds(10)
+    .with_seed(42);
+
+// Fine-tune tree component
+let config = config.with_tree_config(
+    TreeConfig::default()
+        .with_max_depth(6)
+        .with_max_leaves(31)
+        .with_lambda(1.0)
+);
+
+// Fine-tune linear component (LinearThenTree only)
+let config = config.with_linear_config(
+    LinearConfig::default()
+        .with_lambda(1.0)           // Regularization strength
+        .with_l1_ratio(0.0)         // 0.0 = Ridge, 1.0 = LASSO, between = ElasticNet
+);
+```
+
+**Python:**
+```python
+from treeboost import UniversalConfig, BoostingMode
+
+config = UniversalConfig()
+config.mode = BoostingMode.LinearThenTree
+config.num_rounds = 100
+config.linear_rounds = 10
+config.learning_rate = 0.1
+```
+
+### Training
+
+```rust
+use treeboost::{UniversalModel, UniversalConfig, BoostingMode};
+use treeboost::loss::MseLoss;
+use treeboost::dataset::DatasetLoader;
+
+let loader = DatasetLoader::new(255);
+let dataset = loader.load_parquet("train.parquet", "target", None)?;
+
+let config = UniversalConfig::new()
+    .with_mode(BoostingMode::LinearThenTree)
+    .with_num_rounds(100);
+
+let model = UniversalModel::train(&dataset, config, &MseLoss)?;
+```
+
+### Automatic Mode Selection (NEW)
+
+TreeBoost can **automatically analyze your dataset** and pick the best boosting mode. This "MRI scan" approach analyzes data characteristics WITHOUT expensive training trials.
+
+```rust
+use treeboost::{UniversalModel, MseLoss};
+
+// One-liner: Let TreeBoost pick the best mode
+let model = UniversalModel::auto(&dataset, &MseLoss)?;
+
+// See why it picked this mode
+println!("Selected: {:?}", model.mode());
+println!("Confidence: {:?}", model.selection_confidence());
+println!("{}", model.analysis_report().unwrap());
+```
+
+**How It Works:**
+
+1. **Subsample** - Work on 10k-50k rows (fast)
+2. **Linear Probe** - Quick Ridge regression measures linear signal (R²)
+3. **Tree Probe** - Shallow tree on residuals measures non-linear structure
+4. **Score Modes** - Compute scores for each mode based on data characteristics
+5. **Recommend** - Pick highest-scoring mode with confidence level
+
+**ModeSelection Enum:**
+
+```rust
+use treeboost::ModeSelection;
+
+// Let TreeBoost analyze and pick (recommended for new datasets)
+ModeSelection::Auto
+
+// Custom analysis settings
+ModeSelection::AutoWithConfig(AnalysisConfig::fast())
+
+// Explicitly specify mode (when you know what works)
+ModeSelection::Fixed(BoostingMode::LinearThenTree)
+```
+
+**All Auto Methods:**
+
+```rust
+// Simple one-liner
+let model = UniversalModel::auto(&dataset, &loss)?;
+
+// Auto with custom training config
+let config = UniversalConfig::new().with_num_rounds(200);
+let model = UniversalModel::auto_with_config(&dataset, config, &loss)?;
+
+// Full control: custom analysis + training config
+let analysis_config = AnalysisConfig::thorough();
+let model = UniversalModel::auto_with_analysis_config(
+    &dataset, config, analysis_config, &loss
+)?;
+
+// Via train_with_selection (most explicit)
+let model = UniversalModel::train_with_selection(
+    &dataset, config, ModeSelection::Auto, &loss
+)?;
+```
+
+**Analysis Access:**
+
+```rust
+// Check if auto-selected
+model.was_auto_selected()  // bool
+
+// Get analysis results
+if let Some(analysis) = model.analysis() {
+    println!("Linear R²: {:.2}", analysis.linear_r2);
+    println!("Tree gain: {:.2}", analysis.tree_gain);
+    println!("Noise floor: {:.2}", analysis.noise_floor);
+    println!("Categorical ratio: {:.2}", analysis.categorical_ratio);
+}
+
+// Confidence level: High, Medium, or Low
+model.selection_confidence()  // Option<Confidence>
+
+// Pretty report (displays all metrics, scores, reasoning)
+println!("{}", model.analysis_report().unwrap());
+
+// Compact summary for logging
+println!("{}", model.analysis_summary().unwrap());
+```
+
+**Decision Logic:**
+
+| Data Pattern | Recommended Mode | Why |
+|--------------|-----------------|-----|
+| High linear R² (>0.3) + tree gain (>0.1) | LinearThenTree | Linear captures trend, trees capture residuals |
+| Weak linear signal + categorical-heavy | PureTree | Trees handle categoricals natively |
+| High noise floor (>0.4) | RandomForest | Bagging reduces variance |
+
+**When to Use:**
+
+- ✅ **New datasets** - Let TreeBoost explore the data
+- ✅ **Unsure which mode** - Analysis provides explanation
+- ✅ **Documentation** - Report explains the decision
+- ❌ **Benchmarking** - Use fixed mode for reproducibility
+- ❌ **Known best mode** - Skip analysis overhead
+
+### Prediction
+
+```rust
+// Batch prediction
+let predictions = model.predict(&dataset);
+
+// Single row
+let pred = model.predict_row(&dataset, row_idx);
+
+// Model info
+model.mode()           // BoostingMode
+model.num_trees()      // usize
+model.has_linear()     // bool (true if LinearThenTree)
+model.num_features()   // usize
+```
+
+### Conformal Prediction (PureTree only)
+
+```rust
+// Predictions with uncertainty intervals
+let (predictions, lower, upper) = model.predict_with_intervals(&dataset)?;
+
+// Check calibration status
+let quantile = model.conformal_quantile();  // Option<f32>
+```
+
+### Classification (PureTree only)
+
+```rust
+// Binary classification
+let probabilities = model.predict_proba(&dataset)?;        // Vec<f32> in [0, 1]
+let classes = model.predict_class(&dataset, 0.5)?;         // Vec<u32> (0 or 1)
+
+// Multi-class
+let is_mc = model.is_multiclass();                         // bool
+let num_classes = model.get_num_classes();                 // usize
+let probs = model.predict_proba_multiclass(&dataset)?;     // Vec<Vec<f32>>
+let classes = model.predict_class_multiclass(&dataset)?;   // Vec<u32>
+let logits = model.predict_raw_multiclass(&dataset)?;      // Vec<Vec<f32>>
+```
+
+### Feature Importance
+
+```rust
+// Works for all modes
+let importances = model.feature_importance();  // Vec<f32>, normalized to sum to 1.0
+```
+
+### Raw Prediction (PureTree only)
+
+Predict directly from unbinned f64 features without creating a `BinnedDataset`:
+
+```rust
+let features: &[f64] = &[1.0, 2.0, 3.0];  // row-major
+let predictions = model.predict_raw(features)?;
+
+// With intervals
+let (preds, lower, upper) = model.predict_raw_with_intervals(features)?;
+
+// Classification from raw features
+let probs = model.predict_proba_raw(features)?;
+let classes = model.predict_class_raw(features, 0.5)?;
+```
+
+### Method Summary
+
+**Training Methods:**
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `train(&dataset, config, &loss)` | Result<Self> | Train with explicit config |
+| `auto(&dataset, &loss)` | Result<Self> | Auto-select mode (NEW) |
+| `auto_with_config(&dataset, config, &loss)` | Result<Self> | Auto-select with custom config |
+| `train_with_selection(&dataset, config, selection, &loss)` | Result<Self> | Full control via ModeSelection |
+
+**Prediction Methods:**
+
+| Method | Returns | Modes | Description |
+|--------|---------|-------|-------------|
+| `predict(&dataset)` | Vec<f32> | All | Point predictions |
+| `predict_row(&dataset, idx)` | f32 | All | Single row prediction |
+| `predict_with_intervals(&dataset)` | Result<(Vec, Vec, Vec)> | PureTree | Conformal intervals |
+| `predict_proba(&dataset)` | Result<Vec<f32>> | PureTree | Binary probabilities |
+| `predict_class(&dataset, threshold)` | Result<Vec<u32>> | PureTree | Binary classes |
+| `predict_proba_multiclass(&dataset)` | Result<Vec<Vec<f32>>> | PureTree | Multi-class probabilities |
+| `predict_class_multiclass(&dataset)` | Result<Vec<u32>> | PureTree | Multi-class predictions |
+| `feature_importance()` | Vec<f32> | All | Normalized importance scores |
+| `predict_raw(features)` | Result<Vec<f32>> | PureTree | From unbinned features |
+| `conformal_quantile()` | Option<f32> | PureTree | Calibrated quantile |
+| `is_multiclass()` | bool | All | Check if multi-class model |
+| `get_num_classes()` | usize | All | Number of classes |
+
+**Analysis Methods (for auto-selected models):**
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `was_auto_selected()` | bool | True if auto mode was used |
+| `analysis()` | Option<&DatasetAnalysis> | Full analysis results |
+| `selection_confidence()` | Option<Confidence> | High/Medium/Low confidence |
+| `analysis_report()` | Option<AnalysisReport> | Formatted diagnostic report |
+| `analysis_summary()` | Option<String> | One-line summary for logging |
+
+---
+
+## Learners
+
+Low-level weak learners. Use these directly when building custom boosting loops.
+
+### LinearBooster
+
+Ridge, LASSO, or Elastic Net via Coordinate Descent. Used internally by `LinearThenTree` mode.
+
+```rust
+use treeboost::learner::{LinearBooster, LinearConfig, WeakLearner};
+
+// Ridge (L2) - default, most stable
+let config = LinearConfig::ridge(1.0);
+
+// LASSO (L1) - sparse solutions, feature selection
+let config = LinearConfig::lasso(1.0);
+
+// Elastic Net - mix of L1 + L2
+let config = LinearConfig::elastic_net(1.0, 0.5);  // 50% L1, 50% L2
+
+let mut booster = LinearBooster::new(num_features, config);
+
+// Fit on gradients (gradient boosting style)
+booster.fit_on_gradients(&features, num_features, &gradients, &hessians)?;
+
+// Predict
+let predictions = booster.predict_batch(&features, num_features);
+
+// Sparsity info (LASSO/ElasticNet)
+booster.num_nonzero_weights()  // How many features selected
+booster.selected_features()    // Which feature indices
+```
+
+**Critical:** `lambda >= 1e-6` is enforced. Setting `lambda=0` causes NaN on correlated features.
+
+**Internal standardization:** The booster standardizes features internally. You don't need to pre-scale.
+
+### LinearTreeBooster
+
+Decision trees with Ridge regression in each leaf. Perfect for piecewise linear data.
+
+```rust
+use treeboost::learner::{LinearTreeBooster, LinearTreeConfig, TreeConfig, LinearConfig};
+
+let config = LinearTreeConfig::new()
+    .with_tree_config(
+        TreeConfig::default()
+            .with_max_depth(3)           // Shallow - leaves do the work
+            .with_min_samples_leaf(50)
+    )
+    .with_linear_config(
+        LinearConfig::ridge(0.1)
+    )
+    .with_min_samples_for_linear(20);    // Below this, use constant leaf
+
+let mut booster = LinearTreeBooster::new(config);
+
+// Needs both binned dataset AND raw features
+booster.fit_on_gradients(&dataset, &raw_features, num_features, &gradients, &hessians)?;
+
+let predictions = booster.predict_batch(&dataset, &raw_features, num_features);
+```
+
+**When to use:**
+- Data has piecewise linear structure (tax brackets, physical systems)
+- Want smoother predictions than standard trees
+- Need 10-100x fewer trees for same accuracy
+
+### TreeBooster
+
+Standard histogram-based decision tree. The workhorse of GBDT.
+
+```rust
+use treeboost::learner::{TreeBooster, TreeConfig, WeakLearner};
+
+let config = TreeConfig::default()
+    .with_max_depth(6)
+    .with_max_leaves(31)
+    .with_lambda(1.0)
+    .with_learning_rate(0.1);
+
+let mut booster = TreeBooster::new(config);
+booster.fit_on_gradients(&dataset, &gradients, &hessians, None)?;
+
+if let Some(tree) = booster.tree() {
+    tree.predict_batch_add(&dataset, &mut predictions);
+}
+```
+
+---
+
+## Preprocessing
+
+Transforms that fit on training data and apply consistently to train/test. Serialize with your model.
+
+### Scalers
+
+```rust
+use treeboost::preprocessing::{StandardScaler, MinMaxScaler, RobustScaler, Scaler};
+
+// StandardScaler: zero mean, unit variance
+let mut scaler = StandardScaler::new();
+scaler.fit(&features, num_features)?;
+scaler.transform(&mut features, num_features)?;
+
+// MinMaxScaler: scale to [0, 1] or custom range
+let mut scaler = MinMaxScaler::new(0.0, 1.0);
+
+// RobustScaler: median/IQR (robust to outliers)
+let mut scaler = RobustScaler::new();
+```
+
+**For linear models:** Scaling is essential. Linear models are sensitive to feature magnitudes.
+
+**For trees:** Scaling helps with regularization fairness but isn't strictly required.
+
+### Encoders
+
+```rust
+use treeboost::preprocessing::{FrequencyEncoder, LabelEncoder, OneHotEncoder, UnknownStrategy};
+
+// FrequencyEncoder: category → count (best for trees)
+let mut encoder = FrequencyEncoder::new();
+encoder.fit(&categories)?;
+let encoded = encoder.transform(&categories)?;
+
+// LabelEncoder: string → integer
+let mut encoder = LabelEncoder::new(UnknownStrategy::Error);  // or ::MapToZero
+encoder.fit(&categories)?;
+
+// OneHotEncoder: category → binary columns (for linear models)
+// WARNING: High cardinality = memory explosion. Use for linear component only.
+let mut encoder = OneHotEncoder::new(UnknownStrategy::Ignore);
+encoder.fit(&categories)?;
+let (encoded, num_new_cols) = encoder.transform(&data, num_features, cat_col_idx)?;
+```
+
+| Encoder | Best For | Cardinality |
+|---------|----------|-------------|
+| `FrequencyEncoder` | Trees (GBDT) | Any |
+| `LabelEncoder` | Trees (GBDT) | Any |
+| `OneHotEncoder` | Linear models only | Low (<100 categories) |
+| `OrderedTargetEncoder` | High-cardinality + leakage prevention | Any |
+
+### Imputers
+
+```rust
+use treeboost::preprocessing::{SimpleImputer, ImputeStrategy, IndicatorImputer};
+
+// SimpleImputer: fill missing values
+let mut imputer = SimpleImputer::new(ImputeStrategy::Mean);  // or Median, Mode, Constant(0.0)
+imputer.fit(&features, num_features)?;
+imputer.transform(&mut features, num_features)?;
+
+// IndicatorImputer: add binary "was_missing" columns
+let mut indicator = IndicatorImputer::new();
+indicator.fit(&features, num_features)?;
+let (features_with_indicators, new_num_features) = indicator.transform(&features, num_features)?;
+```
+
+### PipelineBuilder
+
+Chain transforms together:
+
+```rust
+use treeboost::preprocessing::{PipelineBuilder, ImputeStrategy};
+
+let pipeline = PipelineBuilder::new()
+    .add_simple_imputer(&["age", "income"], ImputeStrategy::Median)
+    .add_standard_scaler(&["age", "income"])
+    .add_frequency_encoder(&["category", "region"])
+    .build();
+
+// Fit on training data
+pipeline.fit(&train_df)?;
+
+// Transform (same pipeline state for train and test)
+let train_transformed = pipeline.transform(&train_df)?;
+let test_transformed = pipeline.transform(&test_df)?;
+```
+
+### Time-Series Features
+
+```rust
+use treeboost::preprocessing::{LagGenerator, RollingGenerator, RollingStat, EwmaGenerator};
+
+// Lag features: x_{t-1}, x_{t-2}, ...
+let lag_gen = LagGenerator::new(vec![1, 2, 7]);  // 1-day, 2-day, 7-day lags
+
+// Rolling statistics
+let rolling = RollingGenerator::new(7, vec![RollingStat::Mean, RollingStat::Std]);
+
+// Exponentially weighted moving average
+let ewma = EwmaGenerator::new(0.3);  // alpha = 0.3
+```
+
+## GBDTModel (Classic)
+
+The original GBDT-only API. Still fully supported—use it if you don't need hybrid modes.
+
+> **Tip:** `GBDTModel` is equivalent to `UniversalModel` with `BoostingMode::PureTree`.
 
 ### GBDTConfig
 

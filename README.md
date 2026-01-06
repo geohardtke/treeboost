@@ -2,28 +2,45 @@
 
 ![TreeBoost](images/treeboost.jpeg)
 
-> **High-performance GBDT for Rust. GPU-accelerated by default. Production-ready.**
+> **Universal Tabular Learning Engine. Linear models, GBDTs, and Random Forests—unified.**
 
-TreeBoost is a gradient boosted decision tree engine in pure Rust with automatic multi-backend hardware acceleration. Supports WGPU (all GPUs: NVIDIA, AMD, Intel, Apple), AVX-512, SVE2, with optimized scalar fallback. Works out of the box with zero configuration.
+TreeBoost combines the extrapolation power of linear models, the interaction-capturing ability of gradient boosted trees, and the robustness of random forests—all in a single, zero-copy, production-ready Rust binary. GPU-accelerated out of the box.
 
 ## Why TreeBoost?
 
-**Other Rust GBDT libraries are basic.** TreeBoost gives you the performance and features you'd expect from LightGBM or XGBoost—but built for Rust developers, fully typed, and production-ready.
+Most tabular problems are solved by Linear, Tree, or their combination. Other libraries make you pick one. TreeBoost gives you all three through a single `UniversalModel` interface, plus automatic mode selection via the AutoTuner.
 
-**Why Rust GBDT?**
+**The Architecture:**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      UniversalModel                         │
+├──────────────┬──────────────────────┬───────────────────────┤
+│   PureTree   │   LinearThenTree     │    RandomForest       │
+│   (GBDT)     │   (Hybrid)           │    (Bagging)          │
+│              │                      │                       │
+│ Best for:    │ Best for:            │ Best for:             │
+│ - General    │ - Time-series        │ - Noisy data          │
+│ - Categorics │ - Trending data      │ - Variance reduction  │
+│              │ - Extrapolation      │ - Avoiding overfit    │
+└──────────────┴──────────────────────┴───────────────────────┘
+```
+
+**Why Rust?**
 
 - Zero-copy, type-safe data handling
-- Deploy without runtime overhead
+- Deploy without Python runtime
 - Memory safety guarantees
-- Excellent for systems where Python isn't an option
+- Single binary, no dependencies
 
 **What You Get:**
 
-- **Automatic hyperparameter tuning** — Production-ready AutoTuner with Latin Hypercube Sampling, k-fold CV, parallel evaluation
-- **5-5.5× faster on GPU** than scalar CPU for large datasets (100K+ rows)
-- **Zero configuration** — automatic backend selection (GPU → AVX-512 → scalar fallback)
-- **Advanced features** — entropy regularization, conformal intervals, target encoding
-- **Production features** — model checkpointing, inference optimization, feature importance
+- **Hybrid Linear+Tree architecture** — `LinearThenTree` mode captures global trends with linear models, then trees learn the residuals. Extrapolates beyond training range.
+- **Built-in preprocessing pipeline** — Scalers, encoders, imputers that serialize *with* the model. No train/test skew.
+- **Linear Trees** — Decision trees with Ridge regression in leaves. 10-100x fewer trees for piecewise linear data.
+- **Automatic hyperparameter tuning** — AutoTuner with Latin Hypercube Sampling, k-fold CV, parallel evaluation. Tries all three modes automatically.
+- **GPU acceleration** — WGPU (all GPUs), CUDA (NVIDIA), with AVX-512/SVE2/scalar fallback
+- **Production features** — conformal prediction intervals, entropy regularization, ordered target encoding, zero-copy serialization
 
 ## Automatic Hyperparameter Optimization
 
@@ -36,41 +53,52 @@ See `examples/autotuner.rs` for comprehensive examples.
 ### Rust (Native)
 
 ```rust
-use treeboost::{GBDTConfig, GBDTModel};
+use treeboost::{UniversalConfig, UniversalModel, BoostingMode};
 use treeboost::dataset::DatasetLoader;
+use treeboost::loss::MseLoss;
 
 let loader = DatasetLoader::new(255);
 let dataset = loader.load_parquet("data.parquet", "target", None)?;
 
-let config = GBDTConfig::new()
+// Choose your mode based on your data
+let config = UniversalConfig::new()
+    .with_mode(BoostingMode::LinearThenTree)  // Hybrid: linear trend + tree residuals
     .with_num_rounds(100)
-    .with_max_depth(6)
+    .with_linear_rounds(10)
     .with_learning_rate(0.1);
 
-let model = GBDTModel::train_binned(&dataset, config)?;
-treeboost::serialize::save_model(&model, "model.rkyv")?;
-
+let model = UniversalModel::train(&dataset, config, &MseLoss)?;
 let predictions = model.predict(&dataset);
 ```
+
+**Quick mode selection:**
+
+| Your Data | Use This Mode |
+|-----------|---------------|
+| General tabular, categoricals | `BoostingMode::PureTree` |
+| Time-series, trending, needs extrapolation | `BoostingMode::LinearThenTree` |
+| Noisy data, want robustness | `BoostingMode::RandomForest` |
 
 ### Python (via PyO3)
 
 ```python
 import numpy as np
-from treeboost import GBDTConfig, GBDTModel
+from treeboost import UniversalConfig, UniversalModel, BoostingMode
 
 X = np.random.randn(10000, 20).astype(np.float32)
 y = (X[:, 0] + X[:, 1] * 2 + np.random.randn(10000) * 0.1).astype(np.float32)
 
-config = GBDTConfig()
+config = UniversalConfig()
+config.mode = BoostingMode.LinearThenTree  # Hybrid mode
 config.num_rounds = 100
-config.max_depth = 6
+config.linear_rounds = 10
 config.learning_rate = 0.1
 
-model = GBDTModel.train(X, y, config)
+model = UniversalModel.train(X, y, config)
 predictions = model.predict(X)
-model.save("model.rkyv")
 ```
+
+> **Architecture note:** `UniversalModel` wraps `GBDTModel` internally—`PureTree` mode delegates directly to it. You get GPU acceleration, conformal prediction, and all mature features through either API. `GBDTModel` is still available for direct use if you prefer.
 
 ## How It Works: Automatic Backend Selection
 
@@ -201,6 +229,66 @@ python benchmarks/benchmark.py --mode cross-library-gpu
 
 - **Zero-copy serialization** — 100MB+ models load in milliseconds via rkyv
 - **Streaming inference** — Predict on 1M rows in seconds
+
+## The Hybrid Architecture
+
+### How LinearThenTree Works
+
+The `LinearThenTree` mode implements what's sometimes called "Residual Boosting" or "Linear-Forest":
+
+```
+Final Prediction = Linear(x) + Trees(x)
+                   ↑              ↑
+                   │              └── Captures non-linear patterns, interactions
+                   └── Captures global trend (can extrapolate!)
+```
+
+1. **Phase 1**: Train a Ridge/LASSO/ElasticNet model on all features
+2. **Phase 2**: Compute residuals: `r = y - linear_prediction`
+3. **Phase 3**: Train GBDT on residuals (the stuff linear couldn't explain)
+
+This is powerful for data with underlying trends (time-series, pricing, growth curves). Pure trees can't extrapolate—they're bounded by training data. The linear component can.
+
+### LinearTreeBooster (Different Thing!)
+
+Don't confuse `LinearThenTree` mode with `LinearTreeBooster`. They solve different problems:
+
+| | LinearThenTree (Mode) | LinearTreeBooster (Learner) |
+|---|---|---|
+| **Structure** | 1 global linear + many standard trees | Trees with linear models *in each leaf* |
+| **Best for** | Global trends + local non-linearities | Piecewise linear data (tax brackets, physics) |
+| **Trees needed** | Normal (50-200) | Very few (5-20) |
+
+Use `LinearTreeBooster` when your data looks like segments with different slopes—the tree finds the breakpoints, Ridge fits each segment.
+
+### Preprocessing That Travels With Your Model
+
+TreeBoost's preprocessing pipeline serializes with your model:
+
+```rust
+use treeboost::preprocessing::{PipelineBuilder, StandardScaler, SimpleImputer};
+
+let pipeline = PipelineBuilder::new()
+    .add_standard_scaler(&["price", "quantity"])
+    .add_simple_imputer(&["category"], ImputeStrategy::Mode)
+    .add_frequency_encoder(&["category"])
+    .build();
+
+// Fit on training data
+pipeline.fit(&train_df)?;
+
+// Transform both train and test identically
+let train_transformed = pipeline.transform(&train_df)?;
+let test_transformed = pipeline.transform(&test_df)?;
+
+// Pipeline state saved with model - no train/test skew at inference
+```
+
+**For Trees**: Use `FrequencyEncoder` or `LabelEncoder`. OneHot creates sparse nightmares.
+
+**For Linear models**: Use `StandardScaler` (essential!) and `OneHotEncoder` (linear needs binary indicators).
+
+**For Hybrid (`LinearThenTree`)**: The linear component gets internally standardized. You can still preprocess for the tree component.
 
 ## Installation
 
