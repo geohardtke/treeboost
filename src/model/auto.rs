@@ -38,7 +38,7 @@ use crate::analysis::{Confidence, DataFrameProfile, DatasetAnalysis};
 use crate::dataset::{BinnedDataset, DataPipeline, PipelineConfig};
 use crate::features::FeaturePlan;
 use crate::model::{
-    AutoBuilder, AutoConfig, BoostingMode, BuildPhaseTimes, BuildResult, TuningLevel,
+    AutoBuilder, AutoConfig, BoostingMode, BuildPhaseTimes, BuildResult, TreeTuningResult, TuningLevel,
     UniversalModel,
 };
 use crate::preprocessing::PreprocessingPlan;
@@ -58,6 +58,9 @@ pub struct AutoModel {
     /// Boosting mode that was used
     mode: BoostingMode,
 
+    /// Target column name used during training
+    target_column: String,
+
     /// Confidence in mode selection
     mode_confidence: Option<Confidence>,
 
@@ -70,11 +73,17 @@ pub struct AutoModel {
     /// LTT tuning result (if applicable)
     ltt_tuning: Option<LttTuningResult>,
 
+    /// Tree tuning result (if PureTree/RandomForest mode was used)
+    tree_tuning: Option<TreeTuningResult>,
+
     /// Column profile from analysis
     column_profile: Option<DataFrameProfile>,
 
     /// Dataset analysis result
     analysis: Option<DatasetAnalysis>,
+
+    /// Fitted pipeline state (CRITICAL for inference!)
+    pipeline_state: Option<crate::dataset::PipelineState>,
 
     /// Total build time
     build_time: Duration,
@@ -89,11 +98,14 @@ impl AutoModel {
         Self {
             model: result.model,
             mode: result.mode,
+            target_column: result.target_column,
             mode_confidence: result.mode_confidence,
             preprocessing_plan: result.preprocessing_plan,
             feature_plan: result.feature_plan,
             ltt_tuning: result.ltt_tuning,
+            tree_tuning: result.tree_tuning,
             column_profile: result.column_profile,
+            pipeline_state: result.pipeline_state,
             analysis: result.analysis,
             build_time: result.build_time,
             phase_times: result.phase_times,
@@ -211,101 +223,192 @@ impl AutoModel {
         self.ltt_tuning.as_ref()
     }
 
+    /// Get tree tuning result (if PureTree/RandomForest mode was used)
+    pub fn tree_tuning(&self) -> Option<&TreeTuningResult> {
+        self.tree_tuning.as_ref()
+    }
+
     /// Get the underlying UniversalModel
     pub fn inner(&self) -> &UniversalModel {
         &self.model
     }
 
-    /// Get a summary of the training process
+    /// Get a comprehensive summary of the training process
+    ///
+    /// This shows the full "Smart Engineer" report explaining every decision
     pub fn summary(&self) -> String {
         let mut lines = vec![
-            "AutoModel Training Summary".to_string(),
-            "=".repeat(40),
-            format!("Mode: {:?}", self.mode),
-            format!(
-                "Mode Confidence: {:?}",
-                self.mode_confidence.as_ref().map(|c| format!("{:?}", c)).unwrap_or("N/A".to_string())
-            ),
-            format!("Total Build Time: {:?}", self.build_time),
+            "┌─────────────────────────────────────────────────────────────────┐".to_string(),
+            "│                  TreeBoost Pipeline Report                      │".to_string(),
+            "└─────────────────────────────────────────────────────────────────┘".to_string(),
             "".to_string(),
-            "Phase Times:".to_string(),
-            format!("  Profiling: {:?}", self.phase_times.profiling),
-            format!("  Preprocessing: {:?}", self.phase_times.preprocessing),
-            format!("  Feature Engineering: {:?}", self.phase_times.feature_engineering),
-            format!("  Analysis: {:?}", self.phase_times.analysis),
-            format!("  Tuning: {:?}", self.phase_times.tuning),
-            format!("  Training: {:?}", self.phase_times.training),
         ];
 
+        // Section 1: Data Profile
         if let Some(ref profile) = self.column_profile {
+            lines.push("═══ DATA PROFILE ═══".to_string());
+            lines.push(format!("  Rows: {}", profile.num_rows));
+            lines.push(format!("  Columns: {} total", profile.columns.len()));
+            lines.push(format!("    • Numeric: {}", profile.num_numeric));
+            lines.push(format!("    • Categorical: {}", profile.num_categorical));
+            lines.push(format!("  Target: {} ({:?})", self.target_column, profile.task_type));
+
+            if !profile.drop_columns.is_empty() {
+                lines.push("".to_string());
+                lines.push(format!("  Dropped {} columns:", profile.drop_columns.len()));
+                for dropped in &profile.drop_columns {
+                    lines.push(format!("    • '{}' - {}", dropped.name, dropped.reason));
+                }
+            }
             lines.push("".to_string());
-            lines.push(format!("Columns Analyzed: {}", profile.columns.len()));
-            lines.push(format!("Columns Dropped: {}", profile.drop_columns.len()));
-            lines.push(format!("Task Type: {:?}", profile.task_type));
         }
 
+        // Section 2: Preprocessing Decisions
+        if let Some(ref plan) = self.preprocessing_plan {
+            lines.push("═══ PREPROCESSING DECISIONS ═══".to_string());
+            if !plan.reasoning.is_empty() {
+                for reason in &plan.reasoning {
+                    lines.push(format!("  • {}", reason));
+                }
+            } else {
+                lines.push("  • No special preprocessing required".to_string());
+            }
+            lines.push("".to_string());
+        }
+
+        // Section 3: Feature Engineering
         if let Some(ref plan) = self.feature_plan {
+            lines.push("═══ FEATURE ENGINEERING ═══".to_string());
+
+            if !plan.polynomial_features.is_empty() {
+                lines.push(format!("  Polynomial features ({}): ", plan.polynomial_features.len()));
+                for feat in &plan.polynomial_features {
+                    lines.push(format!("    • {}", feat));
+                }
+            }
+
+            if !plan.ratio_pairs.is_empty() {
+                lines.push(format!("  Ratio features ({}): ", plan.ratio_pairs.len()));
+                for (f1, f2) in &plan.ratio_pairs {
+                    lines.push(format!("    • {}/{}", f1, f2));
+                }
+            }
+
+            if !plan.interaction_pairs.is_empty() {
+                lines.push(format!("  Interaction features ({}): ", plan.interaction_pairs.len()));
+                for (f1, f2) in plan.interaction_pairs.iter().take(5) {
+                    lines.push(format!("    • {} × {}", f1, f2));
+                }
+                if plan.interaction_pairs.len() > 5 {
+                    lines.push(format!("    ... and {} more", plan.interaction_pairs.len() - 5));
+                }
+            }
+
+            if !plan.reasoning.is_empty() {
+                lines.push("".to_string());
+                lines.push("  Reasoning:".to_string());
+                for reason in &plan.reasoning {
+                    lines.push(format!("    • {}", reason));
+                }
+            }
             lines.push("".to_string());
-            lines.push("Feature Engineering:".to_string());
-            lines.push(format!("  Polynomial Features: {}", plan.polynomial_features.len()));
-            lines.push(format!("  Ratio Pairs: {}", plan.ratio_pairs.len()));
-            lines.push(format!("  Interaction Pairs: {}", plan.interaction_pairs.len()));
         }
 
-        if let Some(ref tuning) = self.ltt_tuning {
+        // Section 4: Mode Selection
+        lines.push("═══ MODE SELECTION ═══".to_string());
+        lines.push(format!("  Selected: {:?}", self.mode));
+        lines.push(format!("  Confidence: {:?}",
+            self.mode_confidence.as_ref().map(|c| format!("{:?}", c)).unwrap_or("N/A".to_string())
+        ));
+
+        if let Some(ref analysis) = self.analysis {
             lines.push("".to_string());
-            lines.push("LTT Tuning Results:".to_string());
-            lines.push(format!("  Linear R²: {:.4}", tuning.linear_r2));
-            lines.push(format!("  Final RMSE: {:.4}", tuning.final_rmse));
-            lines.push(format!("  Linear Lambda: {:.4}", tuning.linear_params.lambda));
-            lines.push(format!("  Linear L1 Ratio: {:.4}", tuning.linear_params.l1_ratio));
-            lines.push(format!("  Tree Max Depth: {}", tuning.tree_params.max_depth));
-            lines.push(format!("  Tree Learning Rate: {:.4}", tuning.tree_params.learning_rate));
+            lines.push("  Analysis Results:".to_string());
+            lines.push(format!("    • Linear R²: {:.4} ({})",
+                analysis.linear_r2,
+                if analysis.linear_r2 > 0.5 { "Strong" } else if analysis.linear_r2 > 0.3 { "Moderate" } else { "Weak" }
+            ));
+            lines.push(format!("    • Tree Gain: {:.4} ({})",
+                analysis.tree_gain,
+                if analysis.tree_gain > 0.3 { "Strong" } else if analysis.tree_gain > 0.1 { "Moderate" } else { "Weak" }
+            ));
+
+            // Show the recommended mode from analysis
+            let recommended_mode = analysis.recommend_mode();
+            let reasoning = if analysis.linear_r2 > 0.5 && analysis.tree_gain > 0.1 {
+                "Strong linear trend + residual structure → Hybrid approach"
+            } else if analysis.linear_r2 > 0.5 {
+                "Strong linear relationship → Linear model dominates"
+            } else if analysis.tree_gain > 0.1 {
+                "Non-linear patterns → Tree-based approach"
+            } else {
+                "Moderate signals → Pure tree model"
+            };
+
+            lines.push("".to_string());
+            lines.push(format!("  Recommended: {:?}", recommended_mode));
+            lines.push(format!("  Reasoning: {}", reasoning));
         }
+        lines.push("".to_string());
+
+        // Section 5: Tuning Results (if applicable)
+        if let Some(ref tuning) = self.ltt_tuning {
+            lines.push("═══ LTT TUNING RESULTS ═══".to_string());
+            lines.push("  Linear Phase:".to_string());
+            lines.push(format!("    • R²: {:.4}", tuning.linear_r2));
+            lines.push(format!("    • Lambda: {:.4}", tuning.linear_params.lambda));
+            lines.push(format!("    • L1 Ratio: {:.4} ({})",
+                tuning.linear_params.l1_ratio,
+                if tuning.linear_params.l1_ratio == 0.0 { "Ridge" }
+                else if tuning.linear_params.l1_ratio == 1.0 { "LASSO" }
+                else { "ElasticNet" }
+            ));
+            lines.push("".to_string());
+            lines.push("  Tree Phase:".to_string());
+            lines.push(format!("    • Max Depth: {}", tuning.tree_params.max_depth));
+            lines.push(format!("    • Learning Rate: {:.4}", tuning.tree_params.learning_rate));
+            lines.push(format!("    • Num Rounds: {}", tuning.tree_params.num_rounds));
+            lines.push("".to_string());
+            lines.push(format!("  Final RMSE: {:.4}", tuning.final_rmse));
+            lines.push("".to_string());
+        }
+
+        // Section 6: Training Summary
+        lines.push("═══ TRAINING SUMMARY ═══".to_string());
+        lines.push(format!("  Total Time: {:.3}s", self.build_time.as_secs_f64()));
+        lines.push("".to_string());
+        lines.push("  Phase Breakdown:".to_string());
+        lines.push(format!("    • Profiling: {:?}", self.phase_times.profiling));
+        lines.push(format!("    • Preprocessing: {:?}", self.phase_times.preprocessing));
+        lines.push(format!("    • Feature Engineering: {:?}", self.phase_times.feature_engineering));
+        lines.push(format!("    • Analysis: {:?}", self.phase_times.analysis));
+        lines.push(format!("    • Tuning: {:?}", self.phase_times.tuning));
+        lines.push(format!("    • Training: {:?}", self.phase_times.training));
+        lines.push("".to_string());
+
+        lines.push("┌─────────────────────────────────────────────────────────────────┐".to_string());
+        lines.push("│      TreeBoost: The Smart Engineer That Explains Itself         │".to_string());
+        lines.push("└─────────────────────────────────────────────────────────────────┘".to_string());
 
         lines.join("\n")
     }
 
     /// Prepare a DataFrame for prediction
     fn prepare_dataset_for_prediction(&self, df: &DataFrame) -> Result<BinnedDataset> {
-        // Get feature column names
-        let feature_cols: Vec<String> = df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        // CRITICAL: Use the fitted pipeline state from training!
+        // Without this, predictions will be nonsense because the model expects
+        // features encoded the same way as during training.
+        let pipeline_state = self.pipeline_state.as_ref()
+            .ok_or_else(|| TreeBoostError::Data(
+                "AutoModel missing fitted pipeline state - cannot make predictions".to_string()
+            ))?;
 
-        let feature_col_refs: Vec<&str> = feature_cols.iter().map(|s| s.as_str()).collect();
-
-        // Use DataPipeline with default config
+        // Use DataPipeline to transform the test data using the fitted state
         let pipeline_config = PipelineConfig::default();
         let pipeline = DataPipeline::new(pipeline_config);
 
-        // For prediction, we need a dummy target - use first numeric column
-        // This is a workaround; ideally we'd have a predict-only pipeline
-        let dummy_target = df
-            .get_column_names()
-            .iter()
-            .find(|name| {
-                match df.column(name.as_str()) {
-                    Ok(col) => matches!(
-                        col.dtype(),
-                        DataType::Float32 | DataType::Float64 | DataType::Int32 | DataType::Int64
-                    ),
-                    Err(_) => false,
-                }
-            })
-            .map(|s| s.to_string())
-            .ok_or_else(|| TreeBoostError::Data("No numeric column for dummy target".to_string()))?;
-
-        // Create a modified DataFrame with target
-        let df_with_target = df.clone();
-
-        let (dataset, _state) = pipeline.process_for_training(
-            df_with_target,
-            &dummy_target,
-            Some(&feature_col_refs),
-        )?;
+        // process_for_inference() applies the learned encodings/scalers/binners
+        let dataset = pipeline.process_for_inference(df.clone(), pipeline_state)?;
 
         Ok(dataset)
     }

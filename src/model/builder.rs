@@ -13,6 +13,13 @@
 //! AutoML systems that try every combination, TreeBoost analyzes dataset
 //! characteristics and makes informed decisions.
 //!
+//! # Architecture
+//!
+//! This module is split into three files for maintainability:
+//! - `config.rs` - Configuration types (AutoConfig, BuildResult, etc.)
+//! - `tuning.rs` - Hyperparameter tuning methods
+//! - `builder.rs` - Core AutoBuilder and orchestration logic (this file)
+//!
 //! # Example
 //!
 //! ```ignore
@@ -36,211 +43,21 @@
 //! let predictions = model.predict(&test_df)?;
 //! ```
 
-use crate::analysis::{
-    Confidence, DatasetAnalysis, DataFrameProfile,
-};
+use crate::analysis::{Confidence, DatasetAnalysis, DataFrameProfile};
 use crate::dataset::{BinnedDataset, DataPipeline, PipelineConfig};
 use crate::features::{SmartFeatureEngine, FeaturePlan};
-use crate::learner::TreeConfig;
 use crate::model::{BoostingMode, UniversalConfig, UniversalModel};
-use crate::preprocessing::{
-    SmartPreprocessor, PreprocessingPlan, ModelType,
-};
-use crate::tuner::ltt::{LttTuner, LttTunerConfig, LttTuningResult};
-use crate::{Result, TreeBoostError};
+use crate::model::config::{AutoConfig, BuildPhaseTimes, BuildResult, TuningLevel};
+use crate::model::progress::{ProgressCallback, ProgressUpdate, TrainingPhase};
+use crate::preprocessing::{ModelType, PreprocessingPlan, SmartPreprocessor};
+use crate::Result;
 use polars::prelude::*;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Tuning intensity level
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum TuningLevel {
-    /// Minimal tuning - use sensible defaults
-    /// Best for: Quick experiments, small datasets
-    Quick,
+// Import tuning functions
+use super::tuning;
 
-    /// Moderate tuning - good balance of speed and quality
-    /// Best for: Most production use cases
-    #[default]
-    Standard,
-
-    /// Extensive tuning - thorough hyperparameter search
-    /// Best for: Maximum accuracy when time is not a constraint
-    Thorough,
-
-    /// No tuning - use provided hyperparameters
-    None,
-}
-
-/// AutoBuilder configuration
-#[derive(Debug, Clone)]
-pub struct AutoConfig {
-    /// Tuning intensity
-    pub tuning_level: TuningLevel,
-
-    /// Validation split ratio (default: 0.2)
-    pub val_ratio: f32,
-
-    /// Whether to enable automatic feature engineering
-    pub auto_features: bool,
-
-    /// Whether to enable automatic preprocessing
-    pub auto_preprocessing: bool,
-
-    /// Whether to enable automatic mode selection
-    pub auto_mode: bool,
-
-    /// Force a specific mode (overrides auto_mode if set)
-    pub force_mode: Option<BoostingMode>,
-
-    /// Maximum number of features to generate
-    pub max_generated_features: usize,
-
-    /// Random seed for reproducibility
-    pub seed: u64,
-
-    /// Verbose output
-    pub verbose: bool,
-
-    /// Maximum time budget for training (None = no limit)
-    /// AutoBuilder will adapt tuning intensity to fit within this budget
-    pub time_budget: Option<Duration>,
-}
-
-impl Default for AutoConfig {
-    fn default() -> Self {
-        Self {
-            tuning_level: TuningLevel::Standard,
-            val_ratio: 0.2,
-            auto_features: true,
-            auto_preprocessing: true,
-            auto_mode: true,
-            force_mode: None,
-            max_generated_features: 50,
-            seed: 42,
-            verbose: false,
-            time_budget: None,
-        }
-    }
-}
-
-impl AutoConfig {
-    /// Create a new AutoConfig with defaults
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set tuning level
-    pub fn with_tuning(mut self, level: TuningLevel) -> Self {
-        self.tuning_level = level;
-        self
-    }
-
-    /// Set validation split ratio
-    pub fn with_validation_split(mut self, ratio: f32) -> Self {
-        self.val_ratio = ratio.clamp(0.1, 0.4);
-        self
-    }
-
-    /// Enable/disable automatic feature engineering
-    pub fn with_auto_features(mut self, enabled: bool) -> Self {
-        self.auto_features = enabled;
-        self
-    }
-
-    /// Enable/disable automatic preprocessing
-    pub fn with_auto_preprocessing(mut self, enabled: bool) -> Self {
-        self.auto_preprocessing = enabled;
-        self
-    }
-
-    /// Enable/disable automatic mode selection
-    pub fn with_auto_mode(mut self, enabled: bool) -> Self {
-        self.auto_mode = enabled;
-        self
-    }
-
-    /// Force a specific boosting mode
-    pub fn with_mode(mut self, mode: BoostingMode) -> Self {
-        self.force_mode = Some(mode);
-        self.auto_mode = false;
-        self
-    }
-
-    /// Set random seed
-    pub fn with_seed(mut self, seed: u64) -> Self {
-        self.seed = seed;
-        self
-    }
-
-    /// Enable verbose output
-    pub fn with_verbose(mut self, verbose: bool) -> Self {
-        self.verbose = verbose;
-        self
-    }
-
-    /// Set time budget for training
-    ///
-    /// AutoBuilder will adapt tuning intensity to fit within this budget.
-    /// For example, if 60 seconds is allocated and profiling takes 10 seconds,
-    /// the remaining 50 seconds will be split between tuning and training.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use std::time::Duration;
-    /// let config = AutoConfig::new()
-    ///     .with_time_budget(Duration::from_secs(60)); // 1 minute max
-    /// ```
-    pub fn with_time_budget(mut self, budget: Duration) -> Self {
-        self.time_budget = Some(budget);
-        self
-    }
-}
-
-/// Build result containing the trained model and metadata
-#[derive(Debug)]
-pub struct BuildResult {
-    /// The trained model
-    pub model: UniversalModel,
-
-    /// The boosting mode used
-    pub mode: BoostingMode,
-
-    /// Mode selection confidence (if auto mode was used)
-    pub mode_confidence: Option<Confidence>,
-
-    /// Preprocessing plan that was applied
-    pub preprocessing_plan: Option<PreprocessingPlan>,
-
-    /// Feature engineering plan that was applied
-    pub feature_plan: Option<FeaturePlan>,
-
-    /// LTT tuning result (if LTT mode was used)
-    pub ltt_tuning: Option<LttTuningResult>,
-
-    /// Column profile from analysis
-    pub column_profile: Option<DataFrameProfile>,
-
-    /// Dataset analysis result
-    pub analysis: Option<DatasetAnalysis>,
-
-    /// Total build time
-    pub build_time: Duration,
-
-    /// Time breakdown by phase
-    pub phase_times: BuildPhaseTimes,
-}
-
-/// Time breakdown for build phases
-#[derive(Debug, Clone, Default)]
-pub struct BuildPhaseTimes {
-    pub profiling: Duration,
-    pub preprocessing: Duration,
-    pub feature_engineering: Duration,
-    pub analysis: Duration,
-    pub tuning: Duration,
-    pub training: Duration,
-}
 
 /// AutoBuilder: High-level AutoML interface
 pub struct AutoBuilder {
@@ -310,6 +127,22 @@ impl AutoBuilder {
         self
     }
 
+    /// Set progress callback for tracking training phases
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use treeboost::model::ConsoleProgress;
+    /// use std::sync::Arc;
+    ///
+    /// let builder = AutoBuilder::new()
+    ///     .with_progress_callback(Arc::new(ConsoleProgress::detailed()));
+    /// ```
+    pub fn with_progress_callback(mut self, callback: Arc<dyn ProgressCallback>) -> Self {
+        self.config.progress_callback = callback;
+        self
+    }
+
     /// Fit the model on a Polars DataFrame
     ///
     /// This is the main entry point. It:
@@ -336,6 +169,13 @@ impl AutoBuilder {
         }
 
         // === Phase 1: Column Profiling ===
+        self.config.progress_callback.on_progress(&ProgressUpdate {
+            phase: TrainingPhase::Profiling,
+            progress_pct: TrainingPhase::Profiling.progress_pct(),
+            elapsed: start.elapsed(),
+            message: Some(format!("Analyzing {} columns", df.width())),
+        });
+
         let phase_start = Instant::now();
         let profile = self.profile_dataframe(df, target_col)?;
         phase_times.profiling = phase_start.elapsed();
@@ -350,6 +190,13 @@ impl AutoBuilder {
         }
 
         // === Phase 2: Determine Model Type and Preprocessing ===
+        self.config.progress_callback.on_progress(&ProgressUpdate {
+            phase: TrainingPhase::Preprocessing,
+            progress_pct: TrainingPhase::Preprocessing.progress_pct(),
+            elapsed: start.elapsed(),
+            message: Some(format!("{} columns retained", profile.columns.len().saturating_sub(profile.drop_columns.len()))),
+        });
+
         let phase_start = Instant::now();
         let (model_type, preprocessing_plan) = self.plan_preprocessing(&profile)?;
         phase_times.preprocessing = phase_start.elapsed();
@@ -378,6 +225,13 @@ impl AutoBuilder {
             }
         }
 
+        self.config.progress_callback.on_progress(&ProgressUpdate {
+            phase: TrainingPhase::FeatureEngineering,
+            progress_pct: TrainingPhase::FeatureEngineering.progress_pct(),
+            elapsed: start.elapsed(),
+            message: if skip_features { Some("Skipped".to_string()) } else { Some("Planning features".to_string()) },
+        });
+
         let phase_start = Instant::now();
         let feature_plan = if !skip_features {
             Some(self.plan_features(&profile)?)
@@ -398,10 +252,24 @@ impl AutoBuilder {
         }
 
         // === Phase 4: Prepare Dataset ===
-        // Convert DataFrame to BinnedDataset
-        let dataset = self.prepare_dataset(df, target_col, &profile)?;
+        // Convert DataFrame to BinnedDataset (and capture pipeline state for inference!)
+        self.config.progress_callback.on_progress(&ProgressUpdate {
+            phase: TrainingPhase::DatasetPreparation,
+            progress_pct: TrainingPhase::DatasetPreparation.progress_pct(),
+            elapsed: start.elapsed(),
+            message: Some(format!("{} rows", df.height())),
+        });
+
+        let (dataset, pipeline_state) = self.prepare_dataset_and_state(df, target_col)?;
 
         // === Phase 5: Dataset Analysis (for mode selection) ===
+        self.config.progress_callback.on_progress(&ProgressUpdate {
+            phase: TrainingPhase::Analysis,
+            progress_pct: TrainingPhase::Analysis.progress_pct(),
+            elapsed: start.elapsed(),
+            message: Some("Selecting optimal mode".to_string()),
+        });
+
         let phase_start = Instant::now();
         let (mode, analysis, mode_confidence) = self.select_mode(&dataset)?;
         phase_times.analysis = phase_start.elapsed();
@@ -437,13 +305,20 @@ impl AutoBuilder {
             }
         }
 
+        self.config.progress_callback.on_progress(&ProgressUpdate {
+            phase: TrainingPhase::Tuning,
+            progress_pct: TrainingPhase::Tuning.progress_pct(),
+            elapsed: start.elapsed(),
+            message: Some(format!("{:?} - {:?}", adapted_config.tuning_level, mode)),
+        });
+
         let phase_start = Instant::now();
-        let (universal_config, ltt_tuning) = if adapted_config.tuning_level == TuningLevel::None {
+        let (universal_config, ltt_tuning, tree_tuning) = if adapted_config.tuning_level == TuningLevel::None {
             // Skip tuning, use defaults
-            let config = self.create_config_for_mode(mode, &dataset);
-            (config, None)
+            let config = tuning::create_config_for_mode(mode, self.config.tuning_level);
+            (config, None, None)
         } else {
-            self.tune_hyperparameters(
+            tuning::tune_hyperparameters(&self.config, 
                 &dataset,
                 mode,
                 df,
@@ -454,13 +329,20 @@ impl AutoBuilder {
         phase_times.tuning = phase_start.elapsed();
 
         if self.config.verbose {
-            println!(
-                "  [Tuning] {} trials completed",
-                ltt_tuning.as_ref().map(|t| t.history.linear_trials.len()).unwrap_or(0)
-            );
+            let num_trials = ltt_tuning.as_ref().map(|t| t.history.linear_trials.len())
+                .or_else(|| tree_tuning.as_ref().map(|t| t.num_trials))
+                .unwrap_or(0);
+            println!("  [Tuning] {} trials completed", num_trials);
         }
 
         // === Phase 7: Train Final Model ===
+        self.config.progress_callback.on_progress(&ProgressUpdate {
+            phase: TrainingPhase::Training,
+            progress_pct: TrainingPhase::Training.progress_pct(),
+            elapsed: start.elapsed(),
+            message: Some(format!("{:?} model", mode)),
+        });
+
         let phase_start = Instant::now();
         let model = self.train_model(&dataset, universal_config)?;
         phase_times.training = phase_start.elapsed();
@@ -472,15 +354,26 @@ impl AutoBuilder {
             );
         }
 
+        // Emit completion progress
+        self.config.progress_callback.on_progress(&ProgressUpdate {
+            phase: TrainingPhase::Complete,
+            progress_pct: TrainingPhase::Complete.progress_pct(),
+            elapsed: start.elapsed(),
+            message: Some(format!("Total: {:?}", start.elapsed())),
+        });
+
         Ok(BuildResult {
             model,
             mode,
+            target_column: target_col.to_string(),
             mode_confidence: Some(mode_confidence),
             preprocessing_plan: Some(preprocessing_plan),
             feature_plan,
             ltt_tuning,
+            tree_tuning,
             column_profile: Some(profile),
             analysis,
+            pipeline_state: Some(pipeline_state),  // CRITICAL for inference!
             build_time: start.elapsed(),
             phase_times,
         })
@@ -516,13 +409,12 @@ impl AutoBuilder {
         Ok(plan)
     }
 
-    /// Prepare dataset from DataFrame
-    fn prepare_dataset(
+    /// Prepare dataset and return pipeline state (for AutoModel inference)
+    fn prepare_dataset_and_state(
         &self,
         df: &DataFrame,
         target_col: &str,
-        _profile: &DataFrameProfile,
-    ) -> Result<BinnedDataset> {
+    ) -> Result<(BinnedDataset, crate::dataset::PipelineState)> {
         // Get feature column names (all except target)
         let feature_cols: Vec<String> = df
             .get_column_names()
@@ -538,13 +430,13 @@ impl AutoBuilder {
         let pipeline_config = PipelineConfig::default();
         let pipeline = DataPipeline::new(pipeline_config);
 
-        let (dataset, _state) = pipeline.process_for_training(
+        let (dataset, pipeline_state) = pipeline.process_for_training(
             df.clone(),
             target_col,
             Some(&feature_col_refs),
         )?;
 
-        Ok(dataset)
+        Ok((dataset, pipeline_state))
     }
 
     /// Select boosting mode based on analysis
@@ -572,192 +464,6 @@ impl AutoBuilder {
     }
 
     /// Tune hyperparameters based on mode
-    fn tune_hyperparameters(
-        &self,
-        dataset: &BinnedDataset,
-        mode: BoostingMode,
-        df: &DataFrame,
-        target_col: &str,
-        profile: &DataFrameProfile,
-    ) -> Result<(UniversalConfig, Option<LttTuningResult>)> {
-        match self.config.tuning_level {
-            TuningLevel::None => {
-                // No tuning - use defaults
-                let config = UniversalConfig::default().with_mode(mode);
-                Ok((config, None))
-            }
-            _ => {
-                // Tune based on mode
-                match mode {
-                    BoostingMode::LinearThenTree => {
-                        self.tune_ltt(dataset, df, target_col, profile)
-                    }
-                    _ => {
-                        // For PureTree and RandomForest, use standard config
-                        let config = self.create_config_for_mode(mode, dataset);
-                        Ok((config, None))
-                    }
-                }
-            }
-        }
-    }
-
-    /// Tune LinearThenTree mode
-    fn tune_ltt(
-        &self,
-        _dataset: &BinnedDataset,
-        df: &DataFrame,
-        target_col: &str,
-        profile: &DataFrameProfile,
-    ) -> Result<(UniversalConfig, Option<LttTuningResult>)> {
-        // Extract raw features for linear tuning
-        let (features, targets, num_features) = self.extract_raw_features(df, target_col, profile)?;
-
-        // Create tuner config based on tuning level
-        let tuner_config = match self.config.tuning_level {
-            TuningLevel::Quick => LttTunerConfig::quick(),
-            TuningLevel::Standard => LttTunerConfig::default(),
-            TuningLevel::Thorough => LttTunerConfig::thorough(),
-            TuningLevel::None => LttTunerConfig::quick(), // Should not reach here
-        };
-
-        let tuner = LttTuner::new(tuner_config);
-        let result = tuner.tune(&features, num_features, &targets)?;
-
-        // Build UniversalConfig from tuning result
-        let tree_config = TreeConfig::default()
-            .with_max_depth(result.tree_params.max_depth as usize);
-
-        let config = UniversalConfig::default()
-            .with_mode(BoostingMode::LinearThenTree)
-            .with_learning_rate(result.tree_params.learning_rate)
-            .with_num_rounds(result.tree_params.num_rounds as usize)
-            .with_tree_config(tree_config)
-            .with_linear_config(result.linear_params.to_config());
-
-        Ok((config, Some(result)))
-    }
-
-    /// Extract raw features from DataFrame for linear model tuning
-    ///
-    /// NOTE: This is a simplified extraction for LTT hyperparameter tuning.
-    /// - Only numeric features are used (categorical features need encoding first)
-    /// - Columns marked for dropping in the profile are excluded
-    /// - For production prediction, use the full DataPipeline with preprocessing
-    fn extract_raw_features(
-        &self,
-        df: &DataFrame,
-        target_col: &str,
-        profile: &DataFrameProfile,
-    ) -> Result<(Vec<f32>, Vec<f32>, usize)> {
-        let num_rows = df.height();
-
-        // Build set of columns to drop based on profile
-        let drop_cols: std::collections::HashSet<String> = profile
-            .drop_columns
-            .iter()
-            .map(|d| d.name.clone())
-            .collect();
-
-        // Get numeric columns only, excluding dropped columns
-        let numeric_cols: Vec<String> = df
-            .get_column_names()
-            .iter()
-            .filter(|&name| {
-                let name_str = name.as_str();
-
-                // Skip target column
-                if name_str == target_col {
-                    return false;
-                }
-
-                // Skip columns marked for dropping
-                if drop_cols.contains(name_str) {
-                    return false;
-                }
-
-                // Keep only numeric types
-                match df.column(name_str) {
-                    Ok(col) => matches!(
-                        col.dtype(),
-                        DataType::Float32 | DataType::Float64 | DataType::Int32 | DataType::Int64
-                    ),
-                    Err(_) => false,
-                }
-            })
-            .map(|s| s.to_string())
-            .collect();
-
-        let num_features = numeric_cols.len();
-        if num_features == 0 {
-            return Err(TreeBoostError::Data(
-                format!(
-                    "No numeric features found for linear model tuning. \
-                     Dataset has {} columns, {} dropped (constant/ID/text), {} remaining. \
-                     Categorical features need encoding first - consider using DataPipeline.",
-                    df.width(),
-                    drop_cols.len(),
-                    df.width() - drop_cols.len() - 1 // -1 for target
-                )
-            ));
-        }
-
-        // Extract features (row-major)
-        let mut features = Vec::with_capacity(num_rows * num_features);
-        for row_idx in 0..num_rows {
-            for col_name in &numeric_cols {
-                let col = df.column(col_name)?;
-                let val = col.get(row_idx).map_err(|e| TreeBoostError::Data(e.to_string()))?;
-                let f_val = match val {
-                    AnyValue::Float32(v) => v,
-                    AnyValue::Float64(v) => v as f32,
-                    AnyValue::Int32(v) => v as f32,
-                    AnyValue::Int64(v) => v as f32,
-                    AnyValue::Null => 0.0, // Simple imputation
-                    _ => 0.0,
-                };
-                features.push(f_val);
-            }
-        }
-
-        // Extract targets
-        let target_col_series = df.column(target_col)?;
-        let targets: Vec<f32> = (0..num_rows)
-            .map(|i| {
-                match target_col_series.get(i) {
-                    Ok(val) => match val {
-                        AnyValue::Float32(v) => v,
-                        AnyValue::Float64(v) => v as f32,
-                        AnyValue::Int32(v) => v as f32,
-                        AnyValue::Int64(v) => v as f32,
-                        _ => 0.0,
-                    },
-                    Err(_) => 0.0,
-                }
-            })
-            .collect();
-
-        Ok((features, targets, num_features))
-    }
-
-    /// Create config for non-LTT modes
-    fn create_config_for_mode(&self, mode: BoostingMode, _dataset: &BinnedDataset) -> UniversalConfig {
-        let (num_rounds, learning_rate, max_depth) = match self.config.tuning_level {
-            TuningLevel::Quick => (100, 0.1, 4),
-            TuningLevel::Standard => (500, 0.1, 6),
-            TuningLevel::Thorough => (1000, 0.05, 8),
-            TuningLevel::None => (100, 0.1, 6),
-        };
-
-        let tree_config = TreeConfig::default()
-            .with_max_depth(max_depth);
-
-        UniversalConfig::default()
-            .with_mode(mode)
-            .with_num_rounds(num_rounds)
-            .with_learning_rate(learning_rate)
-            .with_tree_config(tree_config)
-    }
 
     /// Train the final model
     fn train_model(

@@ -125,7 +125,7 @@ pub use learner::{
     TreeBooster, TreeConfig, WeakLearner,
 };
 pub use loss::{sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, PseudoHuberLoss};
-pub use model::{AutoBuilder, AutoConfig, AutoModel, BoostingMode, BuildPhaseTimes, BuildResult, ModeSelection, TuningLevel, UniversalConfig, UniversalModel};
+pub use model::{AutoBuilder, AutoConfig, AutoModel, BoostingMode, BuildPhaseTimes, BuildResult, ConsoleProgress, ModeSelection, ProgressCallback, ProgressUpdate, QuietProgress, TrainingPhase, TuningLevel, UniversalConfig, UniversalModel};
 pub use monitoring::{AlertLevel, CVHoldoutTracker, ShiftDetector, ShiftResult};
 
 // Analysis module exports
