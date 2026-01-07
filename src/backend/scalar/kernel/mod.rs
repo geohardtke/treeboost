@@ -155,9 +155,7 @@ pub fn find_best_split(
     {
         if has_avx2() {
             // Safety: we just checked for AVX2 support
-            return unsafe {
-                find_best_split_simd(hist_grads, hist_hess, hist_counts, params)
-            };
+            return unsafe { find_best_split_simd(hist_grads, hist_hess, hist_counts, params) };
         }
     }
 
@@ -216,18 +214,16 @@ pub unsafe fn histogram_accumulate(
                     hist_counts,
                 })
             }
-            _ => {
-                fallback::histogram_accumulate_scalar(fallback::HistogramAccumParams {
-                    feature_bins,
-                    row_indices,
-                    num_rows,
-                    gradients,
-                    hessians,
-                    hist_grads,
-                    hist_hess,
-                    hist_counts,
-                })
-            }
+            _ => fallback::histogram_accumulate_scalar(fallback::HistogramAccumParams {
+                feature_bins,
+                row_indices,
+                num_rows,
+                gradients,
+                hessians,
+                hist_grads,
+                hist_hess,
+                hist_counts,
+            }),
         }
     }
 
@@ -282,38 +278,50 @@ pub unsafe fn histogram_accumulate_contiguous(
     #[cfg(target_arch = "x86_64")]
     {
         match simd_level() {
-            SimdLevel::Avx512 | SimdLevel::Avx2 => {
-                x86::histogram_accumulate_contiguous_avx2(
-                    feature_bins, num_rows,
-                    gradients, hessians,
-                    hist_grads, hist_hess, hist_counts,
-                )
-            }
-            _ => {
-                fallback::histogram_accumulate_contiguous_scalar(
-                    feature_bins, num_rows,
-                    gradients, hessians,
-                    hist_grads, hist_hess, hist_counts,
-                )
-            }
+            SimdLevel::Avx512 | SimdLevel::Avx2 => x86::histogram_accumulate_contiguous_avx2(
+                feature_bins,
+                num_rows,
+                gradients,
+                hessians,
+                hist_grads,
+                hist_hess,
+                hist_counts,
+            ),
+            _ => fallback::histogram_accumulate_contiguous_scalar(
+                feature_bins,
+                num_rows,
+                gradients,
+                hessians,
+                hist_grads,
+                hist_hess,
+                hist_counts,
+            ),
         }
     }
 
     #[cfg(target_arch = "aarch64")]
     {
         fallback::histogram_accumulate_contiguous_scalar(
-            feature_bins, num_rows,
-            gradients, hessians,
-            hist_grads, hist_hess, hist_counts,
+            feature_bins,
+            num_rows,
+            gradients,
+            hessians,
+            hist_grads,
+            hist_hess,
+            hist_counts,
         )
     }
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         fallback::histogram_accumulate_contiguous_scalar(
-            feature_bins, num_rows,
-            gradients, hessians,
-            hist_grads, hist_hess, hist_counts,
+            feature_bins,
+            num_rows,
+            gradients,
+            hessians,
+            hist_grads,
+            hist_hess,
+            hist_counts,
         )
     }
 }

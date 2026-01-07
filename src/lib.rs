@@ -116,22 +116,34 @@ mod python;
 pub use backend::{BackendConfig, BackendSelector, BackendType, GpuMode, HistogramBackend};
 pub use booster::{GBDTConfig, GBDTModel};
 pub use dataset::{BinnedDataset, FeatureInfo, FeatureType, QuantileBinner};
-pub use ensemble::{EnsembleBuilder, StackedEnsemble, MultiSeedConfig, SelectionConfig as EnsembleSelectionConfig, StackingConfig};
-pub use features::{FeatureGenerationConfig, FeatureGenerator, FeatureSelector, PolynomialGenerator, RatioGenerator, SelectionConfig};
+pub use ensemble::{
+    EnsembleBuilder, MultiSeedConfig, SelectionConfig as EnsembleSelectionConfig, StackedEnsemble,
+    StackingConfig,
+};
+pub use features::{
+    FeatureGenerationConfig, FeatureGenerator, FeatureSelector, PolynomialGenerator,
+    RatioGenerator, SelectionConfig,
+};
 pub use histogram::HistogramBuilder;
 pub use inference::Prediction;
 pub use learner::{
     Booster, LeafLinearModel, LinearBooster, LinearConfig, LinearTreeBooster, LinearTreeConfig,
     TreeBooster, TreeConfig, WeakLearner,
 };
-pub use loss::{sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, PseudoHuberLoss};
-pub use model::{AutoBuilder, AutoConfig, AutoModel, BoostingMode, BuildPhaseTimes, BuildResult, ConsoleProgress, ModeSelection, ProgressCallback, ProgressUpdate, QuietProgress, TrainingPhase, TuningLevel, UniversalConfig, UniversalModel};
+pub use loss::{
+    sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, PseudoHuberLoss,
+};
+pub use model::{
+    AutoBuilder, AutoConfig, AutoModel, BoostingMode, BuildPhaseTimes, BuildResult,
+    ConsoleProgress, ModeSelection, ProgressCallback, ProgressUpdate, QuietProgress, TrainingPhase,
+    TuningLevel, UniversalConfig, UniversalModel,
+};
 pub use monitoring::{AlertLevel, CVHoldoutTracker, ShiftDetector, ShiftResult};
 
 // Analysis module exports
 pub use analysis::{
-    AnalysisConfig, AnalysisReport, Confidence, DatasetAnalysis, Recommendation,
-    compute_correlation, compute_r2, compute_variance,
+    compute_correlation, compute_r2, compute_variance, AnalysisConfig, AnalysisReport, Confidence,
+    DatasetAnalysis, Recommendation,
 };
 pub use preprocessing::{
     EncodingMap, FrequencyEncoder, ImputeStrategy, IndicatorImputer, LabelEncoder, MinMaxScaler,
@@ -139,7 +151,9 @@ pub use preprocessing::{
     SimpleImputer, StandardScaler, UnknownStrategy, YeoJohnsonTransform,
 };
 pub use tree::{InteractionConstraints, MonotonicConstraint};
-pub use tuner::{AutoTuner, EvalStrategy, GridStrategy, ModelFormat, ParameterSpace, SearchHistory, TunerConfig};
+pub use tuner::{
+    AutoTuner, EvalStrategy, GridStrategy, ModelFormat, ParameterSpace, SearchHistory, TunerConfig,
+};
 
 /// Library error type
 #[derive(Debug, thiserror::Error)]
@@ -240,7 +254,10 @@ pub fn auto_train(df: &polars::prelude::DataFrame, target_col: &str) -> Result<A
 ///     .finish()?;
 /// let predictions = model.predict(&test_df)?;
 /// ```
-pub fn auto_train_csv(csv_path: impl AsRef<std::path::Path>, target_col: &str) -> Result<AutoModel> {
+pub fn auto_train_csv(
+    csv_path: impl AsRef<std::path::Path>,
+    target_col: &str,
+) -> Result<AutoModel> {
     use polars::prelude::*;
 
     let df = CsvReadOptions::default()

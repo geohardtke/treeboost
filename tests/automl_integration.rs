@@ -22,9 +22,7 @@ fn create_linear_regression_dataset(n_rows: usize) -> DataFrame {
         .iter()
         .zip(x2.iter())
         .zip(x3.iter())
-        .map(|((&x1, &x2), &x3)| {
-            2.0 * x1 + 0.5 * x2 - 0.1 * x3 + rng.f64() * 5.0 - 2.5
-        })
+        .map(|((&x1, &x2), &x3)| 2.0 * x1 + 0.5 * x2 - 0.1 * x3 + rng.f64() * 5.0 - 2.5)
         .collect();
 
     df!(
@@ -47,9 +45,7 @@ fn create_nonlinear_regression_dataset(n_rows: usize) -> DataFrame {
     let y: Vec<f64> = x1
         .iter()
         .zip(x2.iter())
-        .map(|(&x1, &x2)| {
-            (x1.sin() * x2) + rng.f64() * 2.0 - 1.0
-        })
+        .map(|(&x1, &x2)| (x1.sin() * x2) + rng.f64() * 2.0 - 1.0)
         .collect();
 
     df!(
@@ -328,8 +324,10 @@ fn test_different_tuning_levels() {
     let model_thorough = auto_train_thorough(&df, "target").expect("Thorough should succeed");
     let time_thorough = model_thorough.build_time();
 
-    println!("Build times - Quick: {:?}, Standard: {:?}, Thorough: {:?}",
-             time_quick, time_standard, time_thorough);
+    println!(
+        "Build times - Quick: {:?}, Standard: {:?}, Thorough: {:?}",
+        time_quick, time_standard, time_thorough
+    );
 
     // All should produce valid predictions
     assert_eq!(model_quick.predict(&df).unwrap().len(), 150);
@@ -349,7 +347,9 @@ fn test_time_budget_control() {
         .with_verbose(true);
 
     let start = std::time::Instant::now();
-    let result = builder.fit(&df, "target").expect("Training with time budget should succeed");
+    let result = builder
+        .fit(&df, "target")
+        .expect("Training with time budget should succeed");
     let elapsed = start.elapsed();
 
     println!("Training with 15s budget completed in {:?}", elapsed);
@@ -377,10 +377,12 @@ fn test_time_budget_adaptations() {
     let builder = AutoBuilder::new()
         .with_time_budget(Duration::from_secs(5))
         .with_verbose(true)
-        .with_auto_features(true)  // Request features
-        .with_tuning(TuningLevel::Standard);  // Request tuning
+        .with_auto_features(true) // Request features
+        .with_tuning(TuningLevel::Standard); // Request tuning
 
-    let result = builder.fit(&df, "target").expect("Training with tight budget should succeed");
+    let result = builder
+        .fit(&df, "target")
+        .expect("Training with tight budget should succeed");
 
     // With tight budget, features and tuning may be skipped
     // Just verify it completed and works
@@ -397,7 +399,7 @@ fn test_time_budget_via_config() {
 
     let config = AutoConfig::default()
         .with_time_budget(Duration::from_secs(20))
-        .with_tuning(TuningLevel::Thorough);  // Request thorough but budget will adapt it
+        .with_tuning(TuningLevel::Thorough); // Request thorough but budget will adapt it
 
     let builder = AutoBuilder::with_config(config);
     let result = builder.fit(&df, "target").expect("Training should succeed");

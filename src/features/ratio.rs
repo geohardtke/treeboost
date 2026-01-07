@@ -61,11 +61,7 @@ impl RatioGenerator {
     /// Auto-select pairs based on correlation
     ///
     /// Selects the top-k most correlated pairs for each feature.
-    pub fn auto_select(
-        data: &[f32],
-        num_features: usize,
-        max_per_feature: usize,
-    ) -> Self {
+    pub fn auto_select(data: &[f32], num_features: usize, max_per_feature: usize) -> Self {
         if num_features == 0 || data.is_empty() || max_per_feature == 0 {
             return Self::from_pairs(Vec::new());
         }
@@ -87,7 +83,8 @@ impl RatioGenerator {
                 .collect();
 
             // Sort by absolute correlation (descending)
-            feature_correlations.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            feature_correlations
+                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
             // Take top-k
             for (j, _) in feature_correlations.into_iter().take(max_per_feature) {
@@ -241,7 +238,8 @@ mod tests {
     #[test]
     fn test_ratio_empty() {
         let ratio = RatioGenerator::from_pairs(vec![]);
-        let (new_data, new_names) = ratio.generate(&[1.0, 2.0], 2, &["a".to_string(), "b".to_string()]);
+        let (new_data, new_names) =
+            ratio.generate(&[1.0, 2.0], 2, &["a".to_string(), "b".to_string()]);
         assert!(new_data.is_empty());
         assert!(new_names.is_empty());
     }

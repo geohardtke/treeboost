@@ -150,7 +150,10 @@ fn main() {
         let error = (predictions[i] - dataset.targets()[i]).abs();
         println!(
             "   Sample {}: Pred={:.4}, Actual={:.4}, Error={:.4}",
-            i, predictions[i], dataset.targets()[i], error
+            i,
+            predictions[i],
+            dataset.targets()[i],
+            error
         );
     }
     println!();

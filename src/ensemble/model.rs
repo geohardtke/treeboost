@@ -150,7 +150,6 @@ impl StackedEnsemble {
     }
 }
 
-
 /// Builder for constructing stacked ensembles
 ///
 /// Provides a fluent API for configuring and building ensemble models.
@@ -278,15 +277,17 @@ impl EnsembleBuilder {
             match self.base_config.loss_type {
                 crate::booster::LossType::BinaryLogLoss => Metric::BinaryLogLoss,
                 crate::booster::LossType::MultiClassLogLoss { num_classes } => {
-                    Metric::MultiClassLogLoss { n_classes: num_classes }
+                    Metric::MultiClassLogLoss {
+                        n_classes: num_classes,
+                    }
                 }
                 _ => Metric::Mse,
             }
         });
 
         // 1. Train with multiple seeds
-        let trainer = MultiSeedTrainer::new(self.base_config.clone(), self.multi_seed)
-            .with_metric(metric);
+        let trainer =
+            MultiSeedTrainer::new(self.base_config.clone(), self.multi_seed).with_metric(metric);
         let all_members = trainer.train(dataset)?;
 
         // 2. Hill climbing selection

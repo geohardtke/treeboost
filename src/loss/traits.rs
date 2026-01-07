@@ -23,7 +23,10 @@ pub trait LossFunction: Send + Sync {
     /// Compute gradient and hessian together (may be more efficient)
     #[inline]
     fn gradient_hessian(&self, target: f32, prediction: f32) -> (f32, f32) {
-        (self.gradient(target, prediction), self.hessian(target, prediction))
+        (
+            self.gradient(target, prediction),
+            self.hessian(target, prediction),
+        )
     }
 
     /// Compute gradients and hessians for a batch of samples

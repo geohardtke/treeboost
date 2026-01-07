@@ -200,7 +200,11 @@ impl PyAutoTuner {
     ///
     /// Returns:
     ///     Tuple of (best_config, history)
-    fn tune(&self, py: Python<'_>, dataset: &PyBinnedDataset) -> PyResult<(PyGBDTConfig, PySearchHistory)> {
+    fn tune(
+        &self,
+        py: Python<'_>,
+        dataset: &PyBinnedDataset,
+    ) -> PyResult<(PyGBDTConfig, PySearchHistory)> {
         // Build the AutoTuner
         let mut tuner = AutoTuner::new(self.base_config.clone());
 
@@ -221,9 +225,7 @@ impl PyAutoTuner {
         }
 
         // Release GIL during tuning for better performance
-        let result = py.allow_threads(|| {
-            tuner.tune(&dataset.inner)
-        });
+        let result = py.allow_threads(|| tuner.tune(&dataset.inner));
 
         match result {
             Ok((best_config, history)) => {
@@ -241,7 +243,9 @@ impl PyAutoTuner {
     /// Get the current tuner configuration
     #[getter]
     fn config(&self) -> Option<PyTunerConfig> {
-        self.tuner_config.as_ref().map(|c| PyTunerConfig { inner: c.clone() })
+        self.tuner_config
+            .as_ref()
+            .map(|c| PyTunerConfig { inner: c.clone() })
     }
 
     /// Get the base GBDT configuration
@@ -252,7 +256,10 @@ impl PyAutoTuner {
 
     fn __repr__(&self) -> String {
         let config_info = if let Some(config) = &self.tuner_config {
-            format!("iterations={}, rounds={}", config.n_iterations, config.num_rounds)
+            format!(
+                "iterations={}, rounds={}",
+                config.n_iterations, config.num_rounds
+            )
         } else {
             "default config".to_string()
         };

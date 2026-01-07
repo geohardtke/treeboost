@@ -200,9 +200,9 @@ fn main() -> Result<()> {
             println!("Loading data from {:?}...", data);
             let loader = DatasetLoader::new(num_bins);
 
-            let feature_cols: Option<Vec<&str>> = features.as_ref().map(|f| {
-                f.split(',').map(|s| s.trim()).collect()
-            });
+            let feature_cols: Option<Vec<&str>> = features
+                .as_ref()
+                .map(|f| f.split(',').map(|s| s.trim()).collect());
 
             let dataset = if data.extension().and_then(|s| s.to_str()) == Some("parquet") {
                 loader.load_parquet(&data, &target, feature_cols.as_deref())?
@@ -210,7 +210,11 @@ fn main() -> Result<()> {
                 loader.load_csv(&data, &target, feature_cols.as_deref())?
             };
 
-            println!("Loaded {} rows, {} features", dataset.num_rows(), dataset.num_features());
+            println!(
+                "Loaded {} rows, {} features",
+                dataset.num_rows(),
+                dataset.num_features()
+            );
 
             // Build config
             let mut config = GBDTConfig::new()
@@ -227,8 +231,11 @@ fn main() -> Result<()> {
             // Enable early stopping if requested
             if early_stopping > 0 {
                 config = config.with_early_stopping(early_stopping, validation_ratio);
-                println!("Early stopping enabled: {} rounds, {:.1}% validation",
-                         early_stopping, validation_ratio * 100.0);
+                println!(
+                    "Early stopping enabled: {} rounds, {:.1}% validation",
+                    early_stopping,
+                    validation_ratio * 100.0
+                );
             }
 
             // Set loss function
@@ -244,8 +251,11 @@ fn main() -> Result<()> {
             // Enable conformal prediction if requested
             if let Some(calib_ratio) = conformal {
                 config = config.with_conformal(calib_ratio, conformal_quantile);
-                println!("Conformal prediction enabled: {:.1}% calibration, {:.1}% coverage",
-                         calib_ratio * 100.0, conformal_quantile * 100.0);
+                println!(
+                    "Conformal prediction enabled: {:.1}% calibration, {:.1}% coverage",
+                    calib_ratio * 100.0,
+                    conformal_quantile * 100.0
+                );
             }
 
             // Parse and apply monotonic constraints
@@ -266,11 +276,15 @@ fn main() -> Result<()> {
                     })
                     .collect();
 
-                let num_constrained = constraints.iter()
+                let num_constrained = constraints
+                    .iter()
                     .filter(|c| **c != MonotonicConstraint::None)
                     .count();
                 if num_constrained > 0 {
-                    println!("Monotonic constraints: {} features constrained", num_constrained);
+                    println!(
+                        "Monotonic constraints: {} features constrained",
+                        num_constrained
+                    );
                 }
                 config = config.with_monotonic_constraints(constraints);
             }
@@ -326,7 +340,11 @@ fn main() -> Result<()> {
                 println!("  Column subsampling: {:.0}%", colsample * 100.0);
             }
             if early_stopping > 0 {
-                println!("  Early stopping: {} rounds, {:.0}% validation", early_stopping, validation_ratio * 100.0);
+                println!(
+                    "  Early stopping: {} rounds, {:.0}% validation",
+                    early_stopping,
+                    validation_ratio * 100.0
+                );
             }
             println!("  Optimizations:");
             println!("    Parallel prediction: {}", config.parallel_prediction);
@@ -359,7 +377,11 @@ fn main() -> Result<()> {
             println!("Loading model from {:?}...", model);
             let model = load_model(&model)?;
 
-            println!("Model loaded: {} trees, {} features", model.num_trees(), model.num_features());
+            println!(
+                "Model loaded: {} trees, {} features",
+                model.num_trees(),
+                model.num_features()
+            );
 
             println!("Loading data from {:?}...", data);
             let loader = DatasetLoader::new(255);
@@ -417,8 +439,7 @@ fn main() -> Result<()> {
                     })
                     .collect();
 
-                let json = serde_json::to_string_pretty(&results)
-                    .map_err(std::io::Error::other)?;
+                let json = serde_json::to_string_pretty(&results).map_err(std::io::Error::other)?;
                 std::fs::write(&output, json)?;
                 println!("Predictions with intervals saved to {:?}", output);
 
@@ -459,8 +480,7 @@ fn main() -> Result<()> {
                     })
                     .collect();
 
-                let json = serde_json::to_string_pretty(&results)
-                    .map_err(std::io::Error::other)?;
+                let json = serde_json::to_string_pretty(&results).map_err(std::io::Error::other)?;
                 std::fs::write(&output, json)?;
                 println!("Predictions saved to {:?}", output);
 

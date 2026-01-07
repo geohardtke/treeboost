@@ -69,7 +69,11 @@ pub fn create_binary_classification_dataset(n: usize, seed: u64) -> BinnedDatase
         .map(|i| {
             let f0 = features[i] as f32 / 255.0;
             let f1 = features[n + i] as f32 / 255.0;
-            if f0 + f1 > 1.0 { 1.0 } else { 0.0 }
+            if f0 + f1 > 1.0 {
+                1.0
+            } else {
+                0.0
+            }
         })
         .collect();
 

@@ -196,7 +196,10 @@ fn main() {
     println!("Sample Predictions");
     println!("{}", "-".repeat(70));
     println!();
-    println!("{:<8} {:>10} {:>10} {:>10} {:>10}", "Sample", "f0", "Actual", "Predicted", "Error");
+    println!(
+        "{:<8} {:>10} {:>10} {:>10} {:>10}",
+        "Sample", "f0", "Actual", "Predicted", "Error"
+    );
     println!("{}", "-".repeat(58));
 
     for i in (0..n_samples).step_by(n_samples / 10) {

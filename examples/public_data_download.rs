@@ -104,7 +104,6 @@ fn generate_synthetic_housing_data(n_samples: usize, seed: u64) -> BinnedDataset
     BinnedDataset::new(n_samples, features, targets, feature_info)
 }
 
-
 fn main() {
     println!("{}", "=".repeat(70));
     println!("TreeBoost: Public Dataset Example");
@@ -143,7 +142,10 @@ fn main() {
     println!("4. Training Data Statistics");
     let train_targets = train_dataset.targets();
     let min_target = train_targets.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max_target = train_targets.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let max_target = train_targets
+        .iter()
+        .cloned()
+        .fold(f32::NEG_INFINITY, f32::max);
     let mean_target = train_targets.iter().sum::<f32>() / train_targets.len() as f32;
 
     println!("   Target (Median House Value in $100k):");

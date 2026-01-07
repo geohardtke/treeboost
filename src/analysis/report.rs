@@ -37,8 +37,14 @@ impl<'a> fmt::Display for AnalysisReport<'a> {
             a.num_features,
             a.num_numeric,
             a.num_categorical,
-            " ".repeat(width - 54 - digit_count(a.num_rows) - digit_count(a.num_features)
-                - digit_count(a.num_numeric) - digit_count(a.num_categorical))
+            " ".repeat(
+                width
+                    - 54
+                    - digit_count(a.num_rows)
+                    - digit_count(a.num_features)
+                    - digit_count(a.num_numeric)
+                    - digit_count(a.num_categorical)
+            )
         )?;
         writeln!(f, "├{}┤", "─".repeat(width))?;
 
@@ -68,9 +74,13 @@ impl<'a> fmt::Display for AnalysisReport<'a> {
             "│   Monotonicity:      {:.2}  {}  {} │",
             a.avg_monotonicity,
             progress_bar(a.avg_monotonicity, 20),
-            if a.avg_monotonicity > 0.7 { "High    " }
-            else if a.avg_monotonicity > 0.5 { "Moderate" }
-            else { "Low     " }
+            if a.avg_monotonicity > 0.7 {
+                "High    "
+            } else if a.avg_monotonicity > 0.5 {
+                "Moderate"
+            } else {
+                "Low     "
+            }
         )?;
 
         writeln!(f, "│{:width$}│", "")?;
@@ -82,9 +92,13 @@ impl<'a> fmt::Display for AnalysisReport<'a> {
             "│   Tree gain:         {:.2}  {}  {} │",
             a.tree_gain,
             progress_bar(a.tree_gain, 20),
-            if a.tree_gain > 0.3 { "Strong  " }
-            else if a.tree_gain > 0.1 { "Moderate" }
-            else { "Weak    " }
+            if a.tree_gain > 0.3 {
+                "Strong  "
+            } else if a.tree_gain > 0.1 {
+                "Moderate"
+            } else {
+                "Weak    "
+            }
         )?;
         writeln!(
             f,
@@ -103,18 +117,26 @@ impl<'a> fmt::Display for AnalysisReport<'a> {
             "│   Noise floor:       {:.2}  {}  {} │",
             a.noise_floor,
             progress_bar(a.noise_floor, 20),
-            if a.noise_floor > 0.4 { "High    " }
-            else if a.noise_floor > 0.2 { "Moderate" }
-            else { "Low     " }
+            if a.noise_floor > 0.4 {
+                "High    "
+            } else if a.noise_floor > 0.2 {
+                "Moderate"
+            } else {
+                "Low     "
+            }
         )?;
         writeln!(
             f,
             "│   Categorical ratio: {:.2}  {}  {:>8} │",
             a.categorical_ratio,
             progress_bar(a.categorical_ratio, 20),
-            if a.categorical_ratio > 0.5 { "High" }
-            else if a.categorical_ratio > 0.2 { "Mixed" }
-            else { "Numeric" }
+            if a.categorical_ratio > 0.5 {
+                "High"
+            } else if a.categorical_ratio > 0.2 {
+                "Mixed"
+            } else {
+                "Numeric"
+            }
         )?;
 
         if a.target_is_discrete {
@@ -140,7 +162,11 @@ impl<'a> fmt::Display for AnalysisReport<'a> {
             f,
             "│   LinearThenTree:    {:.2}  {}    │",
             a.mode_scores.linear_then_tree,
-            score_bar(a.mode_scores.linear_then_tree, a.mode_scores.best_score(), 30)
+            score_bar(
+                a.mode_scores.linear_then_tree,
+                a.mode_scores.best_score(),
+                30
+            )
         )?;
         writeln!(
             f,
@@ -203,11 +229,19 @@ fn progress_bar(value: f32, width: usize) -> String {
 }
 
 fn score_bar(value: f32, max_value: f32, width: usize) -> String {
-    let normalized = if max_value > 0.0 { value / max_value } else { 0.0 };
+    let normalized = if max_value > 0.0 {
+        value / max_value
+    } else {
+        0.0
+    };
     let filled = ((normalized * width as f32).round() as usize).min(width);
     let empty = width - filled;
 
-    let bar_char = if (value - max_value).abs() < 0.01 { "█" } else { "▓" };
+    let bar_char = if (value - max_value).abs() < 0.01 {
+        "█"
+    } else {
+        "▓"
+    };
     format!("{}{}", bar_char.repeat(filled), "░".repeat(empty))
 }
 

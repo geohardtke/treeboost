@@ -30,7 +30,7 @@ pub struct FullGpuTreeBuilder {
     // Persistent GPU buffers (reused across trees)
     bins_buffer: Option<Buffer>,
     indices_buffer: Option<Buffer>,
-    indices_buffer_alt: Option<Buffer>,  // Double buffer for partition output
+    indices_buffer_alt: Option<Buffer>, // Double buffer for partition output
 
     // Cached data for histogram building and partition
     cached_bins_row_major: Vec<u8>,
@@ -154,7 +154,9 @@ impl FullGpuTreeBuilder {
                     // Check if next node is sibling (same parent)
                     if i + 1 < current_level.len() {
                         let node_j = &current_level[i + 1];
-                        if node_i.parent_hist_idx == node_j.parent_hist_idx && node_i.parent_hist_idx.is_some() {
+                        if node_i.parent_hist_idx == node_j.parent_hist_idx
+                            && node_i.parent_hist_idx.is_some()
+                        {
                             // These are siblings - determine smaller
                             if node_i.row_count <= node_j.row_count {
                                 nodes_needing_gpu_hist.push(i);
@@ -264,7 +266,8 @@ impl FullGpuTreeBuilder {
                 .collect();
 
             // Execute partition on GPU (results stay on GPU)
-            let partition_results = self.partition_gpu(&node_splits, num_features, num_rows, use_alt_buffer);
+            let partition_results =
+                self.partition_gpu(&node_splits, num_features, num_rows, use_alt_buffer);
             use_alt_buffer = !use_alt_buffer;
 
             // Build next level and update tree structure
@@ -409,7 +412,8 @@ impl FullGpuTreeBuilder {
         );
 
         // Build root histogram using GPU
-        let root_row_indices: Vec<usize> = self.row_indices_array.iter().map(|&r| r as usize).collect();
+        let root_row_indices: Vec<usize> =
+            self.row_indices_array.iter().map(|&r| r as usize).collect();
         let root_histograms = self.histogram_kernel.build_histograms(
             &self.cached_bins_row_major,
             &self.cached_grad_hess,
@@ -458,7 +462,9 @@ impl FullGpuTreeBuilder {
         }
         impl Ord for SplitCandidate {
             fn cmp(&self, other: &Self) -> Ordering {
-                self.gain.partial_cmp(&other.gain).unwrap_or(Ordering::Equal)
+                self.gain
+                    .partial_cmp(&other.gain)
+                    .unwrap_or(Ordering::Equal)
             }
         }
 
@@ -497,14 +503,28 @@ impl FullGpuTreeBuilder {
             // Validate gradient/hessian sums (catches histogram computation bugs)
             // Use relative error (1e-3 = 0.1%) to handle both large and small values
             debug_assert!(
-                approx_equal_relative(candidate.sum_gradients, split.left_gradient + split.right_gradient, 1e-3),
+                approx_equal_relative(
+                    candidate.sum_gradients,
+                    split.left_gradient + split.right_gradient,
+                    1e-3
+                ),
                 "Gradient sum mismatch in node {}: left({}) + right({}) != parent({})",
-                candidate.node_idx, split.left_gradient, split.right_gradient, candidate.sum_gradients
+                candidate.node_idx,
+                split.left_gradient,
+                split.right_gradient,
+                candidate.sum_gradients
             );
             debug_assert!(
-                approx_equal_relative(candidate.sum_hessians, split.left_hessian + split.right_hessian, 1e-3),
+                approx_equal_relative(
+                    candidate.sum_hessians,
+                    split.left_hessian + split.right_hessian,
+                    1e-3
+                ),
                 "Hessian sum mismatch in node {}: left({}) + right({}) != parent({})",
-                candidate.node_idx, split.left_hessian, split.right_hessian, candidate.sum_hessians
+                candidate.node_idx,
+                split.left_hessian,
+                split.right_hessian,
+                candidate.sum_hessians
             );
 
             // Partition rows in-place
@@ -561,16 +581,40 @@ impl FullGpuTreeBuilder {
             // Determine smaller child for histogram subtraction trick
             let (smaller_idx, smaller_start, smaller_end, smaller_g, smaller_h) =
                 if left_count <= right_count {
-                    (left_idx, left_start, left_end, split.left_gradient, split.left_hessian)
+                    (
+                        left_idx,
+                        left_start,
+                        left_end,
+                        split.left_gradient,
+                        split.left_hessian,
+                    )
                 } else {
-                    (right_idx, right_start, right_end, split.right_gradient, split.right_hessian)
+                    (
+                        right_idx,
+                        right_start,
+                        right_end,
+                        split.right_gradient,
+                        split.right_hessian,
+                    )
                 };
 
             let (larger_idx, larger_start, larger_end, larger_g, larger_h) =
                 if left_count <= right_count {
-                    (right_idx, right_start, right_end, split.right_gradient, split.right_hessian)
+                    (
+                        right_idx,
+                        right_start,
+                        right_end,
+                        split.right_gradient,
+                        split.right_hessian,
+                    )
                 } else {
-                    (left_idx, left_start, left_end, split.left_gradient, split.left_hessian)
+                    (
+                        left_idx,
+                        left_start,
+                        left_end,
+                        split.left_gradient,
+                        split.left_hessian,
+                    )
                 };
 
             // Build histogram for SMALLER child only (GPU)
@@ -579,7 +623,8 @@ impl FullGpuTreeBuilder {
                 let larger_count = larger_end - larger_start;
 
                 if smaller_count >= min_samples_leaf {
-                    let smaller_row_indices: Vec<usize> = self.row_indices_array[smaller_start..smaller_end]
+                    let smaller_row_indices: Vec<usize> = self.row_indices_array
+                        [smaller_start..smaller_end]
                         .iter()
                         .map(|&r| r as usize)
                         .collect();
@@ -618,7 +663,8 @@ impl FullGpuTreeBuilder {
 
                     // Compute LARGER histogram via subtraction (CPU - fast)
                     if larger_count >= min_samples_leaf {
-                        let larger_histograms: Vec<Histogram> = candidate.histograms
+                        let larger_histograms: Vec<Histogram> = candidate
+                            .histograms
                             .iter()
                             .zip(smaller_histograms.iter())
                             .map(|(parent, smaller)| Histogram::from_subtraction(parent, smaller))
@@ -759,7 +805,8 @@ impl FullGpuTreeBuilder {
         self.cached_indices = row_indices.iter().map(|&r| r as u32).collect();
 
         // Cache bins (row-major, packed as u32) for partition kernel
-        self.cached_bins_packed = self.cached_bins_row_major
+        self.cached_bins_packed = self
+            .cached_bins_row_major
             .chunks(4)
             .map(|chunk| {
                 chunk
@@ -773,22 +820,34 @@ impl FullGpuTreeBuilder {
         if self.bins_buffer.is_none() || self.bins_buffer.as_ref().unwrap().size() < bins_size {
             self.bins_buffer = Some(self.device.create_storage_buffer("bins", bins_size, false));
         }
-        self.device.write_buffer(self.bins_buffer.as_ref().unwrap(), &self.cached_bins_packed);
+        self.device
+            .write_buffer(self.bins_buffer.as_ref().unwrap(), &self.cached_bins_packed);
 
         // Upload indices
         let indices_size = (self.cached_indices.len() * 4) as u64;
-        if self.indices_buffer.is_none() || self.indices_buffer.as_ref().unwrap().size() < indices_size {
-            self.indices_buffer = Some(self.device.create_storage_buffer("indices", indices_size, true));
-            self.indices_buffer_alt = Some(self.device.create_storage_buffer("indices_alt", indices_size, true));
+        if self.indices_buffer.is_none()
+            || self.indices_buffer.as_ref().unwrap().size() < indices_size
+        {
+            self.indices_buffer = Some(self.device.create_storage_buffer(
+                "indices",
+                indices_size,
+                true,
+            ));
+            self.indices_buffer_alt = Some(self.device.create_storage_buffer(
+                "indices_alt",
+                indices_size,
+                true,
+            ));
         }
-        self.device.write_buffer(self.indices_buffer.as_ref().unwrap(), &self.cached_indices);
+        self.device
+            .write_buffer(self.indices_buffer.as_ref().unwrap(), &self.cached_indices);
     }
 
     /// Build histograms on GPU and return as Histogram structs directly.
     /// This avoids the flat f32 conversion when using CPU split finding.
     fn build_histograms_gpu_native(
         &self,
-        nodes: &[(usize, usize)],  // (row_start, row_count) for each node
+        nodes: &[(usize, usize)], // (row_start, row_count) for each node
         num_features: usize,
     ) -> Vec<Vec<Histogram>> {
         if nodes.is_empty() {

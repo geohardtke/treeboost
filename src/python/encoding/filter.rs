@@ -29,7 +29,9 @@ impl PyCountMinSketch {
     #[pyo3(signature = (eps=0.001, confidence=0.99))]
     fn new(eps: f64, confidence: f64) -> PyResult<Self> {
         if eps <= 0.0 {
-            return Err(pyo3::exceptions::PyValueError::new_err("eps must be positive"));
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "eps must be positive",
+            ));
         }
         if confidence <= 0.0 || confidence >= 1.0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -119,7 +121,9 @@ impl PyCategoryFilter {
     #[pyo3(signature = (eps=0.001, confidence=0.99, min_count=5))]
     fn new(eps: f64, confidence: f64, min_count: u64) -> PyResult<Self> {
         if eps <= 0.0 {
-            return Err(pyo3::exceptions::PyValueError::new_err("eps must be positive"));
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "eps must be positive",
+            ));
         }
         if confidence <= 0.0 || confidence >= 1.0 {
             return Err(pyo3::exceptions::PyValueError::new_err(

@@ -72,9 +72,7 @@ mod tests {
     #[test]
     fn test_save_load_model() {
         let dataset = create_test_dataset();
-        let config = GBDTConfig::new()
-            .with_num_rounds(5)
-            .with_max_depth(3);
+        let config = GBDTConfig::new().with_num_rounds(5).with_max_depth(3);
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
 

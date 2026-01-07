@@ -32,7 +32,7 @@ fn test_data_pipeline_end_to_end() {
     );
 
     // Process for training
-    let (dataset, state) = pipeline
+    let (dataset, state, _filtered_df) = pipeline
         .process_for_training(df.clone(), "target", Some(&["neighborhood"]))
         .expect("Pipeline should succeed");
 
@@ -60,7 +60,7 @@ fn test_data_pipeline_end_to_end() {
     let mse: f32 = predictions
         .iter()
         .zip(targets.iter())
-        .map(|(p, t)| (p - t).powi(2))
+        .map(|(p, t): (&f32, &f32)| (p - t).powi(2))
         .sum::<f32>()
         / predictions.len() as f32;
 
@@ -118,7 +118,7 @@ fn test_pipeline_rare_category_filtering() {
             .with_smoothing(1.0),
     );
 
-    let (_dataset, state) = pipeline
+    let (_dataset, state, _filtered_df) = pipeline
         .process_for_training(df, "target", Some(&["category"]))
         .expect("Pipeline should succeed");
 
@@ -165,7 +165,7 @@ fn test_pipeline_target_encoding_prevents_leakage() {
             .with_smoothing(0.0), // No smoothing for clearer test
     );
 
-    let (_dataset, state) = pipeline
+    let (_dataset, state, _filtered_df) = pipeline
         .process_for_training(df, "target", Some(&["category"]))
         .expect("Pipeline should succeed");
 
@@ -227,7 +227,7 @@ fn test_raw_prediction_equivalence() {
 
     // Process with data pipeline to get proper bin boundaries
     let pipeline = DataPipeline::new(PipelineConfig::new().with_num_bins(16));
-    let (dataset, _state) = pipeline
+    let (dataset, _state, _filtered_df) = pipeline
         .process_for_training(df.clone(), "target", None)
         .expect("Pipeline should succeed");
 
@@ -249,7 +249,7 @@ fn test_raw_prediction_equivalence() {
 
     // f0, f1, f2 for each row
     for i in 0..num_rows {
-        raw_features.push((i + 1) as f64);  // f0
+        raw_features.push((i + 1) as f64); // f0
         raw_features.push((50 - i) as f64); // f1
         raw_features.push(((i % 10) * 5 + 5) as f64); // f2
     }

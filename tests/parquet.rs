@@ -72,7 +72,7 @@ fn test_parquet_large_mixed() {
             .with_smoothing(10.0),
     );
 
-    let (dataset, state) = pipeline
+    let (dataset, state, _filtered_df) = pipeline
         .load_parquet_for_training(
             parquet_path.to_str().unwrap(),
             "target",
@@ -127,7 +127,7 @@ fn test_parquet_large_dirty() {
             .with_smoothing(20.0),
     );
 
-    let (dataset, state) = pipeline
+    let (dataset, state, _filtered_df) = pipeline
         .load_parquet_for_training(
             parquet_path.to_str().unwrap(),
             "target",
@@ -178,7 +178,7 @@ fn test_parquet_high_cardinality() {
             .with_smoothing(50.0),
     );
 
-    let (dataset, state) = pipeline
+    let (dataset, state, _filtered_df) = pipeline
         .load_parquet_for_training(
             parquet_path.to_str().unwrap(),
             "target",
@@ -235,7 +235,7 @@ fn test_parquet_stress_test() {
     );
 
     let start = Instant::now();
-    let (dataset, _state) = pipeline
+    let (dataset, _state, _filtered_df) = pipeline
         .load_parquet_for_training(parquet_path.to_str().unwrap(), "target", Some(&["cat"]))
         .expect("Should load stress test parquet");
     let load_time = start.elapsed();

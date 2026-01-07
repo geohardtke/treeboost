@@ -6,7 +6,9 @@
 use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
 
-use crate::loss::{sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, PseudoHuberLoss};
+use crate::loss::{
+    sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, PseudoHuberLoss,
+};
 
 /// Python wrapper for Mean Squared Error loss
 ///
@@ -287,7 +289,9 @@ impl PyMultiClassLogLoss {
         }
 
         let preds_vec: Vec<f32> = preds.to_vec();
-        Ok(self.inner.gradient_hessian_for_class(target_class, class_idx, &preds_vec))
+        Ok(self
+            .inner
+            .gradient_hessian_for_class(target_class, class_idx, &preds_vec))
     }
 
     /// Compute gradient and hessian for all classes
@@ -320,7 +324,9 @@ impl PyMultiClassLogLoss {
         }
 
         let preds_vec: Vec<f32> = preds.to_vec();
-        Ok(self.inner.gradient_hessian_all_classes(target_class, &preds_vec))
+        Ok(self
+            .inner
+            .gradient_hessian_all_classes(target_class, &preds_vec))
     }
 
     /// Loss function name
@@ -330,7 +336,10 @@ impl PyMultiClassLogLoss {
     }
 
     fn __repr__(&self) -> String {
-        format!("MultiClassLogLoss(num_classes={})", self.inner.num_classes())
+        format!(
+            "MultiClassLogLoss(num_classes={})",
+            self.inner.num_classes()
+        )
     }
 }
 
@@ -356,10 +365,7 @@ fn py_sigmoid(x: f32) -> f32 {
 /// Returns:
 ///     Numpy array of sigmoid outputs
 #[pyfunction]
-fn sigmoid_batch<'py>(
-    py: Python<'py>,
-    x: PyReadonlyArray1<'py, f32>,
-) -> Bound<'py, PyArray1<f32>> {
+fn sigmoid_batch<'py>(py: Python<'py>, x: PyReadonlyArray1<'py, f32>) -> Bound<'py, PyArray1<f32>> {
     let x_arr = x.as_array();
     let result: Vec<f32> = x_arr.iter().map(|&v| sigmoid(v)).collect();
     PyArray1::from_vec(py, result)

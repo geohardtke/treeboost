@@ -4,7 +4,9 @@ use crate::backend::BackendType;
 #[cfg(any(feature = "cuda", feature = "gpu"))]
 use crate::backend::GpuMode;
 use crate::booster::GBDTConfig;
-use crate::dataset::{split_holdout, BinnedDataset, ColumnPermutation, FeatureInfo, FeatureType, QuantileBinner};
+use crate::dataset::{
+    split_holdout, BinnedDataset, ColumnPermutation, FeatureInfo, FeatureType, QuantileBinner,
+};
 use crate::loss::{sigmoid, softmax, MultiClassLogLoss};
 use crate::tree::{InteractionConstraints, Tree, TreeGrower};
 use crate::tuner::ModelFormat;
@@ -22,8 +24,7 @@ use crate::backend::cuda::FullCudaTreeBuilder;
 use crate::backend::wgpu::FullGpuTreeBuilder;
 
 /// Trained GBDT model
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
 pub struct GBDTModel {
     /// Training configuration
     config: GBDTConfig,
@@ -218,7 +219,13 @@ impl GBDTModel {
         formats: &[ModelFormat],
     ) -> Result<Self> {
         // Train the model
-        let model = Self::train(features, num_features, targets, config.clone(), feature_names)?;
+        let model = Self::train(
+            features,
+            num_features,
+            targets,
+            config.clone(),
+            feature_names,
+        )?;
 
         // Save to output directory
         model.save_to_directory(output_dir, &config, formats)?;
@@ -262,8 +269,9 @@ impl GBDTModel {
 
         // Save config.json for reproducibility
         let config_path = dir.join("config.json");
-        let config_json = serde_json::to_string_pretty(config)
-            .map_err(|e| TreeBoostError::Serialization(format!("Failed to serialize config: {}", e)))?;
+        let config_json = serde_json::to_string_pretty(config).map_err(|e| {
+            TreeBoostError::Serialization(format!("Failed to serialize config: {}", e))
+        })?;
         let mut file = fs::File::create(&config_path)?;
         file.write_all(config_json.as_bytes())?;
 
@@ -475,7 +483,8 @@ impl GBDTModel {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
         // Early stopping state
-        let early_stopping_enabled = config.early_stopping_rounds > 0 && !validation_indices.is_empty();
+        let early_stopping_enabled =
+            config.early_stopping_rounds > 0 && !validation_indices.is_empty();
         let mut best_val_loss = f32::MAX;
         let mut rounds_without_improvement = 0;
         let mut best_num_trees = 0;
@@ -499,22 +508,21 @@ impl GBDTModel {
         // Create Full GPU builders if applicable
         // For BackendType::Auto, we try CUDA first, then WGPU
         #[cfg(feature = "cuda")]
-        let mut cuda_builder: Option<FullCudaTreeBuilder> = if use_fused
-            && matches!(config.backend_type, BackendType::Cuda | BackendType::Auto)
-        {
-            use crate::backend::cuda::CudaDevice;
-            CudaDevice::new().and_then(|d| {
-                // Resolve gpu_mode knowing we have CUDA available
-                let resolved = config.gpu_mode.resolve(BackendType::Cuda);
-                if matches!(resolved, GpuMode::Full) {
-                    Some(FullCudaTreeBuilder::new(std::sync::Arc::new(d)))
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        };
+        let mut cuda_builder: Option<FullCudaTreeBuilder> =
+            if use_fused && matches!(config.backend_type, BackendType::Cuda | BackendType::Auto) {
+                use crate::backend::cuda::CudaDevice;
+                CudaDevice::new().and_then(|d| {
+                    // Resolve gpu_mode knowing we have CUDA available
+                    let resolved = config.gpu_mode.resolve(BackendType::Cuda);
+                    if matches!(resolved, GpuMode::Full) {
+                        Some(FullCudaTreeBuilder::new(std::sync::Arc::new(d)))
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
 
         #[cfg(feature = "gpu")]
         let mut wgpu_builder: Option<FullGpuTreeBuilder> = if use_fused
@@ -528,8 +536,7 @@ impl GBDTModel {
                 {
                     true
                 }
-            }
-        {
+            } {
             use crate::backend::wgpu::GpuDevice;
             GpuDevice::new().and_then(|d| {
                 // Resolve gpu_mode knowing we have WGPU
@@ -615,58 +622,58 @@ impl GBDTModel {
                         &mut hessians,
                     )
                 } else {
-                // SEPARATE PATH: Compute gradients first, then build histogram
-                // Required for GOSS (needs all gradients for sampling) and random subsampling
+                    // SEPARATE PATH: Compute gradients first, then build histogram
+                    // Required for GOSS (needs all gradients for sampling) and random subsampling
 
-                // Compute gradients and hessians
-                if config.parallel_gradient {
-                    train_indices.par_iter().for_each(|&idx| {
-                        let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
-                        // SAFETY: Each idx is unique within train_indices, so no data races
-                        unsafe {
-                            let grad_ptr = gradients.as_ptr() as *mut f32;
-                            let hess_ptr = hessians.as_ptr() as *mut f32;
-                            *grad_ptr.add(idx) = g;
-                            *hess_ptr.add(idx) = h;
+                    // Compute gradients and hessians
+                    if config.parallel_gradient {
+                        train_indices.par_iter().for_each(|&idx| {
+                            let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
+                            // SAFETY: Each idx is unique within train_indices, so no data races
+                            unsafe {
+                                let grad_ptr = gradients.as_ptr() as *mut f32;
+                                let hess_ptr = hessians.as_ptr() as *mut f32;
+                                *grad_ptr.add(idx) = g;
+                                *hess_ptr.add(idx) = h;
+                            }
+                        });
+                    } else {
+                        for &idx in &train_indices {
+                            let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
+                            gradients[idx] = g;
+                            hessians[idx] = h;
                         }
-                    });
-                } else {
-                    for &idx in &train_indices {
-                        let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
-                        gradients[idx] = g;
-                        hessians[idx] = h;
                     }
-                }
 
-                // GOSS or random subsampling
-                let tree_indices: &[usize] = if config.goss_enabled {
-                    // GOSS: Gradient-based One-Side Sampling
-                    sample_indices.clear();
-                    Self::goss_sample_into(
-                        &train_indices,
-                        &mut gradients,
-                        &mut hessians,
-                        config.goss_top_rate,
-                        config.goss_other_rate,
-                        &mut rng,
-                        &mut goss_indexed,
-                        &mut sample_indices,
-                    );
-                    &sample_indices
-                } else if config.subsample < 1.0 {
-                    // Random subsampling (Stochastic Gradient Boosting)
-                    sample_indices.clear();
-                    let n_samples =
-                        ((train_indices.len() as f32) * config.subsample).ceil() as usize;
-                    shuffle_buffer.shuffle(&mut rng);
-                    sample_indices.extend_from_slice(&shuffle_buffer[..n_samples]);
-                    &sample_indices
-                } else {
-                    &train_indices
-                };
+                    // GOSS or random subsampling
+                    let tree_indices: &[usize] = if config.goss_enabled {
+                        // GOSS: Gradient-based One-Side Sampling
+                        sample_indices.clear();
+                        Self::goss_sample_into(
+                            &train_indices,
+                            &mut gradients,
+                            &mut hessians,
+                            config.goss_top_rate,
+                            config.goss_other_rate,
+                            &mut rng,
+                            &mut goss_indexed,
+                            &mut sample_indices,
+                        );
+                        &sample_indices
+                    } else if config.subsample < 1.0 {
+                        // Random subsampling (Stochastic Gradient Boosting)
+                        sample_indices.clear();
+                        let n_samples =
+                            ((train_indices.len() as f32) * config.subsample).ceil() as usize;
+                        shuffle_buffer.shuffle(&mut rng);
+                        sample_indices.extend_from_slice(&shuffle_buffer[..n_samples]);
+                        &sample_indices
+                    } else {
+                        &train_indices
+                    };
 
-                // Grow tree using the selected training indices
-                tree_grower.grow_with_indices(dataset, &gradients, &hessians, tree_indices)
+                    // Grow tree using the selected training indices
+                    tree_grower.grow_with_indices(dataset, &gradients, &hessians, tree_indices)
                 }
             });
 
@@ -704,7 +711,10 @@ impl GBDTModel {
                         config.early_stopping_rounds,
                         config.min_early_stopping_trees,
                     ) {
-                        trees.truncate(early_stop_keep_count(best_num_trees, config.min_early_stopping_trees));
+                        trees.truncate(early_stop_keep_count(
+                            best_num_trees,
+                            config.min_early_stopping_trees,
+                        ));
                         break;
                     }
                 }
@@ -713,7 +723,10 @@ impl GBDTModel {
 
         // If early stopping was used but we finished all rounds, still check if we should truncate
         if early_stopping_enabled && best_num_trees > 0 && best_num_trees < trees.len() {
-            trees.truncate(early_stop_keep_count(best_num_trees, config.min_early_stopping_trees));
+            trees.truncate(early_stop_keep_count(
+                best_num_trees,
+                config.min_early_stopping_trees,
+            ));
         }
 
         // Auto-apply column reordering by feature importance if enabled
@@ -738,7 +751,10 @@ impl GBDTModel {
                     .collect()
             };
 
-            Some(Self::compute_quantile(&calib_residuals, config.conformal_quantile))
+            Some(Self::compute_quantile(
+                &calib_residuals,
+                config.conformal_quantile,
+            ))
         } else {
             None
         };
@@ -883,7 +899,8 @@ impl GBDTModel {
                     &sample_indices
                 } else if config.subsample < 1.0 {
                     sample_indices.clear();
-                    let n_samples = ((train_indices.len() as f32) * config.subsample).ceil() as usize;
+                    let n_samples =
+                        ((train_indices.len() as f32) * config.subsample).ceil() as usize;
                     shuffle_buffer.shuffle(&mut rng);
                     sample_indices.extend_from_slice(&shuffle_buffer[..n_samples]);
                     &sample_indices
@@ -926,7 +943,10 @@ impl GBDTModel {
                         config.early_stopping_rounds,
                         config.min_early_stopping_trees,
                     ) {
-                        trees.truncate(early_stop_keep_count(best_num_trees, config.min_early_stopping_trees));
+                        trees.truncate(early_stop_keep_count(
+                            best_num_trees,
+                            config.min_early_stopping_trees,
+                        ));
                         break;
                     }
                 }
@@ -935,12 +955,16 @@ impl GBDTModel {
 
         // Truncate if we finished all rounds but best was earlier
         if early_stopping_enabled && best_num_trees > 0 && best_num_trees < trees.len() {
-            trees.truncate(early_stop_keep_count(best_num_trees, config.min_early_stopping_trees));
+            trees.truncate(early_stop_keep_count(
+                best_num_trees,
+                config.min_early_stopping_trees,
+            ));
         }
 
         // Column reordering
         let column_permutation = if config.column_reordering && !trees.is_empty() {
-            let importances = Self::compute_importances_from_trees(&trees, train_dataset.num_features());
+            let importances =
+                Self::compute_importances_from_trees(&trees, train_dataset.num_features());
             Some(ColumnPermutation::from_importances(&importances))
         } else {
             None
@@ -953,7 +977,10 @@ impl GBDTModel {
                 .zip(val_predictions.iter())
                 .map(|(&target, &pred)| (target - pred).abs())
                 .collect();
-            Some(Self::compute_quantile(&residuals, config.conformal_quantile))
+            Some(Self::compute_quantile(
+                &residuals,
+                config.conformal_quantile,
+            ))
         } else {
             None
         };
@@ -1060,7 +1087,8 @@ impl GBDTModel {
                 );
 
                 // Grow tree for this class
-                let tree = tree_grower.grow_with_indices(dataset, &gradients, &hessians, &train_indices);
+                let tree =
+                    tree_grower.grow_with_indices(dataset, &gradients, &hessians, &train_indices);
 
                 // Update predictions for this class
                 for idx in 0..num_rows {
@@ -1097,7 +1125,10 @@ impl GBDTModel {
                         config.early_stopping_rounds,
                         config.min_early_stopping_trees,
                     ) {
-                        let keep_rounds = early_stop_keep_count(best_num_rounds, config.min_early_stopping_trees / num_classes.max(1));
+                        let keep_rounds = early_stop_keep_count(
+                            best_num_rounds,
+                            config.min_early_stopping_trees / num_classes.max(1),
+                        );
                         trees.truncate(keep_rounds * num_classes);
                         break;
                     }
@@ -1106,9 +1137,14 @@ impl GBDTModel {
         }
 
         // Truncate if early stopping finished all rounds but best was earlier
-        if early_stopping_enabled && best_num_rounds > 0 && best_num_rounds * num_classes < trees.len()
+        if early_stopping_enabled
+            && best_num_rounds > 0
+            && best_num_rounds * num_classes < trees.len()
         {
-            let keep_rounds = early_stop_keep_count(best_num_rounds, config.min_early_stopping_trees / num_classes.max(1));
+            let keep_rounds = early_stop_keep_count(
+                best_num_rounds,
+                config.min_early_stopping_trees / num_classes.max(1),
+            );
             trees.truncate(keep_rounds * num_classes);
         }
 
@@ -1190,11 +1226,7 @@ impl GBDTModel {
 
         // Reuse indexed buffer - clear and repopulate
         indexed_buffer.clear();
-        indexed_buffer.extend(
-            train_indices
-                .iter()
-                .map(|&idx| (idx, gradients[idx].abs())),
-        );
+        indexed_buffer.extend(train_indices.iter().map(|&idx| (idx, gradients[idx].abs())));
 
         // Partition around the n_top-th largest element (descending order)
         if n_top < n {
@@ -1228,8 +1260,14 @@ impl GBDTModel {
             return 0.0;
         }
 
-        let mut sorted = values.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // Filter out NaN values before sorting
+        let mut sorted: Vec<f32> = values.iter().copied().filter(|v| !v.is_nan()).collect();
+
+        if sorted.is_empty() {
+            return 0.0;
+        }
+
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let idx = ((sorted.len() as f32) * q).ceil() as usize;
         let idx = idx.min(sorted.len() - 1);
@@ -1344,7 +1382,10 @@ impl GBDTModel {
     /// Predict with conformal intervals
     ///
     /// Returns (predictions, lower_bounds, upper_bounds)
-    pub fn predict_with_intervals(&self, dataset: &BinnedDataset) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    pub fn predict_with_intervals(
+        &self,
+        dataset: &BinnedDataset,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let predictions = self.predict(dataset);
 
         let q = self.conformal_q.unwrap_or(0.0);
@@ -1383,7 +1424,10 @@ impl GBDTModel {
     /// Vector of class labels (0 or 1)
     pub fn predict_class(&self, dataset: &BinnedDataset, threshold: f32) -> Vec<u32> {
         let proba = self.predict_proba(dataset);
-        proba.iter().map(|&p| if p >= threshold { 1 } else { 0 }).collect()
+        proba
+            .iter()
+            .map(|&p| if p >= threshold { 1 } else { 0 })
+            .collect()
     }
 
     // ============================================================================
@@ -1410,7 +1454,11 @@ impl GBDTModel {
     pub fn predict_proba_multiclass(&self, dataset: &BinnedDataset) -> Vec<Vec<f32>> {
         if self.num_classes == 0 {
             // Not a multi-class model, fall back to binary
-            return self.predict_proba(dataset).into_iter().map(|p| vec![1.0 - p, p]).collect();
+            return self
+                .predict_proba(dataset)
+                .into_iter()
+                .map(|p| vec![1.0 - p, p])
+                .collect();
         }
 
         let num_rows = dataset.num_rows();
@@ -1622,7 +1670,10 @@ impl GBDTModel {
     /// Only meaningful when trained with `with_binary_logloss()`.
     pub fn predict_class_raw(&self, features: &[f64], threshold: f32) -> Vec<u32> {
         let proba = self.predict_proba_raw(features);
-        proba.iter().map(|&p| if p >= threshold { 1 } else { 0 }).collect()
+        proba
+            .iter()
+            .map(|&p| if p >= threshold { 1 } else { 0 })
+            .collect()
     }
 
     // ============================================================================
@@ -1643,7 +1694,11 @@ impl GBDTModel {
     pub fn predict_proba_multiclass_raw(&self, features: &[f64]) -> Vec<Vec<f32>> {
         if self.num_classes == 0 {
             // Not a multi-class model, fall back to binary
-            return self.predict_proba_raw(features).into_iter().map(|p| vec![1.0 - p, p]).collect();
+            return self
+                .predict_proba_raw(features)
+                .into_iter()
+                .map(|p| vec![1.0 - p, p])
+                .collect();
         }
 
         let num_features = self.num_features();
@@ -1722,7 +1777,11 @@ impl GBDTModel {
     pub fn predict_raw_multiclass_raw(&self, features: &[f64]) -> Vec<Vec<f32>> {
         if self.num_classes == 0 {
             // Not a multi-class model
-            return self.predict_raw(features).into_iter().map(|p| vec![p]).collect();
+            return self
+                .predict_raw(features)
+                .into_iter()
+                .map(|p| vec![p])
+                .collect();
         }
 
         let num_features = self.num_features();
@@ -1848,10 +1907,7 @@ impl GBDTModel {
     ///
     /// Uses 4-bit packing for features with ≤16 unique bins,
     /// providing up to 50% memory savings for low-cardinality features.
-    pub fn create_packed_dataset(
-        &self,
-        dataset: &BinnedDataset,
-    ) -> crate::dataset::PackedDataset {
+    pub fn create_packed_dataset(&self, dataset: &BinnedDataset) -> crate::dataset::PackedDataset {
         crate::dataset::PackedDataset::from_binned(dataset)
     }
 }
@@ -1896,7 +1952,9 @@ impl TunableModel for GBDTModel {
                 ("colsample", ParamValue::Numeric(v)) => config.colsample = *v,
                 ("lambda", ParamValue::Numeric(v)) => config.lambda = *v,
                 ("entropy_weight", ParamValue::Numeric(v)) => config.entropy_weight = *v,
-                ("min_samples_leaf", ParamValue::Numeric(v)) => config.min_samples_leaf = *v as usize,
+                ("min_samples_leaf", ParamValue::Numeric(v)) => {
+                    config.min_samples_leaf = *v as usize
+                }
                 ("min_hessian_leaf", ParamValue::Numeric(v)) => config.min_hessian_leaf = *v,
                 ("min_gain", ParamValue::Numeric(v)) => config.min_gain = *v,
                 ("num_rounds", ParamValue::Numeric(v)) => config.num_rounds = *v as usize,
@@ -1968,11 +2026,7 @@ impl TunableModel for GBDTModel {
         self.conformal_q
     }
 
-    fn configure_conformal(
-        config: &mut Self::Config,
-        calibration_ratio: f32,
-        quantile: f32,
-    ) {
+    fn configure_conformal(config: &mut Self::Config, calibration_ratio: f32, quantile: f32) {
         config.calibration_ratio = calibration_ratio;
         config.conformal_quantile = quantile;
     }
@@ -2094,7 +2148,7 @@ mod tests {
         let config = GBDTConfig::new()
             .with_num_rounds(10)
             .with_max_depth(4)
-            .with_subsample(0.8)  // 80% row subsampling
+            .with_subsample(0.8) // 80% row subsampling
             .with_colsample(0.8); // 80% column subsampling
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
@@ -2148,9 +2202,7 @@ mod tests {
         let dataset = create_regression_dataset(500, 0.1);
 
         // With column reordering enabled (default)
-        let config = GBDTConfig::new()
-            .with_num_rounds(10)
-            .with_max_depth(4);
+        let config = GBDTConfig::new().with_num_rounds(10).with_max_depth(4);
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
@@ -2180,9 +2232,7 @@ mod tests {
     fn test_feature_importance() {
         let dataset = create_regression_dataset(500, 0.1);
 
-        let config = GBDTConfig::new()
-            .with_num_rounds(20)
-            .with_max_depth(4);
+        let config = GBDTConfig::new().with_num_rounds(20).with_max_depth(4);
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
         let importances = model.feature_importance();
@@ -2431,9 +2481,7 @@ mod tests {
 
         let dataset = create_regression_dataset(100, 0.1);
 
-        let config = GBDTConfig::new()
-            .with_num_rounds(5)
-            .with_max_depth(3);
+        let config = GBDTConfig::new().with_num_rounds(5).with_max_depth(3);
 
         let model = GBDTModel::train_binned(&dataset, config.clone()).unwrap();
 
@@ -2442,7 +2490,9 @@ mod tests {
         let output_path = dir.path().join("model_output");
 
         // Save model and config
-        model.save_to_directory(&output_path, &config, &[ModelFormat::Rkyv]).unwrap();
+        model
+            .save_to_directory(&output_path, &config, &[ModelFormat::Rkyv])
+            .unwrap();
 
         // Verify files exist
         assert!(output_path.join("config.json").exists());
@@ -2464,13 +2514,13 @@ mod tests {
         use tempfile::tempdir;
 
         // Create simple test data
-        let features = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+        let features = vec![
+            1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ];
         let targets = vec![1.0f32, 2.0, 3.0, 4.0];
         let num_features = 3;
 
-        let config = GBDTConfig::new()
-            .with_num_rounds(5)
-            .with_max_depth(2);
+        let config = GBDTConfig::new().with_num_rounds(5).with_max_depth(2);
 
         // Create temp directory
         let dir = tempdir().unwrap();
@@ -2485,7 +2535,8 @@ mod tests {
             None,
             &output_path,
             &[ModelFormat::Rkyv, ModelFormat::Bincode],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Verify model was trained
         assert_eq!(model.num_trees(), 5);
@@ -2497,7 +2548,8 @@ mod tests {
 
         // Load both formats and verify
         let loaded_rkyv = crate::serialize::load_model(output_path.join("model.rkyv")).unwrap();
-        let loaded_bincode = crate::serialize::load_model_bincode(output_path.join("model.bin")).unwrap();
+        let loaded_bincode =
+            crate::serialize::load_model_bincode(output_path.join("model.bin")).unwrap();
         assert_eq!(loaded_rkyv.num_trees(), 5);
         assert_eq!(loaded_bincode.num_trees(), 5);
     }
@@ -2508,9 +2560,7 @@ mod tests {
 
         let dataset = create_regression_dataset(100, 0.1);
 
-        let config = GBDTConfig::new()
-            .with_num_rounds(5)
-            .with_max_depth(3);
+        let config = GBDTConfig::new().with_num_rounds(5).with_max_depth(3);
 
         let model = GBDTModel::train_binned(&dataset, config.clone()).unwrap();
 
@@ -2523,7 +2573,11 @@ mod tests {
         assert!(result.is_err());
 
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("formats must not be empty"), "Error message: {}", err_msg);
+        assert!(
+            err_msg.contains("formats must not be empty"),
+            "Error message: {}",
+            err_msg
+        );
     }
 
     #[test]
@@ -2532,18 +2586,23 @@ mod tests {
 
         let dataset = create_regression_dataset(100, 0.1);
 
-        let config = GBDTConfig::new()
-            .with_num_rounds(5)
-            .with_max_depth(3);
+        let config = GBDTConfig::new().with_num_rounds(5).with_max_depth(3);
 
         let model = GBDTModel::train_binned(&dataset, config.clone()).unwrap();
 
         // Create temp directory with nested non-existent path
         let dir = tempdir().unwrap();
-        let output_path = dir.path().join("deeply").join("nested").join("path").join("model");
+        let output_path = dir
+            .path()
+            .join("deeply")
+            .join("nested")
+            .join("path")
+            .join("model");
 
         // Should create all parent directories
-        model.save_to_directory(&output_path, &config, &[ModelFormat::Rkyv]).unwrap();
+        model
+            .save_to_directory(&output_path, &config, &[ModelFormat::Rkyv])
+            .unwrap();
 
         // Verify files exist
         assert!(output_path.join("config.json").exists());
@@ -2570,7 +2629,9 @@ mod tests {
         // Save
         let dir = tempdir().unwrap();
         let output_path = dir.path().join("model_output");
-        model.save_to_directory(&output_path, &config, &[ModelFormat::Rkyv]).unwrap();
+        model
+            .save_to_directory(&output_path, &config, &[ModelFormat::Rkyv])
+            .unwrap();
 
         // Load and verify config.json has all fields
         let config_content = std::fs::read_to_string(output_path.join("config.json")).unwrap();

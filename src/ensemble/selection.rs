@@ -155,7 +155,11 @@ impl HillClimbingSelector {
         new_idx: usize,
     ) -> Vec<f32> {
         // Get all indices to blend (selected + new)
-        let indices: Vec<usize> = selected.iter().copied().chain(std::iter::once(new_idx)).collect();
+        let indices: Vec<usize> = selected
+            .iter()
+            .copied()
+            .chain(std::iter::once(new_idx))
+            .collect();
 
         if indices.is_empty() {
             return Vec::new();
@@ -166,7 +170,10 @@ impl HillClimbingSelector {
 
         (0..n_samples)
             .map(|i| {
-                let sum: f32 = indices.iter().map(|&idx| candidates[idx].oof_preds[i]).sum();
+                let sum: f32 = indices
+                    .iter()
+                    .map(|&idx| candidates[idx].oof_preds[i])
+                    .sum();
                 sum / n_members
             })
             .collect()
@@ -208,7 +215,10 @@ impl HillClimbingSelector {
             let n_members = selected.len() as f32;
             (0..n_samples)
                 .map(|i| {
-                    let sum: f32 = selected.iter().map(|&idx| candidates[idx].oof_preds[i]).sum();
+                    let sum: f32 = selected
+                        .iter()
+                        .map(|&idx| candidates[idx].oof_preds[i])
+                        .sum();
                     sum / n_members
                 })
                 .collect()

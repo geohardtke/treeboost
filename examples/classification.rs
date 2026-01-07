@@ -206,11 +206,7 @@ fn main() {
     for i in (0..predictions.len()).step_by(predictions.len() / 5) {
         println!(
             "   Sample {}: Logit={:7.4}, Prob={:.4}, Pred={}, True={}",
-            i,
-            logits[i],
-            probabilities[i],
-            predictions[i] as i32,
-            targets[i] as i32
+            i, logits[i], probabilities[i], predictions[i] as i32, targets[i] as i32
         );
     }
     println!();

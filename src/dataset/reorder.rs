@@ -8,9 +8,19 @@ use super::{BinnedDataset, FeatureInfo};
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// Column ordering strategy
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
-#[derive(Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Archive,
+    Serialize,
+    Deserialize,
+    serde::Serialize,
+    serde::Deserialize,
+    Default,
+)]
 pub enum OrderingStrategy {
     /// Original ordering (no reordering)
     #[default]
@@ -20,7 +30,6 @@ pub enum OrderingStrategy {
     /// Order by access frequency (most accessed first)
     ByAccessFrequency,
 }
-
 
 /// Tracks feature access patterns during tree traversal
 #[derive(Debug, Clone)]
@@ -64,8 +73,7 @@ impl AccessTracker {
 }
 
 /// Column permutation mapping
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
 pub struct ColumnPermutation {
     /// Maps new index -> original index
     new_to_original: Vec<usize>,

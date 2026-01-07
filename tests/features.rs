@@ -16,9 +16,7 @@ fn test_features_selection_workflow() {
     let dataset = create_synthetic_dataset(500, 42);
 
     // Train model to get importances
-    let config = GBDTConfig::new()
-        .with_num_rounds(30)
-        .with_max_depth(4);
+    let config = GBDTConfig::new().with_num_rounds(30).with_max_depth(4);
 
     let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
     let importances = model.feature_importance();
@@ -242,10 +240,14 @@ fn test_interaction_all_types() {
         3.0, 5.0, 8.0, 2.0, // row 0
         4.0, 6.0, 1.0, 9.0, // row 1
     ];
-    let names: Vec<String> = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()];
+    let names: Vec<String> = vec![
+        "a".to_string(),
+        "b".to_string(),
+        "c".to_string(),
+        "d".to_string(),
+    ];
 
-    let gen = InteractionGenerator::from_pairs(vec![(0, 1)])
-        .with_types(InteractionType::all());
+    let gen = InteractionGenerator::from_pairs(vec![(0, 1)]).with_types(InteractionType::all());
 
     let (int_data, int_names) = gen.generate(&data, 4, &names);
 
@@ -305,8 +307,7 @@ fn test_self_interactions() {
     let data = vec![2.0, 3.0, 4.0]; // 1 row × 3 features
     let names: Vec<String> = vec!["a".to_string(), "b".to_string(), "c".to_string()];
 
-    let mut gen = InteractionGenerator::all_pairs()
-        .with_self_interactions(true);
+    let mut gen = InteractionGenerator::all_pairs().with_self_interactions(true);
     gen.fit(&data, 3);
 
     // With self: (0,0), (0,1), (0,2), (1,1), (1,2), (2,2) = 6 pairs

@@ -244,10 +244,7 @@ impl CVHoldoutTracker {
                 .map(|r| r.relative_gap)
                 .fold(0.0, f32::max)
         } else {
-            self.history
-                .iter()
-                .map(|r| r.gap.abs())
-                .fold(0.0, f32::max)
+            self.history.iter().map(|r| r.gap.abs()).fold(0.0, f32::max)
         }
     }
 

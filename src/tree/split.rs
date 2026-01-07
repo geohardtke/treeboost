@@ -29,8 +29,18 @@ struct PartitionStats {
 }
 
 /// Monotonic constraint for a feature
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Archive,
+    Serialize,
+    Deserialize,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MonotonicConstraint {
     /// No constraint
     None,
@@ -193,9 +203,7 @@ impl SplitInfo {
     /// Check if this split is valid
     #[inline]
     pub fn is_valid(&self) -> bool {
-        self.gain > f32::NEG_INFINITY
-            && self.left_count > 0
-            && self.right_count > 0
+        self.gain > f32::NEG_INFINITY && self.left_count > 0 && self.right_count > 0
     }
 }
 
@@ -291,8 +299,7 @@ impl SplitFinder {
     /// - No monotonic constraint for this feature
     #[inline]
     fn can_use_simd(&self, feature_idx: usize) -> bool {
-        self.entropy_weight == 0.0
-            && self.get_constraint(feature_idx) == MonotonicConstraint::None
+        self.entropy_weight == 0.0 && self.get_constraint(feature_idx) == MonotonicConstraint::None
     }
 
     /// Check if a split satisfies monotonic constraints
@@ -334,7 +341,13 @@ impl SplitFinder {
         total_hessian: f32,
         total_count: u32,
     ) -> Option<SplitInfo> {
-        self.find_best_split_with_features(histograms, total_gradient, total_hessian, total_count, None)
+        self.find_best_split_with_features(
+            histograms,
+            total_gradient,
+            total_hessian,
+            total_count,
+            None,
+        )
     }
 
     /// Find the best split across a subset of features (for column subsampling)
@@ -629,7 +642,6 @@ impl SplitFinder {
         let q = 1.0 - p;
 
         // Use safe log computation
-        
 
         if p > 0.0 && q > 0.0 {
             -(p * p.log2() + q * q.log2())
@@ -874,15 +886,13 @@ mod tests {
 
         // Without entropy regularization
         let finder_no_entropy = SplitFinder::new().with_lambda(0.0);
-        let split_no_entropy = finder_no_entropy
-            .find_best_split(&histograms, 40.0, 100.0, 100);
+        let split_no_entropy = finder_no_entropy.find_best_split(&histograms, 40.0, 100.0, 100);
 
         // With entropy regularization (penalizes imbalanced splits)
         let finder_entropy = SplitFinder::new()
             .with_lambda(0.0)
             .with_entropy_weight(10.0);
-        let split_entropy = finder_entropy
-            .find_best_split(&histograms, 40.0, 100.0, 100);
+        let split_entropy = finder_entropy.find_best_split(&histograms, 40.0, 100.0, 100);
 
         // Both should find splits, but gains differ
         assert!(split_no_entropy.is_some());
@@ -918,8 +928,7 @@ mod tests {
         let mut histograms = crate::histogram::NodeHistograms::new(1);
         *histograms.get_mut(0) = histogram;
 
-        let finder = SplitFinder::new()
-            .with_min_samples_leaf(5); // Require at least 5 samples
+        let finder = SplitFinder::new().with_min_samples_leaf(5); // Require at least 5 samples
 
         let split = finder.find_best_split(&histograms, 98.0, 100.0, 100);
 
@@ -1038,10 +1047,7 @@ mod tests {
         // Group 0: features 0, 1
         // Group 1: features 2, 3
         // Feature 4: unconstrained
-        let constraints = InteractionConstraints::from_groups(
-            vec![vec![0, 1], vec![2, 3]],
-            5,
-        );
+        let constraints = InteractionConstraints::from_groups(vec![vec![0, 1], vec![2, 3]], 5);
 
         // No ancestors: all features allowed
         let allowed = constraints.allowed_features(&[], 5);

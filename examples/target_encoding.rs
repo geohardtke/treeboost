@@ -60,7 +60,12 @@ fn main() {
 
     for (cat, count) in &sorted_counts {
         let freq = **count as f32 / categories.len() as f32;
-        println!("     {:15}: {:2} occurrences ({:.1}%)", cat, count, freq * 100.0);
+        println!(
+            "     {:15}: {:2} occurrences ({:.1}%)",
+            cat,
+            count,
+            freq * 100.0
+        );
     }
     println!();
 
@@ -113,10 +118,13 @@ fn main() {
     println!("3. Smoothing Effect");
     println!();
     println!("   Smoothing reduces variance for rare categories:");
-    println!("   Smoothed encoding = (count * mean + smoothing * global_mean) / (count + smoothing)");
+    println!(
+        "   Smoothed encoding = (count * mean + smoothing * global_mean) / (count + smoothing)"
+    );
     println!();
 
-    let global_mean = training_data.iter().map(|(_, t)| t).sum::<f32>() / training_data.len() as f32;
+    let global_mean =
+        training_data.iter().map(|(_, t)| t).sum::<f32>() / training_data.len() as f32;
     let smoothing = 10.0;
 
     println!("   Parameters:");
@@ -130,7 +138,10 @@ fn main() {
             let count = targets.len() as f32;
             let mean = targets.iter().sum::<f32>() / count;
             let smoothed = (count * mean + smoothing * global_mean) / (count + smoothing);
-            println!("     {:5}: raw={:.4}, count={:.0}, smoothed={:.4}", cat, mean, count, smoothed);
+            println!(
+                "     {:5}: raw={:.4}, count={:.0}, smoothed={:.4}",
+                cat, mean, count, smoothed
+            );
         }
     }
     println!();

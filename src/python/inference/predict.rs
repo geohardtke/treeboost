@@ -114,10 +114,7 @@ impl PyConformalPredictor {
     ///     predictor = ConformalPredictor.from_residuals(residuals, coverage=0.9)
     #[staticmethod]
     #[pyo3(signature = (residuals, coverage=0.9))]
-    fn from_residuals<'py>(
-        residuals: PyReadonlyArray1<'py, f32>,
-        coverage: f32,
-    ) -> PyResult<Self> {
+    fn from_residuals<'py>(residuals: PyReadonlyArray1<'py, f32>, coverage: f32) -> PyResult<Self> {
         if coverage <= 0.0 || coverage >= 1.0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "coverage must be in (0, 1)",
@@ -177,10 +174,7 @@ impl PyConformalPredictor {
     ///
     /// Returns:
     ///     List of Prediction objects with intervals
-    fn predict_batch<'py>(
-        &self,
-        points: PyReadonlyArray1<'py, f32>,
-    ) -> Vec<PyPrediction> {
+    fn predict_batch<'py>(&self, points: PyReadonlyArray1<'py, f32>) -> Vec<PyPrediction> {
         let points_arr = points.as_array();
         let points_vec: Vec<f32> = points_arr.to_vec();
         self.inner

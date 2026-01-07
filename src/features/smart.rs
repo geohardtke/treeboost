@@ -234,7 +234,9 @@ impl SmartFeatureEngine {
         numeric_cols.sort_by(|a, b| {
             let corr_a = a.target_correlation.map(|c| c.abs()).unwrap_or(0.0);
             let corr_b = b.target_correlation.map(|c| c.abs()).unwrap_or(0.0);
-            corr_b.partial_cmp(&corr_a).unwrap_or(std::cmp::Ordering::Equal)
+            corr_b
+                .partial_cmp(&corr_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // 1. Polynomial features for top correlated columns
@@ -317,7 +319,11 @@ impl SmartFeatureEngine {
         // Find pairs with high correlation (both with target)
         let high_corr_cols: Vec<&ColumnProfile> = numeric_cols
             .iter()
-            .filter(|c| c.target_correlation.map(|r| r.abs() > config.ratio_correlation_threshold).unwrap_or(false))
+            .filter(|c| {
+                c.target_correlation
+                    .map(|r| r.abs() > config.ratio_correlation_threshold)
+                    .unwrap_or(false)
+            })
             .copied()
             .collect();
 
@@ -326,7 +332,8 @@ impl SmartFeatureEngine {
             for col_b in high_corr_cols.iter().skip(i + 1) {
                 // Check if denominator column has values away from zero
                 if col_b.min.map(|v| v.abs() > 0.01).unwrap_or(false) {
-                    plan.ratio_pairs.push((col_a.name.clone(), col_b.name.clone()));
+                    plan.ratio_pairs
+                        .push((col_a.name.clone(), col_b.name.clone()));
                     plan.reasoning.push(format!(
                         "Ratio: {} / {} (both highly correlated with target)",
                         col_a.name, col_b.name
@@ -350,13 +357,16 @@ impl SmartFeatureEngine {
         numeric_cols: &[&ColumnProfile],
         config: &SmartFeatureConfig,
     ) {
-        let top_n = config.top_n_interactions.min(numeric_cols.len() * (numeric_cols.len() - 1) / 2);
+        let top_n = config
+            .top_n_interactions
+            .min(numeric_cols.len() * (numeric_cols.len() - 1) / 2);
         let mut pair_count = 0;
 
         // Generate interaction pairs from top correlated columns
         for (i, col_a) in numeric_cols.iter().enumerate() {
             for col_b in numeric_cols.iter().skip(i + 1) {
-                plan.interaction_pairs.push((col_a.name.clone(), col_b.name.clone()));
+                plan.interaction_pairs
+                    .push((col_a.name.clone(), col_b.name.clone()));
                 plan.reasoning.push(format!(
                     "Interaction: {} × {} (top correlated features)",
                     col_a.name, col_b.name
@@ -382,12 +392,18 @@ impl SmartFeatureEngine {
         for col in &profile.columns {
             if col.dtype == ColumnDataType::DateTime {
                 // Add standard time components
-                plan.time_features.push((col.name.clone(), TimeFeatureType::Hour));
-                plan.time_features.push((col.name.clone(), TimeFeatureType::DayOfWeek));
-                plan.time_features.push((col.name.clone(), TimeFeatureType::Month));
-                plan.time_features.push((col.name.clone(), TimeFeatureType::IsWeekend));
-                plan.time_features.push((col.name.clone(), TimeFeatureType::CyclicalHour));
-                plan.time_features.push((col.name.clone(), TimeFeatureType::CyclicalDayOfWeek));
+                plan.time_features
+                    .push((col.name.clone(), TimeFeatureType::Hour));
+                plan.time_features
+                    .push((col.name.clone(), TimeFeatureType::DayOfWeek));
+                plan.time_features
+                    .push((col.name.clone(), TimeFeatureType::Month));
+                plan.time_features
+                    .push((col.name.clone(), TimeFeatureType::IsWeekend));
+                plan.time_features
+                    .push((col.name.clone(), TimeFeatureType::CyclicalHour));
+                plan.time_features
+                    .push((col.name.clone(), TimeFeatureType::CyclicalDayOfWeek));
 
                 plan.reasoning.push(format!(
                     "{}: Add time features (hour, day_of_week, month, is_weekend, cyclical)",
@@ -409,7 +425,10 @@ impl SmartFeatureEngine {
     /// | Tree | Interaction (x_i * x_j) | Top 10 feature pairs |
     /// | Tree | Ratios (x_i / x_j) | Correlated pairs (scale-free) |
     /// | Tree | NO polynomial | Trees capture non-linearity natively |
-    pub fn infer_ltt(profile: &DataFrameProfile, analysis: Option<&DatasetAnalysis>) -> LttFeaturePlan {
+    pub fn infer_ltt(
+        profile: &DataFrameProfile,
+        analysis: Option<&DatasetAnalysis>,
+    ) -> LttFeaturePlan {
         let config = SmartFeatureConfig::default();
         Self::infer_ltt_with_config(profile, analysis, &config)
     }
@@ -422,9 +441,15 @@ impl SmartFeatureEngine {
     ) -> LttFeaturePlan {
         let mut ltt_plan = LttFeaturePlan::new();
 
-        ltt_plan.reasoning.push("=== LTT Dual-Phase Feature Engineering ===".to_string());
-        ltt_plan.reasoning.push("Phase 1 (Linear): Polynomial features extend linear model's reach".to_string());
-        ltt_plan.reasoning.push("Phase 2 (Tree): Interaction features capture what trees struggle with".to_string());
+        ltt_plan
+            .reasoning
+            .push("=== LTT Dual-Phase Feature Engineering ===".to_string());
+        ltt_plan
+            .reasoning
+            .push("Phase 1 (Linear): Polynomial features extend linear model's reach".to_string());
+        ltt_plan.reasoning.push(
+            "Phase 2 (Tree): Interaction features capture what trees struggle with".to_string(),
+        );
 
         // Get numeric columns sorted by target correlation
         let mut numeric_cols: Vec<&ColumnProfile> = profile
@@ -437,14 +462,19 @@ impl SmartFeatureEngine {
         numeric_cols.sort_by(|a, b| {
             let corr_a = a.target_correlation.map(|c| c.abs()).unwrap_or(0.0);
             let corr_b = b.target_correlation.map(|c| c.abs()).unwrap_or(0.0);
-            corr_b.partial_cmp(&corr_a).unwrap_or(std::cmp::Ordering::Equal)
+            corr_b
+                .partial_cmp(&corr_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // === LINEAR PHASE FEATURES ===
         // Polynomial features help linear models capture non-linearity
         for col in numeric_cols.iter().take(config.top_n_polynomial) {
             if !col.has_negative {
-                ltt_plan.linear_features.polynomial_features.push(col.name.clone());
+                ltt_plan
+                    .linear_features
+                    .polynomial_features
+                    .push(col.name.clone());
                 ltt_plan.linear_features.reasoning.push(format!(
                     "{}: Polynomial for linear phase (correlation={:.3})",
                     col.name,
@@ -459,7 +489,10 @@ impl SmartFeatureEngine {
             // Limited interactions for linear
             for (i, col_a) in numeric_cols.iter().enumerate().take(3) {
                 for col_b in numeric_cols.iter().skip(i + 1).take(3) {
-                    ltt_plan.linear_features.interaction_pairs.push((col_a.name.clone(), col_b.name.clone()));
+                    ltt_plan
+                        .linear_features
+                        .interaction_pairs
+                        .push((col_a.name.clone(), col_b.name.clone()));
                 }
             }
             ltt_plan.linear_features.reasoning.push(format!(
@@ -473,11 +506,16 @@ impl SmartFeatureEngine {
         // NO polynomial - trees handle non-linearity natively
 
         // Interaction features
-        let top_n = config.top_n_interactions.min(numeric_cols.len() * (numeric_cols.len() - 1) / 2);
+        let top_n = config
+            .top_n_interactions
+            .min(numeric_cols.len() * (numeric_cols.len() - 1) / 2);
         let mut pair_count = 0;
         for (i, col_a) in numeric_cols.iter().enumerate() {
             for col_b in numeric_cols.iter().skip(i + 1) {
-                ltt_plan.tree_features.interaction_pairs.push((col_a.name.clone(), col_b.name.clone()));
+                ltt_plan
+                    .tree_features
+                    .interaction_pairs
+                    .push((col_a.name.clone(), col_b.name.clone()));
                 pair_count += 1;
                 if pair_count >= top_n {
                     break;
@@ -495,14 +533,21 @@ impl SmartFeatureEngine {
         // Ratio features (scale-free, good for residuals)
         let high_corr_cols: Vec<&ColumnProfile> = numeric_cols
             .iter()
-            .filter(|c| c.target_correlation.map(|r| r.abs() > config.ratio_correlation_threshold).unwrap_or(false))
+            .filter(|c| {
+                c.target_correlation
+                    .map(|r| r.abs() > config.ratio_correlation_threshold)
+                    .unwrap_or(false)
+            })
             .copied()
             .collect();
 
         for (i, col_a) in high_corr_cols.iter().enumerate().take(5) {
             for col_b in high_corr_cols.iter().skip(i + 1).take(5) {
                 if col_b.min.map(|v| v.abs() > 0.01).unwrap_or(false) {
-                    ltt_plan.tree_features.ratio_pairs.push((col_a.name.clone(), col_b.name.clone()));
+                    ltt_plan
+                        .tree_features
+                        .ratio_pairs
+                        .push((col_a.name.clone(), col_b.name.clone()));
                 }
             }
         }
@@ -517,7 +562,10 @@ impl SmartFeatureEngine {
         for col in &profile.columns {
             if col.dtype == ColumnDataType::DateTime {
                 ltt_plan.shared_features.push(col.name.clone());
-                ltt_plan.reasoning.push(format!("{}: DateTime features shared between phases", col.name));
+                ltt_plan.reasoning.push(format!(
+                    "{}: DateTime features shared between phases",
+                    col.name
+                ));
             }
         }
 
@@ -529,11 +577,20 @@ impl SmartFeatureEngine {
         let mut summary = String::new();
 
         summary.push_str("Feature Generation Plan:\n");
-        summary.push_str(&format!("  Polynomial features: {}\n", plan.polynomial_features.len()));
+        summary.push_str(&format!(
+            "  Polynomial features: {}\n",
+            plan.polynomial_features.len()
+        ));
         summary.push_str(&format!("  Ratio pairs: {}\n", plan.ratio_pairs.len()));
-        summary.push_str(&format!("  Interaction pairs: {}\n", plan.interaction_pairs.len()));
+        summary.push_str(&format!(
+            "  Interaction pairs: {}\n",
+            plan.interaction_pairs.len()
+        ));
         summary.push_str(&format!("  Time features: {}\n", plan.time_features.len()));
-        summary.push_str(&format!("  Estimated total: {} new features\n", plan.estimated_feature_count()));
+        summary.push_str(&format!(
+            "  Estimated total: {} new features\n",
+            plan.estimated_feature_count()
+        ));
 
         if !plan.reasoning.is_empty() {
             summary.push_str("\nDecisions:\n");
@@ -552,14 +609,29 @@ impl SmartFeatureEngine {
         summary.push_str("=== LTT Feature Engineering Plan ===\n\n");
 
         summary.push_str("Linear Phase Features:\n");
-        summary.push_str(&format!("  Polynomial: {}\n", plan.linear_features.polynomial_features.len()));
-        summary.push_str(&format!("  Interactions: {}\n", plan.linear_features.interaction_pairs.len()));
+        summary.push_str(&format!(
+            "  Polynomial: {}\n",
+            plan.linear_features.polynomial_features.len()
+        ));
+        summary.push_str(&format!(
+            "  Interactions: {}\n",
+            plan.linear_features.interaction_pairs.len()
+        ));
 
         summary.push_str("\nTree Phase Features:\n");
-        summary.push_str(&format!("  Interactions: {}\n", plan.tree_features.interaction_pairs.len()));
-        summary.push_str(&format!("  Ratios: {}\n", plan.tree_features.ratio_pairs.len()));
+        summary.push_str(&format!(
+            "  Interactions: {}\n",
+            plan.tree_features.interaction_pairs.len()
+        ));
+        summary.push_str(&format!(
+            "  Ratios: {}\n",
+            plan.tree_features.ratio_pairs.len()
+        ));
 
-        summary.push_str(&format!("\nShared Features: {}\n", plan.shared_features.len()));
+        summary.push_str(&format!(
+            "\nShared Features: {}\n",
+            plan.shared_features.len()
+        ));
 
         if !plan.reasoning.is_empty() {
             summary.push_str("\nDecisions:\n");
@@ -624,7 +696,8 @@ mod tests {
         let mut plan = FeaturePlan::new();
         plan.polynomial_features.push("f1".to_string());
         plan.polynomial_features.push("f2".to_string());
-        plan.interaction_pairs.push(("f1".to_string(), "f2".to_string()));
+        plan.interaction_pairs
+            .push(("f1".to_string(), "f2".to_string()));
 
         // 2 polynomial columns * 2 features each + 1 interaction = 5
         assert!(plan.estimated_feature_count() >= 4);
@@ -634,7 +707,11 @@ mod tests {
     fn test_skip_negative_polynomial() {
         // Create profile with negative values
         let df = DataFrame::new(vec![
-            Series::new("negative_feature".into(), vec![-1.0f64, -2.0, 3.0, 4.0, 5.0]).into(),
+            Series::new(
+                "negative_feature".into(),
+                vec![-1.0f64, -2.0, 3.0, 4.0, 5.0],
+            )
+            .into(),
             Series::new("positive_feature".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
             Series::new("target".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
         ])
@@ -644,6 +721,8 @@ mod tests {
         let plan = SmartFeatureEngine::infer(&profile, None);
 
         // Should NOT have negative feature in polynomial (can't do sqrt/log)
-        assert!(!plan.polynomial_features.contains(&"negative_feature".to_string()));
+        assert!(!plan
+            .polynomial_features
+            .contains(&"negative_feature".to_string()));
     }
 }

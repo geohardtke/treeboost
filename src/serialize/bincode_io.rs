@@ -13,8 +13,9 @@ pub fn save_model_bincode(model: &GBDTModel, path: impl AsRef<Path>) -> Result<(
     let file = File::create(path)?;
     let writer = BufWriter::new(file);
 
-    bincode::serialize_into(writer, model)
-        .map_err(|e| TreeBoostError::Serialization(format!("Failed to serialize bincode: {}", e)))?;
+    bincode::serialize_into(writer, model).map_err(|e| {
+        TreeBoostError::Serialization(format!("Failed to serialize bincode: {}", e))
+    })?;
 
     Ok(())
 }
@@ -24,8 +25,9 @@ pub fn load_model_bincode(path: impl AsRef<Path>) -> Result<GBDTModel> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
 
-    let model: GBDTModel = bincode::deserialize_from(reader)
-        .map_err(|e| TreeBoostError::Serialization(format!("Failed to deserialize bincode: {}", e)))?;
+    let model: GBDTModel = bincode::deserialize_from(reader).map_err(|e| {
+        TreeBoostError::Serialization(format!("Failed to deserialize bincode: {}", e))
+    })?;
 
     Ok(model)
 }
@@ -66,9 +68,7 @@ mod tests {
     #[test]
     fn test_save_load_model_bincode() {
         let dataset = create_test_dataset();
-        let config = GBDTConfig::new()
-            .with_num_rounds(5)
-            .with_max_depth(3);
+        let config = GBDTConfig::new().with_num_rounds(5).with_max_depth(3);
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
 

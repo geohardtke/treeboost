@@ -450,17 +450,35 @@ mod tests {
 
         // Test: Equal sample sizes (1000 ref, 1000 inf)
         let mult_equal = detector.compute_threshold_multiplier(0, 1000);
-        assert!((mult_equal - 1.414).abs() < 0.01, "Expected ~1.414, got {}", mult_equal);
+        assert!(
+            (mult_equal - 1.414).abs() < 0.01,
+            "Expected ~1.414, got {}",
+            mult_equal
+        );
 
         // Test: Small inference sample (1000 ref, 100 inf) - should be MORE lenient (larger multiplier)
         let mult_small = detector.compute_threshold_multiplier(0, 100);
-        assert!(mult_small > mult_equal, "Small samples should have larger multipliers (more lenient)");
-        assert!((mult_small - 3.32).abs() < 0.01, "Expected ~3.32, got {}", mult_small);
+        assert!(
+            mult_small > mult_equal,
+            "Small samples should have larger multipliers (more lenient)"
+        );
+        assert!(
+            (mult_small - 3.32).abs() < 0.01,
+            "Expected ~3.32, got {}",
+            mult_small
+        );
 
         // Test: Large inference sample (1000 ref, 10000 inf) - should be STRICTER (smaller multiplier)
         let mult_large = detector.compute_threshold_multiplier(0, 10000);
-        assert!(mult_large < mult_equal, "Large samples should have smaller multipliers (stricter)");
-        assert!((mult_large - 1.049).abs() < 0.01, "Expected ~1.049, got {}", mult_large);
+        assert!(
+            mult_large < mult_equal,
+            "Large samples should have smaller multipliers (stricter)"
+        );
+        assert!(
+            (mult_large - 1.049).abs() < 0.01,
+            "Expected ~1.049, got {}",
+            mult_large
+        );
 
         // Verify: Small samples get MORE lenient thresholds (larger multiplier = higher threshold)
         // This prevents false positives from sampling noise in small batches
@@ -471,8 +489,12 @@ mod tests {
         );
 
         // Verify ordering: small > equal > large
-        assert!(mult_small > mult_equal && mult_equal > mult_large,
+        assert!(
+            mult_small > mult_equal && mult_equal > mult_large,
             "Expected: small ({}) > equal ({}) > large ({})",
-            mult_small, mult_equal, mult_large);
+            mult_small,
+            mult_equal,
+            mult_large
+        );
     }
 }

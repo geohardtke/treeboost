@@ -76,7 +76,10 @@ impl ColumnDataType {
         // Check for datetime
         if matches!(
             dtype,
-            PolarsDataType::Date | PolarsDataType::Datetime(_, _) | PolarsDataType::Time | PolarsDataType::Duration(_)
+            PolarsDataType::Date
+                | PolarsDataType::Datetime(_, _)
+                | PolarsDataType::Time
+                | PolarsDataType::Duration(_)
         ) {
             return ColumnDataType::DateTime;
         }
@@ -239,8 +242,7 @@ impl ColumnProfile {
 
         // Quick negative check for numeric
         let has_negative = if dtype == ColumnDataType::Numeric {
-            Self::extract_scalar_f64(&column.min_reduce().ok())
-                .is_some_and(|v| v < 0.0)
+            Self::extract_scalar_f64(&column.min_reduce().ok()).is_some_and(|v| v < 0.0)
         } else {
             false
         };
@@ -317,18 +319,27 @@ impl ColumnProfile {
 
         if std > 1e-10 {
             // Skewness: E[(X - μ)³] / σ³
-            let m3 = values.iter().map(|x| ((x - mean) / std).powi(3)).sum::<f64>() / n;
+            let m3 = values
+                .iter()
+                .map(|x| ((x - mean) / std).powi(3))
+                .sum::<f64>()
+                / n;
             self.skewness = Some(m3 as f32);
 
             // Kurtosis: E[(X - μ)⁴] / σ⁴ - 3 (excess kurtosis)
-            let m4 = values.iter().map(|x| ((x - mean) / std).powi(4)).sum::<f64>() / n;
+            let m4 = values
+                .iter()
+                .map(|x| ((x - mean) / std).powi(4))
+                .sum::<f64>()
+                / n;
             self.kurtosis = Some((m4 - 3.0) as f32);
         }
 
         // Compute target correlation if target provided
         if let Some(target) = target {
             if values.len() == target.len() {
-                self.target_correlation = Some(crate::analysis::compute_correlation_mixed(&values, target));
+                self.target_correlation =
+                    Some(crate::analysis::compute_correlation_mixed(&values, target));
             }
         }
     }
@@ -472,9 +483,9 @@ impl DataFrameProfile {
         let num_rows = df.height();
 
         // Get target column and values
-        let target_column = df
-            .column(target_col)
-            .map_err(|e| TreeBoostError::Data(format!("Target column '{}' not found: {}", target_col, e)))?;
+        let target_column = df.column(target_col).map_err(|e| {
+            TreeBoostError::Data(format!("Target column '{}' not found: {}", target_col, e))
+        })?;
 
         let target_values: Vec<f32> = target_column
             .cast(&PolarsDataType::Float64)
@@ -629,11 +640,16 @@ impl DataFrameProfile {
 
         // Dropped columns
         if !self.drop_columns.is_empty() {
-            report.push_str("├─────────────────────────────────────────────────────────────────┤\n");
-            report.push_str("│ Dropped Columns                                                 │\n");
+            report
+                .push_str("├─────────────────────────────────────────────────────────────────┤\n");
+            report
+                .push_str("│ Dropped Columns                                                 │\n");
             for col in &self.drop_columns {
                 if col.reason != DropReason::Target {
-                    report.push_str(&format!("│   • {} ({})                              │\n", col.name, col.reason));
+                    report.push_str(&format!(
+                        "│   • {} ({})                              │\n",
+                        col.name, col.reason
+                    ));
                 }
             }
         }
@@ -641,7 +657,8 @@ impl DataFrameProfile {
         // High skewness warning
         let skewed = self.high_skew_columns(2.0);
         if !skewed.is_empty() {
-            report.push_str("├─────────────────────────────────────────────────────────────────┤\n");
+            report
+                .push_str("├─────────────────────────────────────────────────────────────────┤\n");
             report.push_str("│ High Skewness (consider YeoJohnson)                            │\n");
             for col in skewed.iter().take(5) {
                 report.push_str(&format!(
@@ -655,7 +672,8 @@ impl DataFrameProfile {
         // High missing warning
         let missing = self.high_missing_columns(0.05);
         if !missing.is_empty() {
-            report.push_str("├─────────────────────────────────────────────────────────────────┤\n");
+            report
+                .push_str("├─────────────────────────────────────────────────────────────────┤\n");
             report.push_str("│ High Missing Values (>5%)                                      │\n");
             for col in missing.iter().take(5) {
                 report.push_str(&format!(
@@ -681,7 +699,8 @@ impl DataFrameProfile {
         });
 
         if !correlated.is_empty() {
-            report.push_str("├─────────────────────────────────────────────────────────────────┤\n");
+            report
+                .push_str("├─────────────────────────────────────────────────────────────────┤\n");
             report.push_str("│ Top Correlated Features                                        │\n");
             for col in correlated.iter().take(5) {
                 report.push_str(&format!(

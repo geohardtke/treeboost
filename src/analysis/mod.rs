@@ -48,13 +48,18 @@
 //! - **PureTree**: Weak linear signal OR categorical-heavy OR high interactions
 //! - **RandomForest**: High noise floor AND need variance reduction
 
-mod stats;
-mod probes;
 mod analyzer;
-mod report;
+mod probes;
 pub mod profiler;
+mod report;
+mod stats;
 
-pub use analyzer::{DatasetAnalysis, AnalysisConfig, Recommendation, Confidence, ModeScores};
-pub use report::{AnalysisReport, compact_summary};
-pub use stats::{compute_r2, compute_correlation, compute_correlation_mixed, compute_variance, compute_mean, compute_std, compute_range};
-pub use profiler::{DataFrameProfile, ColumnProfile, ColumnDataType, TaskType, DropReason, DroppedColumn};
+pub use analyzer::{AnalysisConfig, Confidence, DatasetAnalysis, ModeScores, Recommendation};
+pub use profiler::{
+    ColumnDataType, ColumnProfile, DataFrameProfile, DropReason, DroppedColumn, TaskType,
+};
+pub use report::{compact_summary, AnalysisReport};
+pub use stats::{
+    compute_correlation, compute_correlation_mixed, compute_mean, compute_r2, compute_range,
+    compute_std, compute_variance,
+};

@@ -10,7 +10,9 @@
 
 use pyo3::prelude::*;
 
-use crate::tuner::{EvalStrategy, GridStrategy, ModelFormat, OptimizationMetric, TaskType, TuningMode};
+use crate::tuner::{
+    EvalStrategy, GridStrategy, ModelFormat, OptimizationMetric, TaskType, TuningMode,
+};
 
 /// Python wrapper for TuningMode
 ///

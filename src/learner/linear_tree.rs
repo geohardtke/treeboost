@@ -41,8 +41,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 // =============================================================================
 
 /// Configuration for LinearTreeBooster
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
 pub struct LinearTreeConfig {
     /// Tree structure configuration
     pub tree_config: TreeConfig,
@@ -59,12 +58,10 @@ impl Default for LinearTreeConfig {
     fn default() -> Self {
         Self {
             tree_config: TreeConfig::default()
-                .with_max_depth(4)      // Shallower trees since leaves are more expressive
+                .with_max_depth(4) // Shallower trees since leaves are more expressive
                 .with_max_leaves(15)
                 .with_min_samples_leaf(20), // Need enough samples for linear fit
-            linear_config: LinearConfig::default()
-                .with_lambda(1.0)
-                .with_max_iter(50),
+            linear_config: LinearConfig::default().with_lambda(1.0).with_max_iter(50),
             min_samples_for_linear: 10,
         }
     }
@@ -96,8 +93,7 @@ impl LinearTreeConfig {
 // =============================================================================
 
 /// Linear model for a single leaf
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
 pub struct LeafLinearModel {
     /// Weights (one per feature)
     pub weights: Vec<f32>,
@@ -156,8 +152,7 @@ impl LeafLinearModel {
 /// Combines the partitioning power of decision trees with the smoothness
 /// of linear regression. Each leaf contains a Ridge regression model
 /// fitted on the samples that fall into that leaf.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
 pub struct LinearTreeBooster {
     /// The tree structure (for partitioning)
     tree: Option<Tree>,
@@ -363,7 +358,8 @@ impl LinearTreeBooster {
 
             // If too few samples, use constant prediction
             if num_samples < self.config.min_samples_for_linear {
-                self.leaf_models.push((node_idx, LeafLinearModel::constant(default_value)));
+                self.leaf_models
+                    .push((node_idx, LeafLinearModel::constant(default_value)));
                 continue;
             }
 
@@ -583,7 +579,8 @@ impl LinearTreeBooster {
     /// Number of parameters (tree complexity + linear weights)
     pub fn num_params(&self) -> usize {
         let tree_params = self.tree.as_ref().map(|t| t.num_leaves()).unwrap_or(0);
-        let linear_params: usize = self.leaf_models
+        let linear_params: usize = self
+            .leaf_models
             .iter()
             .map(|(_, m)| if m.is_linear { m.weights.len() + 1 } else { 1 })
             .sum();
@@ -685,11 +682,12 @@ mod tests {
         let gradients: Vec<f32> = (0..100).map(|i| -(i as f32) * 0.1).collect();
         let hessians = vec![1.0; 100];
 
-        let config = LinearTreeConfig::default()
-            .with_min_samples_for_linear(5);
+        let config = LinearTreeConfig::default().with_min_samples_for_linear(5);
 
         let mut booster = LinearTreeBooster::new(config);
-        booster.fit_on_gradients(&dataset, &raw_features, 3, &gradients, &hessians).unwrap();
+        booster
+            .fit_on_gradients(&dataset, &raw_features, 3, &gradients, &hessians)
+            .unwrap();
 
         assert!(booster.is_fitted());
         assert!(booster.tree().is_some());
@@ -703,11 +701,12 @@ mod tests {
         let gradients: Vec<f32> = (0..100).map(|i| -(i as f32) * 0.1).collect();
         let hessians = vec![1.0; 100];
 
-        let config = LinearTreeConfig::default()
-            .with_min_samples_for_linear(5);
+        let config = LinearTreeConfig::default().with_min_samples_for_linear(5);
 
         let mut booster = LinearTreeBooster::new(config);
-        booster.fit_on_gradients(&dataset, &raw_features, 3, &gradients, &hessians).unwrap();
+        booster
+            .fit_on_gradients(&dataset, &raw_features, 3, &gradients, &hessians)
+            .unwrap();
 
         let predictions = booster.predict_batch(&dataset, &raw_features, 3);
         assert_eq!(predictions.len(), 100);
@@ -721,17 +720,23 @@ mod tests {
         let gradients: Vec<f32> = (0..50).map(|i| -(i as f32) * 0.1).collect();
         let hessians = vec![1.0; 50];
 
-        let config = LinearTreeConfig::default()
-            .with_min_samples_for_linear(3);
+        let config = LinearTreeConfig::default().with_min_samples_for_linear(3);
 
         let mut booster = LinearTreeBooster::new(config);
-        booster.fit_on_gradients(&dataset, &raw_features, 3, &gradients, &hessians).unwrap();
+        booster
+            .fit_on_gradients(&dataset, &raw_features, 3, &gradients, &hessians)
+            .unwrap();
 
         let batch_preds = booster.predict_batch(&dataset, &raw_features, 3);
         for i in 0..50 {
             let single_pred = booster.predict_row(&dataset, &raw_features, 3, i);
-            assert!((batch_preds[i] - single_pred).abs() < 1e-5,
-                "Mismatch at row {}: batch={}, single={}", i, batch_preds[i], single_pred);
+            assert!(
+                (batch_preds[i] - single_pred).abs() < 1e-5,
+                "Mismatch at row {}: batch={}, single={}",
+                i,
+                batch_preds[i],
+                single_pred
+            );
         }
     }
 
@@ -744,7 +749,9 @@ mod tests {
 
         let config = LinearTreeConfig::default();
         let mut booster = LinearTreeBooster::new(config);
-        booster.fit_on_gradients(&dataset, &raw_features, 3, &gradients, &hessians).unwrap();
+        booster
+            .fit_on_gradients(&dataset, &raw_features, 3, &gradients, &hessians)
+            .unwrap();
 
         assert!(booster.is_fitted());
         booster.reset();

@@ -124,8 +124,12 @@ impl HistogramKernel {
         let module = self.device.load_module(ptx);
 
         self.build_histogram_fn = Some(CudaDevice::load_function(&module, "build_histogram"));
-        self.build_histogram_batched_fn = Some(CudaDevice::load_function(&module, "build_histogram_batched"));
-        self.build_histogram_era_fn = Some(CudaDevice::load_function(&module, "build_histogram_era"));
+        self.build_histogram_batched_fn = Some(CudaDevice::load_function(
+            &module,
+            "build_histogram_batched",
+        ));
+        self.build_histogram_era_fn =
+            Some(CudaDevice::load_function(&module, "build_histogram_era"));
         self.zero_histograms_fn = Some(CudaDevice::load_function(&module, "zero_histograms"));
         self.module = Some(module);
     }
@@ -307,9 +311,15 @@ impl HistogramKernel {
         self.device.synchronize();
 
         // Read back results
-        let grad_hist = self.device.dtoh_copy(self.cached_grad_hist.as_ref().unwrap());
-        let hess_hist = self.device.dtoh_copy(self.cached_hess_hist.as_ref().unwrap());
-        let count_hist = self.device.dtoh_copy(self.cached_count_hist.as_ref().unwrap());
+        let grad_hist = self
+            .device
+            .dtoh_copy(self.cached_grad_hist.as_ref().unwrap());
+        let hess_hist = self
+            .device
+            .dtoh_copy(self.cached_hess_hist.as_ref().unwrap());
+        let count_hist = self
+            .device
+            .dtoh_copy(self.cached_count_hist.as_ref().unwrap());
 
         // Convert to Histogram structs
         (0..num_features)
@@ -349,7 +359,13 @@ impl HistogramKernel {
 
         // For single batch, use the optimized single-batch path
         if num_batches == 1 {
-            return vec![self.build_histograms(bins, grad_hess, batches[0], bins.len() / num_features, num_features)];
+            return vec![self.build_histograms(
+                bins,
+                grad_hess,
+                batches[0],
+                bins.len() / num_features,
+                num_features,
+            )];
         }
 
         // Concatenate all batch indices and create node metadata
@@ -448,7 +464,11 @@ impl HistogramKernel {
 
         let config = LaunchConfig {
             block_dim: (THREADS_PER_BLOCK, 1, 1),
-            grid_dim: (num_features as u32, (num_batches as u32) * tiles_per_batch, 1),
+            grid_dim: (
+                num_features as u32,
+                (num_batches as u32) * tiles_per_batch,
+                1,
+            ),
             shared_mem_bytes,
         };
 
@@ -481,9 +501,15 @@ impl HistogramKernel {
         self.device.synchronize();
 
         // Read back results
-        let grad_hist = self.device.dtoh_copy(self.cached_batched_grad_hist.as_ref().unwrap());
-        let hess_hist = self.device.dtoh_copy(self.cached_batched_hess_hist.as_ref().unwrap());
-        let count_hist = self.device.dtoh_copy(self.cached_batched_count_hist.as_ref().unwrap());
+        let grad_hist = self
+            .device
+            .dtoh_copy(self.cached_batched_grad_hist.as_ref().unwrap());
+        let hess_hist = self
+            .device
+            .dtoh_copy(self.cached_batched_hess_hist.as_ref().unwrap());
+        let count_hist = self
+            .device
+            .dtoh_copy(self.cached_batched_count_hist.as_ref().unwrap());
 
         // Convert to Histogram structs - layout is [batch][feature][bin]
         (0..num_batches)
@@ -531,7 +557,11 @@ impl HistogramKernel {
         }
 
         let num_nodes = node_ranges.len();
-        let max_node_count = node_ranges.iter().map(|n| n.count as usize).max().unwrap_or(0);
+        let max_node_count = node_ranges
+            .iter()
+            .map(|n| n.count as usize)
+            .max()
+            .unwrap_or(0);
 
         if max_node_count == 0 {
             return (0..num_nodes)
@@ -593,9 +623,18 @@ impl HistogramKernel {
         };
 
         unsafe {
-            let d_bins = self.cached_bins.as_ref().expect("bins must be cached first");
-            let d_gradients = self.cached_gradients.as_ref().expect("gradients must be cached first");
-            let d_hessians = self.cached_hessians.as_ref().expect("hessians must be cached first");
+            let d_bins = self
+                .cached_bins
+                .as_ref()
+                .expect("bins must be cached first");
+            let d_gradients = self
+                .cached_gradients
+                .as_ref()
+                .expect("gradients must be cached first");
+            let d_hessians = self
+                .cached_hessians
+                .as_ref()
+                .expect("hessians must be cached first");
             let d_grad_hist = self.cached_batched_grad_hist.as_mut().unwrap();
             let d_hess_hist = self.cached_batched_hess_hist.as_mut().unwrap();
             let d_count_hist = self.cached_batched_count_hist.as_mut().unwrap();
@@ -621,9 +660,15 @@ impl HistogramKernel {
         self.device.synchronize();
 
         // Read back results
-        let grad_hist = self.device.dtoh_copy(self.cached_batched_grad_hist.as_ref().unwrap());
-        let hess_hist = self.device.dtoh_copy(self.cached_batched_hess_hist.as_ref().unwrap());
-        let count_hist = self.device.dtoh_copy(self.cached_batched_count_hist.as_ref().unwrap());
+        let grad_hist = self
+            .device
+            .dtoh_copy(self.cached_batched_grad_hist.as_ref().unwrap());
+        let hess_hist = self
+            .device
+            .dtoh_copy(self.cached_batched_hess_hist.as_ref().unwrap());
+        let count_hist = self
+            .device
+            .dtoh_copy(self.cached_batched_count_hist.as_ref().unwrap());
 
         // Convert to Histogram structs - layout is [node][feature][bin]
         (0..num_nodes)
@@ -799,9 +844,15 @@ impl HistogramKernel {
         self.device.synchronize();
 
         // Read back results
-        let grad_hist = self.device.dtoh_copy(self.cached_era_grad_hist.as_ref().unwrap());
-        let hess_hist = self.device.dtoh_copy(self.cached_era_hess_hist.as_ref().unwrap());
-        let count_hist = self.device.dtoh_copy(self.cached_era_count_hist.as_ref().unwrap());
+        let grad_hist = self
+            .device
+            .dtoh_copy(self.cached_era_grad_hist.as_ref().unwrap());
+        let hess_hist = self
+            .device
+            .dtoh_copy(self.cached_era_hess_hist.as_ref().unwrap());
+        let count_hist = self
+            .device
+            .dtoh_copy(self.cached_era_count_hist.as_ref().unwrap());
 
         // Convert to Histogram structs - layout is [era][feature][bin]
         (0..num_eras)

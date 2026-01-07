@@ -188,7 +188,8 @@ impl HistogramBuilder {
                                     use std::arch::x86_64::*;
                                     let pf_base = block_start + base + PF_DIST;
                                     let pf_bin0 = *feature_column.get_unchecked(pf_base) as usize;
-                                    let pf_bin1 = *feature_column.get_unchecked(pf_base + 1) as usize;
+                                    let pf_bin1 =
+                                        *feature_column.get_unchecked(pf_base + 1) as usize;
                                     _mm_prefetch(
                                         bins.as_ptr().add(pf_bin0) as *const i8,
                                         _MM_HINT_T0,
@@ -224,7 +225,8 @@ impl HistogramBuilder {
                             // Handle remainder
                             let rem_base = chunks * 8;
                             for i in 0..remainder {
-                                let bin = *feature_column.get_unchecked(block_start + rem_base + i) as usize;
+                                let bin = *feature_column.get_unchecked(block_start + rem_base + i)
+                                    as usize;
                                 let (grad, hess) = *gh_cache.get_unchecked(rem_base + i);
                                 bins.get_unchecked_mut(bin).accumulate(grad, hess);
                             }
@@ -454,8 +456,8 @@ impl HistogramBuilder {
     ) {
         // Create a set of active row indices for O(1) lookup
         // For small row_indices, linear search is faster than HashSet
-        let is_contiguous = row_indices.first() == Some(&0)
-            && row_indices.last() == Some(&(row_indices.len() - 1));
+        let is_contiguous =
+            row_indices.first() == Some(&0) && row_indices.last() == Some(&(row_indices.len() - 1));
 
         let mut non_default_grad = 0.0f32;
         let mut non_default_hess = 0.0f32;

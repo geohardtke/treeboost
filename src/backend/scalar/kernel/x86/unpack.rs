@@ -85,11 +85,7 @@ pub unsafe fn unpack_4bit_avx2(packed: *const u8, output: *mut u8) {
 /// - `output` must point to at least `packed_len * 2` valid bytes
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-pub unsafe fn unpack_4bit_buffer_avx2(
-    packed: *const u8,
-    packed_len: usize,
-    output: *mut u8,
-) {
+pub unsafe fn unpack_4bit_buffer_avx2(packed: *const u8, packed_len: usize, output: *mut u8) {
     let chunks = packed_len / 32;
     let remainder = packed_len % 32;
 
@@ -168,8 +164,18 @@ mod tests {
         for i in 0..256 {
             let expected_high = (i >> 4) as u8;
             let expected_low = (i & 0x0F) as u8;
-            assert_eq!(output[i * 2], expected_high, "High nibble mismatch at {}", i);
-            assert_eq!(output[i * 2 + 1], expected_low, "Low nibble mismatch at {}", i);
+            assert_eq!(
+                output[i * 2],
+                expected_high,
+                "High nibble mismatch at {}",
+                i
+            );
+            assert_eq!(
+                output[i * 2 + 1],
+                expected_low,
+                "Low nibble mismatch at {}",
+                i
+            );
         }
     }
 
@@ -213,8 +219,18 @@ mod tests {
         for i in 0..32 {
             let expected_high = (i >> 4) as u8;
             let expected_low = (i & 0x0F) as u8;
-            assert_eq!(output[i * 2], expected_high, "High nibble mismatch at packed byte {}", i);
-            assert_eq!(output[i * 2 + 1], expected_low, "Low nibble mismatch at packed byte {}", i);
+            assert_eq!(
+                output[i * 2],
+                expected_high,
+                "High nibble mismatch at packed byte {}",
+                i
+            );
+            assert_eq!(
+                output[i * 2 + 1],
+                expected_low,
+                "Low nibble mismatch at packed byte {}",
+                i
+            );
         }
     }
 

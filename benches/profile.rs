@@ -7,8 +7,8 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use rand::prelude::*;
 use std::time::Duration;
 
-use treeboost::booster::{GBDTConfig, GBDTModel};
 use treeboost::backend::BackendType;
+use treeboost::booster::{GBDTConfig, GBDTModel};
 
 /// Generate consistent synthetic dataset
 fn generate_data(num_rows: usize, num_features: usize, seed: u64) -> (Vec<f32>, Vec<f32>) {
@@ -117,8 +117,8 @@ fn benchmark_inference_scaling(c: &mut Criterion) {
         .with_learning_rate(0.1)
         .with_min_samples_leaf(5)
         .with_backend(BackendType::Scalar);
-    let model = GBDTModel::train(&train_features, num_features, &train_targets, config, None)
-        .unwrap();
+    let model =
+        GBDTModel::train(&train_features, num_features, &train_targets, config, None).unwrap();
 
     // Benchmark inference on different sizes (always CPU - inference is CPU-only)
     for &num_rows in &[100, 1_000, 10_000, 100_000] {
@@ -130,9 +130,9 @@ fn benchmark_inference_scaling(c: &mut Criterion) {
             &(&test_features, &test_targets),
             |b, (feats, _)| {
                 b.iter(|| {
-                    black_box(model.predict_raw(
-                        &feats.iter().map(|&f| f as f64).collect::<Vec<_>>(),
-                    ))
+                    black_box(
+                        model.predict_raw(&feats.iter().map(|&f| f as f64).collect::<Vec<_>>()),
+                    )
                 });
             },
         );

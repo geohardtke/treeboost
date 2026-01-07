@@ -142,7 +142,8 @@ impl GpuDevice {
 
     /// Upload data to a buffer.
     pub fn write_buffer<T: bytemuck::Pod>(&self, buffer: &Buffer, data: &[T]) {
-        self.queue.write_buffer(buffer, 0, bytemuck::cast_slice(data));
+        self.queue
+            .write_buffer(buffer, 0, bytemuck::cast_slice(data));
     }
 
     /// Create a command encoder.
@@ -233,10 +234,12 @@ impl GpuDevice {
         shader_source: &str,
         entry_point: &str,
     ) -> ComputePipeline {
-        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(label),
-            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
-        });
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+            });
 
         self.device
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -283,7 +286,11 @@ mod tests {
     fn test_gpu_device_creation() {
         // This test will be skipped on systems without GPU
         if let Some(device) = GpuDevice::new() {
-            println!("GPU device created: {} ({:?})", device.name(), device.backend());
+            println!(
+                "GPU device created: {} ({:?})",
+                device.name(),
+                device.backend()
+            );
             assert!(device.max_workgroup_size() >= 256);
         } else {
             println!("No GPU available, skipping test");

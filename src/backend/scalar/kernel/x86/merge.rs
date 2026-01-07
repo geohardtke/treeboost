@@ -28,10 +28,7 @@ use std::arch::x86_64::*;
 /// - Arrays must be exactly 256 elements
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-pub unsafe fn merge_histogram_grads_avx2(
-    self_grads: &mut [f32; 256],
-    other_grads: &[f32; 256],
-) {
+pub unsafe fn merge_histogram_grads_avx2(self_grads: &mut [f32; 256], other_grads: &[f32; 256]) {
     // 256 floats = 32 AVX2 iterations (8 floats each)
     for i in (0..256).step_by(8) {
         let self_vec = _mm256_loadu_ps(self_grads.as_ptr().add(i));
@@ -48,10 +45,7 @@ pub unsafe fn merge_histogram_grads_avx2(
 /// - Arrays must be exactly 256 elements
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-pub unsafe fn merge_histogram_hess_avx2(
-    self_hess: &mut [f32; 256],
-    other_hess: &[f32; 256],
-) {
+pub unsafe fn merge_histogram_hess_avx2(self_hess: &mut [f32; 256], other_hess: &[f32; 256]) {
     for i in (0..256).step_by(8) {
         let self_vec = _mm256_loadu_ps(self_hess.as_ptr().add(i));
         let other_vec = _mm256_loadu_ps(other_hess.as_ptr().add(i));
@@ -67,10 +61,7 @@ pub unsafe fn merge_histogram_hess_avx2(
 /// - Arrays must be exactly 256 elements
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-pub unsafe fn merge_histogram_counts_avx2(
-    self_counts: &mut [u32; 256],
-    other_counts: &[u32; 256],
-) {
+pub unsafe fn merge_histogram_counts_avx2(self_counts: &mut [u32; 256], other_counts: &[u32; 256]) {
     for i in (0..256).step_by(8) {
         let self_vec = _mm256_loadu_si256(self_counts.as_ptr().add(i) as *const __m256i);
         let other_vec = _mm256_loadu_si256(other_counts.as_ptr().add(i) as *const __m256i);
@@ -88,10 +79,7 @@ pub unsafe fn merge_histogram_counts_avx2(
 /// - Arrays must be exactly 256 elements
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-pub unsafe fn subtract_histogram_grads_avx2(
-    self_grads: &mut [f32; 256],
-    other_grads: &[f32; 256],
-) {
+pub unsafe fn subtract_histogram_grads_avx2(self_grads: &mut [f32; 256], other_grads: &[f32; 256]) {
     for i in (0..256).step_by(8) {
         let self_vec = _mm256_loadu_ps(self_grads.as_ptr().add(i));
         let other_vec = _mm256_loadu_ps(other_grads.as_ptr().add(i));
@@ -107,10 +95,7 @@ pub unsafe fn subtract_histogram_grads_avx2(
 /// - Arrays must be exactly 256 elements
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-pub unsafe fn subtract_histogram_hess_avx2(
-    self_hess: &mut [f32; 256],
-    other_hess: &[f32; 256],
-) {
+pub unsafe fn subtract_histogram_hess_avx2(self_hess: &mut [f32; 256], other_hess: &[f32; 256]) {
     for i in (0..256).step_by(8) {
         let self_vec = _mm256_loadu_ps(self_hess.as_ptr().add(i));
         let other_vec = _mm256_loadu_ps(other_hess.as_ptr().add(i));
@@ -193,12 +178,7 @@ mod tests {
         }
 
         for i in 0..256 {
-            assert_eq!(
-                self_counts[i],
-                i as u32 + 1,
-                "Mismatch at index {}",
-                i
-            );
+            assert_eq!(self_counts[i], i as u32 + 1, "Mismatch at index {}", i);
         }
     }
 

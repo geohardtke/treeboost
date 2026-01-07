@@ -277,8 +277,8 @@ impl FusedHistogramBuilder {
                             // Handle remainder
                             let rem_base = chunks * 8;
                             for i in 0..remainder {
-                                let bin =
-                                    *feature_column.get_unchecked(block_start + rem_base + i) as usize;
+                                let bin = *feature_column.get_unchecked(block_start + rem_base + i)
+                                    as usize;
                                 let grad = *grad_cache.get_unchecked(rem_base + i);
                                 let hess = *hess_cache.get_unchecked(rem_base + i);
                                 bins.get_unchecked_mut(bin).accumulate(grad, hess);
@@ -743,7 +743,13 @@ mod tests {
         assert_eq!(result.histograms.num_features(), num_features);
 
         // Verify total count
-        let total_count: u32 = result.histograms.get(0).bins().iter().map(|b| b.count).sum();
+        let total_count: u32 = result
+            .histograms
+            .get(0)
+            .bins()
+            .iter()
+            .map(|b| b.count)
+            .sum();
         assert_eq!(total_count, num_rows as u32);
 
         // Verify gradients were computed
@@ -824,8 +830,7 @@ mod tests {
                 assert_eq!(
                     fused_entry.count, sep_entry.count,
                     "Count mismatch at feature {} bin {}",
-                    f,
-                    bin
+                    f, bin
                 );
             }
         }
@@ -858,7 +863,13 @@ mod tests {
         );
 
         // Verify total count matches number of indexed rows
-        let total_count: u32 = result.histograms.get(0).bins().iter().map(|b| b.count).sum();
+        let total_count: u32 = result
+            .histograms
+            .get(0)
+            .bins()
+            .iter()
+            .map(|b| b.count)
+            .sum();
         assert_eq!(total_count, row_indices.len() as u32);
     }
 }

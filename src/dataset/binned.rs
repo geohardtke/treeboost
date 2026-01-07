@@ -73,8 +73,18 @@ impl BinEntry {
 }
 
 /// Feature type for determining how to handle the feature
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Archive,
+    Serialize,
+    Deserialize,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum FeatureType {
     /// Continuous numeric feature (binned via T-Digest quantiles)
     Numeric,
@@ -83,8 +93,7 @@ pub enum FeatureType {
 }
 
 /// Feature metadata
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
 pub struct FeatureInfo {
     /// Feature name
     pub name: String,
@@ -220,7 +229,10 @@ impl std::fmt::Debug for BinnedDataset {
             .field("has_eras", &self.era_indices.is_some())
             .field("num_eras", &self.num_eras)
             .field("row_major_cached", &self.row_major_cache.get().is_some())
-            .field("row_major_4bit_cached", &self.row_major_4bit_cache.get().is_some())
+            .field(
+                "row_major_4bit_cached",
+                &self.row_major_4bit_cache.get().is_some(),
+            )
             .finish()
     }
 }
@@ -325,7 +337,12 @@ impl BinnedDataset {
             .collect();
 
         // Compute number of eras from max era index
-        let num_eras = era_indices.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0);
+        let num_eras = era_indices
+            .iter()
+            .copied()
+            .max()
+            .map(|m| m as usize + 1)
+            .unwrap_or(0);
 
         Self {
             num_rows,
@@ -346,7 +363,12 @@ impl BinnedDataset {
     /// * `era_indices` - Era index for each sample (must have length == num_rows)
     pub fn set_era_indices(&mut self, era_indices: Vec<u16>) {
         debug_assert_eq!(era_indices.len(), self.num_rows);
-        self.num_eras = era_indices.iter().copied().max().map(|m| m as usize + 1).unwrap_or(0);
+        self.num_eras = era_indices
+            .iter()
+            .copied()
+            .max()
+            .map(|m| m as usize + 1)
+            .unwrap_or(0);
         self.era_indices = Some(era_indices);
     }
 
@@ -423,7 +445,9 @@ impl BinnedDataset {
     /// Get sparse column for a feature (if available)
     #[inline]
     pub fn sparse_column(&self, feature_idx: usize) -> Option<&SparseColumn> {
-        self.sparse_columns.get(feature_idx).and_then(|s| s.as_ref())
+        self.sparse_columns
+            .get(feature_idx)
+            .and_then(|s| s.as_ref())
     }
 
     /// Get number of sparse features
@@ -457,9 +481,10 @@ impl BinnedDataset {
         }
 
         // Binary search for the appropriate bin
-        match info.bin_boundaries.binary_search_by(|b| {
-            b.partial_cmp(&value).unwrap_or(std::cmp::Ordering::Less)
-        }) {
+        match info
+            .bin_boundaries
+            .binary_search_by(|b| b.partial_cmp(&value).unwrap_or(std::cmp::Ordering::Less))
+        {
             Ok(idx) => (idx + 1).min(info.num_bins as usize - 1) as u8,
             Err(idx) => idx.min(info.num_bins as usize - 1) as u8,
         }
@@ -642,9 +667,10 @@ impl BinnedDataset {
         let new_targets: Vec<f32> = indices.iter().map(|&idx| self.targets[idx]).collect();
 
         // Extract era indices if present
-        let new_era_indices = self.era_indices.as_ref().map(|eras| {
-            indices.iter().map(|&idx| eras[idx]).collect::<Vec<u16>>()
-        });
+        let new_era_indices = self
+            .era_indices
+            .as_ref()
+            .map(|eras| indices.iter().map(|&idx| eras[idx]).collect::<Vec<u16>>());
 
         // Recompute sparse columns for the new dataset
         let sparse_columns: Vec<Option<SparseColumn>> = (0..num_features)
@@ -1018,8 +1044,8 @@ mod tests {
 
         let data = packed.unwrap();
         assert_eq!(data.len(), 2); // 2 rows, 1 byte per row (2 features)
-        // Row 0: (5 << 4) | 1 = 0x51
-        // Row 1: (6 << 4) | 2 = 0x62
+                                   // Row 0: (5 << 4) | 1 = 0x51
+                                   // Row 1: (6 << 4) | 2 = 0x62
         assert_eq!(data[0], 0x51);
         assert_eq!(data[1], 0x62);
     }
@@ -1093,7 +1119,8 @@ mod tests {
         ];
         let era_indices = vec![0u16, 1, 0, 2];
 
-        let dataset = BinnedDataset::new_with_eras(num_rows, features, targets, feature_info, era_indices);
+        let dataset =
+            BinnedDataset::new_with_eras(num_rows, features, targets, feature_info, era_indices);
 
         // Take indices [0, 2] (both have era 0)
         let subset = dataset.subset_by_indices(&[0, 2]);

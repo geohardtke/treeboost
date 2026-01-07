@@ -66,8 +66,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 /// - Zero-cost abstraction (no vtable overhead)
 /// - rkyv serialization compatibility
 /// - Compile-time optimization opportunities
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
 pub enum Booster {
     /// Decision tree weak learner
     ///
@@ -102,10 +101,7 @@ impl Booster {
 
     /// Create a new tree booster
     pub fn tree(config: TreeConfig) -> Self {
-        Self::Tree(SerializableTreeBooster {
-            tree: None,
-            config,
-        })
+        Self::Tree(SerializableTreeBooster { tree: None, config })
     }
 
     /// Create a new linear booster
@@ -456,7 +452,9 @@ mod tests {
         let hessians = vec![1.0; 100];
 
         let mut booster = Booster::tree(TreeConfig::default());
-        booster.fit_tree(&dataset, &gradients, &hessians, None).unwrap();
+        booster
+            .fit_tree(&dataset, &gradients, &hessians, None)
+            .unwrap();
 
         assert!(booster.is_fitted());
 
@@ -477,7 +475,9 @@ mod tests {
             .with_max_iter(100);
 
         let mut booster = Booster::linear(1, config);
-        booster.fit_linear(&features, 1, &gradients, &hessians).unwrap();
+        booster
+            .fit_linear(&features, 1, &gradients, &hessians)
+            .unwrap();
 
         let predictions = booster.predict_linear(&features, 1);
         assert_eq!(predictions.len(), 5);
@@ -525,7 +525,9 @@ mod tests {
         let hessians = vec![1.0; 100];
 
         let mut booster = Booster::tree(TreeConfig::default());
-        booster.fit_tree(&dataset, &gradients, &hessians, None).unwrap();
+        booster
+            .fit_tree(&dataset, &gradients, &hessians, None)
+            .unwrap();
         assert!(booster.is_fitted());
 
         booster.reset();

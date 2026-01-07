@@ -52,7 +52,11 @@ impl BinaryLogLoss {
     /// Convert probability to class (0 or 1) with threshold
     #[inline]
     pub fn to_class(&self, prob: f32, threshold: f32) -> u32 {
-        if prob >= threshold { 1 } else { 0 }
+        if prob >= threshold {
+            1
+        } else {
+            0
+        }
     }
 }
 

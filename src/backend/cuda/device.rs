@@ -35,8 +35,13 @@ impl CudaDevice {
     }
 
     /// Allocate device memory initialized to zero.
-    pub fn alloc_zeros<T: DeviceRepr + cudarc::driver::ValidAsZeroBits>(&self, len: usize) -> CudaSlice<T> {
-        self.stream.alloc_zeros::<T>(len).expect("CUDA alloc failed")
+    pub fn alloc_zeros<T: DeviceRepr + cudarc::driver::ValidAsZeroBits>(
+        &self,
+        len: usize,
+    ) -> CudaSlice<T> {
+        self.stream
+            .alloc_zeros::<T>(len)
+            .expect("CUDA alloc failed")
     }
 
     /// Copy data from host to device.
@@ -51,12 +56,16 @@ impl CudaDevice {
 
     /// Copy data from host to existing device buffer (no allocation).
     pub fn htod_copy_into<T: DeviceRepr + Clone>(&self, data: &[T], dst: &mut CudaSlice<T>) {
-        self.stream.memcpy_htod(data, dst).expect("CUDA memcpy_htod failed");
+        self.stream
+            .memcpy_htod(data, dst)
+            .expect("CUDA memcpy_htod failed");
     }
 
     /// Load a PTX module.
     pub fn load_module(&self, ptx: Ptx) -> Arc<CudaModule> {
-        self.ctx.load_module(ptx).expect("Failed to load PTX module")
+        self.ctx
+            .load_module(ptx)
+            .expect("Failed to load PTX module")
     }
 
     /// Load a function from a module.

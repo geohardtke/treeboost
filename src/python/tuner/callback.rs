@@ -39,11 +39,15 @@ impl PyProgressCallback {
             let py_trial = PyTrialResult::from(trial.clone());
             let py_trial_obj = Py::new(py, py_trial).unwrap();
 
-            let args = PyTuple::new(py, &[
-                py_trial_obj.into_any(),
-                current.into_pyobject(py).unwrap().into_any().unbind(),
-                total.into_pyobject(py).unwrap().into_any().unbind(),
-            ]).unwrap();
+            let args = PyTuple::new(
+                py,
+                &[
+                    py_trial_obj.into_any(),
+                    current.into_pyobject(py).unwrap().into_any().unbind(),
+                    total.into_pyobject(py).unwrap().into_any().unbind(),
+                ],
+            )
+            .unwrap();
 
             if let Err(e) = self.callback.call1(py, args) {
                 // Log error but don't panic - tuning should continue

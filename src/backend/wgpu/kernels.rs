@@ -273,37 +273,46 @@ impl HistogramKernel {
         // support the `enable subgroups;` extension yet (depends on wgpu/naga version).
         // We try to compile and fall back gracefully if it fails.
         let subgroups_supported = device.subgroups_supported;
-        let (pipeline_dense_subgroups, pipeline_batched_subgroups, bind_group_layout_dense_subgroups, bind_group_layout_batched_subgroups) =
-            if subgroups_supported {
-                // Try to create subgroup pipelines - may fail if WGSL extension not supported
-                let subgroup_shader = include_str!("shaders/histogram_subgroups.wgsl");
+        let (
+            pipeline_dense_subgroups,
+            pipeline_batched_subgroups,
+            bind_group_layout_dense_subgroups,
+            bind_group_layout_batched_subgroups,
+        ) = if subgroups_supported {
+            // Try to create subgroup pipelines - may fail if WGSL extension not supported
+            let subgroup_shader = include_str!("shaders/histogram_subgroups.wgsl");
 
-                // Use try_create_compute_pipeline which returns Option instead of panicking
-                match device.try_create_compute_pipeline(
-                    "histogram_dense_subgroups_pipeline",
-                    subgroup_shader,
-                    "histogram_dense_subgroups",
-                ) {
-                    Some(dense_sg) => {
-                        // Dense succeeded, try batched
-                        match device.try_create_compute_pipeline(
-                            "histogram_batched_subgroups_pipeline",
-                            subgroup_shader,
-                            "histogram_batched_subgroups",
-                        ) {
-                            Some(batched_sg) => {
-                                let layout_dense_sg = dense_sg.get_bind_group_layout(0);
-                                let layout_batched_sg = batched_sg.get_bind_group_layout(0);
-                                (Some(dense_sg), Some(batched_sg), Some(layout_dense_sg), Some(layout_batched_sg))
-                            }
-                            None => (None, None, None, None),
+            // Use try_create_compute_pipeline which returns Option instead of panicking
+            match device.try_create_compute_pipeline(
+                "histogram_dense_subgroups_pipeline",
+                subgroup_shader,
+                "histogram_dense_subgroups",
+            ) {
+                Some(dense_sg) => {
+                    // Dense succeeded, try batched
+                    match device.try_create_compute_pipeline(
+                        "histogram_batched_subgroups_pipeline",
+                        subgroup_shader,
+                        "histogram_batched_subgroups",
+                    ) {
+                        Some(batched_sg) => {
+                            let layout_dense_sg = dense_sg.get_bind_group_layout(0);
+                            let layout_batched_sg = batched_sg.get_bind_group_layout(0);
+                            (
+                                Some(dense_sg),
+                                Some(batched_sg),
+                                Some(layout_dense_sg),
+                                Some(layout_batched_sg),
+                            )
                         }
+                        None => (None, None, None, None),
                     }
-                    None => (None, None, None, None),
                 }
-            } else {
-                (None, None, None, None)
-            };
+                None => (None, None, None, None),
+            }
+        } else {
+            (None, None, None, None)
+        };
 
         // Update subgroups_supported based on whether we actually got working pipelines
         let subgroups_supported = pipeline_dense_subgroups.is_some();
@@ -340,7 +349,10 @@ impl HistogramKernel {
 
     /// Returns true if subgroup operations are enabled and will be used.
     pub fn has_subgroups(&self) -> bool {
-        self.subgroups_supported && self.use_subgroups.load(std::sync::atomic::Ordering::Relaxed)
+        self.subgroups_supported
+            && self
+                .use_subgroups
+                .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Enable or disable subgroup operations.
@@ -350,7 +362,8 @@ impl HistogramKernel {
     ///
     /// Note: Has no effect if hardware doesn't support subgroups.
     pub fn set_use_subgroups(&self, enabled: bool) {
-        self.use_subgroups.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self.use_subgroups
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Build histograms using the base shader (no subgroups).
@@ -391,7 +404,11 @@ impl HistogramKernel {
 
         let bins_size = (bins_packed.len() * 4) as u64;
         let grad_hess_size = (grad_hess_packed.len() * 4) as u64;
-        let indices_size = if indices_u32.is_empty() { 4u64 } else { (indices_u32.len() * 4) as u64 };
+        let indices_size = if indices_u32.is_empty() {
+            4u64
+        } else {
+            (indices_u32.len() * 4) as u64
+        };
         let hist_size = (num_features * 256 * 4) as u64;
 
         let params = HistogramParams {
@@ -404,14 +421,29 @@ impl HistogramKernel {
         let mut pool = self.buffer_pool.lock().unwrap();
 
         if pool.params.is_none() {
-            pool.params = Some(dev.create_uniform_buffer("params_buffer", std::mem::size_of::<HistogramParams>() as u64));
+            pool.params = Some(dev.create_uniform_buffer(
+                "params_buffer",
+                std::mem::size_of::<HistogramParams>() as u64,
+            ));
         }
 
         if Self::ensure_storage_buffer(dev, &mut pool.bins, "bins_buffer", bins_size, false) {
             pool.bins_cache_key = None;
         }
-        Self::ensure_storage_buffer(dev, &mut pool.grad_hess, "grad_hess_buffer", grad_hess_size, false);
-        Self::ensure_storage_buffer(dev, &mut pool.indices, "indices_buffer", indices_size, false);
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.grad_hess,
+            "grad_hess_buffer",
+            grad_hess_size,
+            false,
+        );
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.indices,
+            "indices_buffer",
+            indices_size,
+            false,
+        );
         Self::ensure_storage_buffer(dev, &mut pool.hist_grad, "hist_grad", hist_size, true);
         Self::ensure_storage_buffer(dev, &mut pool.hist_hess, "hist_hess", hist_size, true);
         Self::ensure_storage_buffer(dev, &mut pool.hist_count, "hist_count", hist_size, true);
@@ -437,10 +469,22 @@ impl HistogramKernel {
             label: Some("zero_bind_group"),
             layout: &self.bind_group_layout_zero,
             entries: &[
-                BindGroupEntry { binding: 0, resource: pool.params.as_ref().unwrap().as_entire_binding() },
-                BindGroupEntry { binding: 4, resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding() },
-                BindGroupEntry { binding: 5, resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding() },
-                BindGroupEntry { binding: 6, resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry {
+                    binding: 0,
+                    resource: pool.params.as_ref().unwrap().as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 5,
+                    resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 6,
+                    resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -449,13 +493,34 @@ impl HistogramKernel {
             label: Some("histogram_bind_group_base"),
             layout: &self.bind_group_layout_dense,
             entries: &[
-                BindGroupEntry { binding: 0, resource: pool.params.as_ref().unwrap().as_entire_binding() },
-                BindGroupEntry { binding: 1, resource: pool.bins.as_ref().unwrap().buffer.as_entire_binding() },
-                BindGroupEntry { binding: 2, resource: pool.grad_hess.as_ref().unwrap().buffer.as_entire_binding() },
-                BindGroupEntry { binding: 3, resource: pool.indices.as_ref().unwrap().buffer.as_entire_binding() },
-                BindGroupEntry { binding: 4, resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding() },
-                BindGroupEntry { binding: 5, resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding() },
-                BindGroupEntry { binding: 6, resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry {
+                    binding: 0,
+                    resource: pool.params.as_ref().unwrap().as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: pool.bins.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: pool.grad_hess.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: pool.indices.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 5,
+                    resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 6,
+                    resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -484,9 +549,27 @@ impl HistogramKernel {
             pass.dispatch_workgroups(num_features as u32, 1, 1);
         }
 
-        encoder.copy_buffer_to_buffer(&pool.hist_grad.as_ref().unwrap().buffer, 0, &pool.staging_grad.as_ref().unwrap().buffer, 0, hist_size);
-        encoder.copy_buffer_to_buffer(&pool.hist_hess.as_ref().unwrap().buffer, 0, &pool.staging_hess.as_ref().unwrap().buffer, 0, hist_size);
-        encoder.copy_buffer_to_buffer(&pool.hist_count.as_ref().unwrap().buffer, 0, &pool.staging_count.as_ref().unwrap().buffer, 0, hist_size);
+        encoder.copy_buffer_to_buffer(
+            &pool.hist_grad.as_ref().unwrap().buffer,
+            0,
+            &pool.staging_grad.as_ref().unwrap().buffer,
+            0,
+            hist_size,
+        );
+        encoder.copy_buffer_to_buffer(
+            &pool.hist_hess.as_ref().unwrap().buffer,
+            0,
+            &pool.staging_hess.as_ref().unwrap().buffer,
+            0,
+            hist_size,
+        );
+        encoder.copy_buffer_to_buffer(
+            &pool.hist_count.as_ref().unwrap().buffer,
+            0,
+            &pool.staging_count.as_ref().unwrap().buffer,
+            0,
+            hist_size,
+        );
 
         dev.submit_and_wait(encoder);
 
@@ -496,7 +579,10 @@ impl HistogramKernel {
 
         dev.read_buffer(&pool.staging_grad.as_ref().unwrap().buffer, &mut grad_data);
         dev.read_buffer(&pool.staging_hess.as_ref().unwrap().buffer, &mut hess_data);
-        dev.read_buffer(&pool.staging_count.as_ref().unwrap().buffer, &mut count_data);
+        dev.read_buffer(
+            &pool.staging_count.as_ref().unwrap().buffer,
+            &mut count_data,
+        );
 
         drop(pool);
 
@@ -606,8 +692,20 @@ impl HistogramKernel {
         if Self::ensure_storage_buffer(dev, &mut pool.bins, "bins_buffer", bins_size, false) {
             pool.bins_cache_key = None; // Buffer was reallocated, must re-upload
         }
-        Self::ensure_storage_buffer(dev, &mut pool.grad_hess, "grad_hess_buffer", grad_hess_size, false);
-        Self::ensure_storage_buffer(dev, &mut pool.indices, "indices_buffer", indices_size, false);
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.grad_hess,
+            "grad_hess_buffer",
+            grad_hess_size,
+            false,
+        );
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.indices,
+            "indices_buffer",
+            indices_size,
+            false,
+        );
 
         // Ensure output histogram buffers
         Self::ensure_storage_buffer(dev, &mut pool.hist_grad, "hist_grad", hist_size, true);
@@ -882,11 +980,29 @@ impl HistogramKernel {
         }
 
         // Ensure 4-bit bins buffer (separate from 8-bit)
-        if Self::ensure_storage_buffer(dev, &mut pool.bins_4bit, "bins_4bit_buffer", bins_size, false) {
+        if Self::ensure_storage_buffer(
+            dev,
+            &mut pool.bins_4bit,
+            "bins_4bit_buffer",
+            bins_size,
+            false,
+        ) {
             pool.bins_4bit_cache_key = None;
         }
-        Self::ensure_storage_buffer(dev, &mut pool.grad_hess, "grad_hess_buffer", grad_hess_size, false);
-        Self::ensure_storage_buffer(dev, &mut pool.indices, "indices_buffer", indices_size, false);
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.grad_hess,
+            "grad_hess_buffer",
+            grad_hess_size,
+            false,
+        );
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.indices,
+            "indices_buffer",
+            indices_size,
+            false,
+        );
 
         // Ensure output histogram buffers
         Self::ensure_storage_buffer(dev, &mut pool.hist_grad, "hist_grad", hist_size, true);
@@ -1119,7 +1235,11 @@ impl HistogramKernel {
         // Calculate sizes
         let bins_size = (bins_packed.len() * 4) as u64;
         let grad_hess_size = (grad_hess_packed.len() * 4) as u64; // 1 u32 per row (packed i16 pair)
-        let indices_size = if indices_u32.is_empty() { 4u64 } else { (indices_u32.len() * 4) as u64 };
+        let indices_size = if indices_u32.is_empty() {
+            4u64
+        } else {
+            (indices_u32.len() * 4) as u64
+        };
         let hist_size = (num_features * 256 * 4) as u64;
 
         let params = HistogramParams {
@@ -1143,8 +1263,20 @@ impl HistogramKernel {
         if Self::ensure_storage_buffer(dev, &mut pool.bins, "bins_buffer", bins_size, false) {
             pool.bins_cache_key = None;
         }
-        Self::ensure_storage_buffer(dev, &mut pool.grad_hess, "grad_hess_buffer", grad_hess_size, false);
-        Self::ensure_storage_buffer(dev, &mut pool.indices, "indices_buffer", indices_size, false);
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.grad_hess,
+            "grad_hess_buffer",
+            grad_hess_size,
+            false,
+        );
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.indices,
+            "indices_buffer",
+            indices_size,
+            false,
+        );
         Self::ensure_storage_buffer(dev, &mut pool.hist_grad, "hist_grad", hist_size, true);
         Self::ensure_storage_buffer(dev, &mut pool.hist_hess, "hist_hess", hist_size, true);
         Self::ensure_storage_buffer(dev, &mut pool.hist_count, "hist_count", hist_size, true);
@@ -1188,10 +1320,22 @@ impl HistogramKernel {
             label: Some("zero_bind_group"),
             layout: &self.bind_group_layout_zero,
             entries: &[
-                BindGroupEntry { binding: 0, resource: pool.params.as_ref().unwrap().as_entire_binding() },
-                BindGroupEntry { binding: 4, resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding() },
-                BindGroupEntry { binding: 5, resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding() },
-                BindGroupEntry { binding: 6, resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry {
+                    binding: 0,
+                    resource: pool.params.as_ref().unwrap().as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 5,
+                    resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 6,
+                    resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -1206,13 +1350,34 @@ impl HistogramKernel {
             label: Some("histogram_bind_group"),
             layout: dense_layout,
             entries: &[
-                BindGroupEntry { binding: 0, resource: pool.params.as_ref().unwrap().as_entire_binding() },
-                BindGroupEntry { binding: 1, resource: pool.bins.as_ref().unwrap().buffer.as_entire_binding() },
-                BindGroupEntry { binding: 2, resource: pool.grad_hess.as_ref().unwrap().buffer.as_entire_binding() },
-                BindGroupEntry { binding: 3, resource: pool.indices.as_ref().unwrap().buffer.as_entire_binding() },
-                BindGroupEntry { binding: 4, resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding() },
-                BindGroupEntry { binding: 5, resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding() },
-                BindGroupEntry { binding: 6, resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding() },
+                BindGroupEntry {
+                    binding: 0,
+                    resource: pool.params.as_ref().unwrap().as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: pool.bins.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: pool.grad_hess.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: pool.indices.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: pool.hist_grad.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 5,
+                    resource: pool.hist_hess.as_ref().unwrap().buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 6,
+                    resource: pool.hist_count.as_ref().unwrap().buffer.as_entire_binding(),
+                },
             ],
         });
         profile.bind_group_create = t.elapsed();
@@ -1250,9 +1415,27 @@ impl HistogramKernel {
         }
 
         // Copy to staging
-        encoder.copy_buffer_to_buffer(&pool.hist_grad.as_ref().unwrap().buffer, 0, &pool.staging_grad.as_ref().unwrap().buffer, 0, hist_size);
-        encoder.copy_buffer_to_buffer(&pool.hist_hess.as_ref().unwrap().buffer, 0, &pool.staging_hess.as_ref().unwrap().buffer, 0, hist_size);
-        encoder.copy_buffer_to_buffer(&pool.hist_count.as_ref().unwrap().buffer, 0, &pool.staging_count.as_ref().unwrap().buffer, 0, hist_size);
+        encoder.copy_buffer_to_buffer(
+            &pool.hist_grad.as_ref().unwrap().buffer,
+            0,
+            &pool.staging_grad.as_ref().unwrap().buffer,
+            0,
+            hist_size,
+        );
+        encoder.copy_buffer_to_buffer(
+            &pool.hist_hess.as_ref().unwrap().buffer,
+            0,
+            &pool.staging_hess.as_ref().unwrap().buffer,
+            0,
+            hist_size,
+        );
+        encoder.copy_buffer_to_buffer(
+            &pool.hist_count.as_ref().unwrap().buffer,
+            0,
+            &pool.staging_count.as_ref().unwrap().buffer,
+            0,
+            hist_size,
+        );
         profile.encode_commands = t.elapsed();
 
         // Submit and wait
@@ -1268,7 +1451,10 @@ impl HistogramKernel {
 
         dev.read_buffer(&pool.staging_grad.as_ref().unwrap().buffer, &mut grad_data);
         dev.read_buffer(&pool.staging_hess.as_ref().unwrap().buffer, &mut hess_data);
-        dev.read_buffer(&pool.staging_count.as_ref().unwrap().buffer, &mut count_data);
+        dev.read_buffer(
+            &pool.staging_count.as_ref().unwrap().buffer,
+            &mut count_data,
+        );
         profile.download_results = t.elapsed();
 
         drop(pool);
@@ -1454,14 +1640,50 @@ impl HistogramKernel {
 
         // Ensure input buffers
         Self::ensure_storage_buffer(dev, &mut pool.bins, "bins_buffer", bins_size, false);
-        Self::ensure_storage_buffer(dev, &mut pool.grad_hess, "grad_hess_buffer", grad_hess_size, false);
-        Self::ensure_storage_buffer(dev, &mut pool.indices, "indices_buffer", indices_size, false);
-        Self::ensure_storage_buffer(dev, &mut pool.batch_info, "batch_info_buffer", batch_info_size, false);
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.grad_hess,
+            "grad_hess_buffer",
+            grad_hess_size,
+            false,
+        );
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.indices,
+            "indices_buffer",
+            indices_size,
+            false,
+        );
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.batch_info,
+            "batch_info_buffer",
+            batch_info_size,
+            false,
+        );
 
         // Ensure output buffers (sized for all batches)
-        Self::ensure_storage_buffer(dev, &mut pool.hist_grad, "hist_grad_buffer", hist_size, true);
-        Self::ensure_storage_buffer(dev, &mut pool.hist_hess, "hist_hess_buffer", hist_size, true);
-        Self::ensure_storage_buffer(dev, &mut pool.hist_count, "hist_count_buffer", hist_size, true);
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.hist_grad,
+            "hist_grad_buffer",
+            hist_size,
+            true,
+        );
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.hist_hess,
+            "hist_hess_buffer",
+            hist_size,
+            true,
+        );
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.hist_count,
+            "hist_count_buffer",
+            hist_size,
+            true,
+        );
 
         // Ensure staging buffers
         Self::ensure_staging_buffer(dev, &mut pool.staging_grad, "staging_grad", hist_size);
@@ -1613,7 +1835,10 @@ impl HistogramKernel {
 
         dev.read_buffer(&pool.staging_grad.as_ref().unwrap().buffer, &mut grad_data);
         dev.read_buffer(&pool.staging_hess.as_ref().unwrap().buffer, &mut hess_data);
-        dev.read_buffer(&pool.staging_count.as_ref().unwrap().buffer, &mut count_data);
+        dev.read_buffer(
+            &pool.staging_count.as_ref().unwrap().buffer,
+            &mut count_data,
+        );
 
         // Drop pool borrow
         drop(pool);
@@ -1717,7 +1942,11 @@ impl HistogramKernel {
         // Calculate buffer sizes
         let bins_size = (bins_packed.len() * 4) as u64;
         let grad_hess_size = (grad_hess_packed.len() * 4) as u64;
-        let indices_size = if indices_u32.is_empty() { 4u64 } else { (indices_u32.len() * 4) as u64 };
+        let indices_size = if indices_u32.is_empty() {
+            4u64
+        } else {
+            (indices_u32.len() * 4) as u64
+        };
         let era_size = (era_packed.len() * 4) as u64;
         let hist_size = (num_eras * num_features * 256 * 4) as u64;
 
@@ -1744,9 +1973,27 @@ impl HistogramKernel {
         if Self::ensure_storage_buffer(dev, &mut pool.bins, "bins_buffer", bins_size, false) {
             pool.bins_cache_key = None;
         }
-        Self::ensure_storage_buffer(dev, &mut pool.grad_hess, "grad_hess_buffer", grad_hess_size, false);
-        Self::ensure_storage_buffer(dev, &mut pool.indices, "indices_buffer", indices_size, false);
-        if Self::ensure_storage_buffer(dev, &mut pool.era_indices, "era_indices_buffer", era_size, false) {
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.grad_hess,
+            "grad_hess_buffer",
+            grad_hess_size,
+            false,
+        );
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.indices,
+            "indices_buffer",
+            indices_size,
+            false,
+        );
+        if Self::ensure_storage_buffer(
+            dev,
+            &mut pool.era_indices,
+            "era_indices_buffer",
+            era_size,
+            false,
+        ) {
             pool.era_indices_cache_key = None;
         }
 
@@ -1841,7 +2088,12 @@ impl HistogramKernel {
                 },
                 BindGroupEntry {
                     binding: 7,
-                    resource: pool.era_indices.as_ref().unwrap().buffer.as_entire_binding(),
+                    resource: pool
+                        .era_indices
+                        .as_ref()
+                        .unwrap()
+                        .buffer
+                        .as_entire_binding(),
                 },
             ],
         });
@@ -1908,7 +2160,10 @@ impl HistogramKernel {
 
         dev.read_buffer(&pool.staging_grad.as_ref().unwrap().buffer, &mut grad_data);
         dev.read_buffer(&pool.staging_hess.as_ref().unwrap().buffer, &mut hess_data);
-        dev.read_buffer(&pool.staging_count.as_ref().unwrap().buffer, &mut count_data);
+        dev.read_buffer(
+            &pool.staging_count.as_ref().unwrap().buffer,
+            &mut count_data,
+        );
 
         // Drop pool borrow
         drop(pool);

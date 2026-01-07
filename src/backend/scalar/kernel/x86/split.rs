@@ -437,9 +437,7 @@ mod tests {
         #[cfg(target_arch = "x86_64")]
         {
             if std::arch::is_x86_feature_detected!("avx2") {
-                let simd_result = unsafe {
-                    find_best_split_simd(&grads, &hess, &counts, params)
-                };
+                let simd_result = unsafe { find_best_split_simd(&grads, &hess, &counts, params) };
 
                 assert!(scalar_result.is_some());
                 assert!(simd_result.is_some());
@@ -580,22 +578,30 @@ mod tests {
 
             let scalar = find_best_split_scalar(&grads, &hess, &counts, params);
 
-            let simd = unsafe {
-                find_best_split_simd(&grads, &hess, &counts, params)
-            };
+            let simd = unsafe { find_best_split_simd(&grads, &hess, &counts, params) };
 
-            assert!(scalar.is_some(), "Scalar should find split at {}", split_point);
+            assert!(
+                scalar.is_some(),
+                "Scalar should find split at {}",
+                split_point
+            );
             assert!(simd.is_some(), "SIMD should find split at {}", split_point);
 
             let s = scalar.unwrap();
             let v = simd.unwrap();
 
-            assert_eq!(s.bin_threshold, v.bin_threshold,
+            assert_eq!(
+                s.bin_threshold, v.bin_threshold,
                 "Threshold mismatch for split_point {}: scalar={}, simd={}",
-                split_point, s.bin_threshold, v.bin_threshold);
-            assert!((s.gain - v.gain).abs() < 1e-4,
+                split_point, s.bin_threshold, v.bin_threshold
+            );
+            assert!(
+                (s.gain - v.gain).abs() < 1e-4,
                 "Gain mismatch for split_point {}: scalar={}, simd={}",
-                split_point, s.gain, v.gain);
+                split_point,
+                s.gain,
+                v.gain
+            );
         }
     }
 }

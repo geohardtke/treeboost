@@ -39,7 +39,7 @@ pub use polynomial::PolynomialGenerator;
 pub use ratio::RatioGenerator;
 pub use selector::{FeatureSelector, SelectionConfig};
 pub use smart::{
-    SmartFeatureEngine, SmartFeatureConfig, FeaturePlan, LttFeaturePlan, TimeFeatureType,
+    FeaturePlan, LttFeaturePlan, SmartFeatureConfig, SmartFeatureEngine, TimeFeatureType,
 };
 
 /// Trait for feature generation strategies

@@ -285,8 +285,8 @@ mod tests {
         // 50% class 0, 30% class 1, 20% class 2
         let targets: Vec<f32> = vec![
             0.0, 0.0, 0.0, 0.0, 0.0, // 5 class 0
-            1.0, 1.0, 1.0,           // 3 class 1
-            2.0, 2.0,                // 2 class 2
+            1.0, 1.0, 1.0, // 3 class 1
+            2.0, 2.0, // 2 class 2
         ];
 
         let init = loss.initial_predictions(&targets);

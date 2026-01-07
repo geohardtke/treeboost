@@ -95,7 +95,11 @@ fn main() {
     let train_data = common::extract_subset(&dataset, 0, split_idx);
     let test_data = common::extract_subset(&dataset, split_idx, n_samples);
 
-    println!("Train: {} samples, Test: {} samples", train_data.num_rows(), test_data.num_rows());
+    println!(
+        "Train: {} samples, Test: {} samples",
+        train_data.num_rows(),
+        test_data.num_rows()
+    );
     println!();
 
     // =========================================================================
@@ -141,8 +145,8 @@ fn main() {
 
     let config = UniversalConfig::new()
         .with_mode(BoostingMode::LinearThenTree)
-        .with_num_rounds(80)           // Fewer tree rounds needed
-        .with_linear_rounds(10)        // 10 linear boosting iterations first
+        .with_num_rounds(80) // Fewer tree rounds needed
+        .with_linear_rounds(10) // 10 linear boosting iterations first
         .with_learning_rate(0.1)
         .with_seed(42);
 
@@ -176,8 +180,8 @@ fn main() {
 
     let config = UniversalConfig::new()
         .with_mode(BoostingMode::RandomForest)
-        .with_num_rounds(100)          // Number of trees
-        .with_subsample(0.7)           // Bootstrap sample ratio
+        .with_num_rounds(100) // Number of trees
+        .with_subsample(0.7) // Bootstrap sample ratio
         .with_seed(42);
 
     let start = std::time::Instant::now();

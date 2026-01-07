@@ -29,8 +29,7 @@ impl DatasetLoader {
         feature_columns: Option<&[&str]>,
     ) -> Result<BinnedDataset> {
         let pl_path = PlPath::new(&path.as_ref().to_string_lossy());
-        let df = LazyFrame::scan_parquet(pl_path, Default::default())?
-            .collect()?;
+        let df = LazyFrame::scan_parquet(pl_path, Default::default())?.collect()?;
         self.from_dataframe(df, target_column, feature_columns)
     }
 
@@ -58,7 +57,10 @@ impl DatasetLoader {
 
         // Extract target column
         let target_col = df.column(target_column).map_err(|e| {
-            TreeBoostError::Data(format!("Target column '{}' not found: {}", target_column, e))
+            TreeBoostError::Data(format!(
+                "Target column '{}' not found: {}",
+                target_column, e
+            ))
         })?;
         let target_series = target_col.as_materialized_series();
         let targets = self.series_to_f32(target_series)?;
@@ -101,7 +103,16 @@ impl DatasetLoader {
     /// Process a single series into binned values
     fn process_series(&self, name: String, series: &Series) -> Result<(Vec<u8>, FeatureInfo)> {
         match series.dtype() {
-            DataType::Float64 | DataType::Float32 | DataType::Int64 | DataType::Int32 | DataType::Int16 | DataType::Int8 | DataType::UInt64 | DataType::UInt32 | DataType::UInt16 | DataType::UInt8 => {
+            DataType::Float64
+            | DataType::Float32
+            | DataType::Int64
+            | DataType::Int32
+            | DataType::Int16
+            | DataType::Int8
+            | DataType::UInt64
+            | DataType::UInt32
+            | DataType::UInt16
+            | DataType::UInt8 => {
                 let values = self.series_to_f64(series)?;
                 self.binner.process_numeric_column(name, &values)
             }
@@ -162,18 +173,16 @@ impl DatasetLoader {
 
         let values: Vec<f64> = str_ca
             .into_iter()
-            .map(|opt| {
-                match opt {
-                    Some(s) => {
-                        let idx = *mapping.entry(s.to_string()).or_insert_with(|| {
-                            let idx = next_idx;
-                            next_idx += 1;
-                            idx
-                        });
-                        idx as f64
-                    }
-                    None => f64::NAN,
+            .map(|opt| match opt {
+                Some(s) => {
+                    let idx = *mapping.entry(s.to_string()).or_insert_with(|| {
+                        let idx = next_idx;
+                        next_idx += 1;
+                        idx
+                    });
+                    idx as f64
                 }
+                None => f64::NAN,
             })
             .collect();
 
@@ -187,8 +196,7 @@ impl DatasetLoader {
         feature_info: &[FeatureInfo],
     ) -> Result<BinnedDataset> {
         let pl_path = PlPath::new(&path.as_ref().to_string_lossy());
-        let df = LazyFrame::scan_parquet(pl_path, Default::default())?
-            .collect()?;
+        let df = LazyFrame::scan_parquet(pl_path, Default::default())?.collect()?;
         self.from_dataframe_for_prediction(df, feature_info)
     }
 

@@ -9,8 +9,8 @@
 
 use rkyv::{Archive, Deserialize, Serialize};
 use rustc_hash::FxHashSet;
-use std::hash::{Hash, Hasher};
 use rustc_hash::FxHasher;
+use std::hash::{Hash, Hasher};
 
 // ============================================================================
 // Count-Min Sketch Implementation
@@ -68,7 +68,10 @@ impl CountMinSketch {
     /// Panics if `eps <= 0.0` or `confidence <= 0.0`.
     pub fn new(eps: f64, confidence: f64) -> Self {
         assert!(eps > 0.0, "eps must be positive");
-        assert!(confidence > 0.0 && confidence < 1.0, "confidence must be in (0, 1)");
+        assert!(
+            confidence > 0.0 && confidence < 1.0,
+            "confidence must be in (0, 1)"
+        );
 
         let width = (2.0 / eps).ceil() as usize;
         let depth = (-(1.0 - confidence).log2()).ceil() as usize;
@@ -78,7 +81,11 @@ impl CountMinSketch {
 
         let table = vec![0u64; width * depth];
 
-        Self { width, depth, table }
+        Self {
+            width,
+            depth,
+            table,
+        }
     }
 
     /// Increment the count for a hash by 1.

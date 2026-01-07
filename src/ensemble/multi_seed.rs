@@ -90,9 +90,15 @@ impl TrainedMember {
     pub fn model_id(&self) -> u64 {
         // Simple hash combining seed with some config values
         let mut id = self.seed;
-        id = id.wrapping_mul(31).wrapping_add(self.config.num_rounds as u64);
-        id = id.wrapping_mul(31).wrapping_add(self.config.max_depth as u64);
-        id = id.wrapping_mul(31).wrapping_add((self.config.learning_rate * 1000.0) as u64);
+        id = id
+            .wrapping_mul(31)
+            .wrapping_add(self.config.num_rounds as u64);
+        id = id
+            .wrapping_mul(31)
+            .wrapping_add(self.config.max_depth as u64);
+        id = id
+            .wrapping_mul(31)
+            .wrapping_add((self.config.learning_rate * 1000.0) as u64);
         id
     }
 }
@@ -111,7 +117,9 @@ impl MultiSeedTrainer {
         let metric = match base_config.loss_type {
             crate::booster::LossType::BinaryLogLoss => Metric::BinaryLogLoss,
             crate::booster::LossType::MultiClassLogLoss { num_classes } => {
-                Metric::MultiClassLogLoss { n_classes: num_classes }
+                Metric::MultiClassLogLoss {
+                    n_classes: num_classes,
+                }
             }
             _ => Metric::Mse,
         };

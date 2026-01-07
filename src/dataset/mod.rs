@@ -12,13 +12,17 @@
 mod binned;
 mod binner;
 mod bundler;
+pub mod feature_extractor;
 mod loader;
 pub mod packed;
 mod pipeline;
 mod reorder;
 pub mod split;
 
-pub use binned::{BinEntry, BinnedDataset, FeatureInfo, FeatureType, SparseColumn, DEFAULT_BIN, SPARSITY_THRESHOLD};
+pub use binned::{
+    BinEntry, BinnedDataset, FeatureInfo, FeatureType, SparseColumn, DEFAULT_BIN,
+    SPARSITY_THRESHOLD,
+};
 pub use binner::{DatasetBinner, QuantileBinner, DEFAULT_NUM_BINS, MAX_BINS};
 pub use bundler::{BundledDataset, BundlerConfig, BundlingResult, FeatureBundle, FeatureBundler};
 pub use loader::DatasetLoader;

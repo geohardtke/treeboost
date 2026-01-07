@@ -15,7 +15,6 @@ mod fused;
 pub use builder::HistogramBuilder;
 pub use entry::{Histogram, NodeHistograms, NUM_BINS};
 pub use era::{
-    average_era_gain, has_directional_agreement, EraHistogramBuilder, EraHistograms,
-    EraSplitStats,
+    average_era_gain, has_directional_agreement, EraHistogramBuilder, EraHistograms, EraSplitStats,
 };
 pub use fused::{FusedHistogramBuilder, FusedResult};

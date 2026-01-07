@@ -86,9 +86,11 @@ impl DistributionMetric for PSI {
         }
 
         // Get min and max from reference for bin edges
-        let (min_val, max_val) = reference.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), &v| {
-            (min.min(v), max.max(v))
-        });
+        let (min_val, max_val) = reference
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), &v| {
+                (min.min(v), max.max(v))
+            });
 
         if (max_val - min_val).abs() < self.epsilon {
             // All values are the same
@@ -191,8 +193,16 @@ impl DistributionMetric for KolmogorovSmirnov {
 
         while i < ref_sorted.len() || j < target_sorted.len() {
             // Get current values (use infinity if exhausted)
-            let ref_val = if i < ref_sorted.len() { ref_sorted[i] } else { f32::INFINITY };
-            let target_val = if j < target_sorted.len() { target_sorted[j] } else { f32::INFINITY };
+            let ref_val = if i < ref_sorted.len() {
+                ref_sorted[i]
+            } else {
+                f32::INFINITY
+            };
+            let target_val = if j < target_sorted.len() {
+                target_sorted[j]
+            } else {
+                f32::INFINITY
+            };
 
             // Advance pointer(s) for the smaller value, or both if equal
             if ref_val < target_val {
@@ -353,7 +363,11 @@ mod tests {
         let psi = PSI::default();
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let score = psi.compute(&data, &data);
-        assert!(score < 0.01, "PSI for identical data should be ~0, got {}", score);
+        assert!(
+            score < 0.01,
+            "PSI for identical data should be ~0, got {}",
+            score
+        );
     }
 
     #[test]
@@ -362,7 +376,11 @@ mod tests {
         let reference = vec![1.0, 2.0, 3.0, 4.0, 5.0, 1.5, 2.5, 3.5, 4.5];
         let target = vec![5.0, 6.0, 7.0, 8.0, 9.0, 5.5, 6.5, 7.5, 8.5];
         let score = psi.compute(&reference, &target);
-        assert!(score > 0.1, "PSI for shifted data should be > 0.1, got {}", score);
+        assert!(
+            score > 0.1,
+            "PSI for shifted data should be > 0.1, got {}",
+            score
+        );
     }
 
     #[test]
@@ -379,7 +397,11 @@ mod tests {
         let ks = KolmogorovSmirnov::new();
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let score = ks.compute(&data, &data);
-        assert!(score < 0.01, "KS for identical data should be ~0, got {}", score);
+        assert!(
+            score < 0.01,
+            "KS for identical data should be ~0, got {}",
+            score
+        );
     }
 
     #[test]
@@ -388,7 +410,11 @@ mod tests {
         let reference = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let target = vec![6.0, 7.0, 8.0, 9.0, 10.0];
         let score = ks.compute(&reference, &target);
-        assert!((score - 1.0).abs() < 0.01, "KS for completely shifted data should be ~1, got {}", score);
+        assert!(
+            (score - 1.0).abs() < 0.01,
+            "KS for completely shifted data should be ~1, got {}",
+            score
+        );
     }
 
     #[test]
@@ -397,7 +423,11 @@ mod tests {
         let reference = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let target = vec![3.0, 4.0, 5.0, 6.0, 7.0];
         let score = ks.compute(&reference, &target);
-        assert!(score > 0.3 && score < 0.7, "KS for partial overlap should be moderate, got {}", score);
+        assert!(
+            score > 0.3 && score < 0.7,
+            "KS for partial overlap should be moderate, got {}",
+            score
+        );
     }
 
     #[test]
@@ -419,7 +449,11 @@ mod tests {
         // Single element vs 5 elements: CDF jumps from 0 to 1 at value 5
         // At value 1: single_cdf=0, data_cdf=0.2 -> diff=0.2
         // At value 5: single_cdf=1, data_cdf=1 -> diff=0
-        assert!(score > 0.0 && score <= 1.0, "KS with single element should be valid, got {}", score);
+        assert!(
+            score > 0.0 && score <= 1.0,
+            "KS with single element should be valid, got {}",
+            score
+        );
     }
 
     #[test]
@@ -429,7 +463,11 @@ mod tests {
         let target = vec![1.0, 2.0, 2.0, 2.0, 3.0];
         let score = ks.compute(&reference, &target);
         // Similar distributions with different multiplicities
-        assert!(score < 0.3, "KS for similar distributions should be low, got {}", score);
+        assert!(
+            score < 0.3,
+            "KS for similar distributions should be low, got {}",
+            score
+        );
     }
 
     #[test]
@@ -438,7 +476,11 @@ mod tests {
         let reference = vec![1.0, 2.0, 3.0];
         let target = vec![10.0, 11.0, 12.0];
         let score = ks.compute(&reference, &target);
-        assert!((score - 1.0).abs() < 0.01, "KS for completely separated should be 1.0, got {}", score);
+        assert!(
+            (score - 1.0).abs() < 0.01,
+            "KS for completely separated should be 1.0, got {}",
+            score
+        );
     }
 
     #[test]
@@ -448,7 +490,11 @@ mod tests {
         let large = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
         let score = ks.compute(&small, &large);
         // Both cover same range, but different densities
-        assert!(score < 0.5, "KS for same-range different sizes should be moderate, got {}", score);
+        assert!(
+            score < 0.5,
+            "KS for same-range different sizes should be moderate, got {}",
+            score
+        );
     }
 
     #[test]
@@ -458,7 +504,12 @@ mod tests {
         let b = vec![2.0, 3.0, 4.0, 5.0, 6.0];
         let ab = ks.compute(&a, &b);
         let ba = ks.compute(&b, &a);
-        assert!((ab - ba).abs() < 0.01, "KS should be symmetric: {} vs {}", ab, ba);
+        assert!(
+            (ab - ba).abs() < 0.01,
+            "KS should be symmetric: {} vs {}",
+            ab,
+            ba
+        );
     }
 
     #[test]
@@ -466,7 +517,11 @@ mod tests {
         let jsd = JensenShannon::default();
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 1.5, 2.5, 3.5, 4.5];
         let score = jsd.compute(&data, &data);
-        assert!(score < 0.01, "JSD for identical data should be ~0, got {}", score);
+        assert!(
+            score < 0.01,
+            "JSD for identical data should be ~0, got {}",
+            score
+        );
     }
 
     #[test]
@@ -475,7 +530,11 @@ mod tests {
         let reference = vec![1.0, 1.5, 2.0, 2.5, 3.0];
         let target = vec![7.0, 7.5, 8.0, 8.5, 9.0];
         let score = jsd.compute(&reference, &target);
-        assert!(score > 0.1, "JSD for different data should be > 0.1, got {}", score);
+        assert!(
+            score > 0.1,
+            "JSD for different data should be > 0.1, got {}",
+            score
+        );
     }
 
     #[test]
@@ -485,7 +544,11 @@ mod tests {
         let target = vec![100.0; 100];
         let score = jsd.compute(&reference, &target);
         // JSD is bounded by ln(2) ≈ 0.693
-        assert!(score <= 0.7, "JSD should be bounded by ln(2), got {}", score);
+        assert!(
+            score <= 0.7,
+            "JSD should be bounded by ln(2), got {}",
+            score
+        );
     }
 
     #[test]
@@ -495,7 +558,12 @@ mod tests {
         let b = vec![2.0, 3.0, 4.0, 5.0, 6.0];
         let ab = jsd.compute(&a, &b);
         let ba = jsd.compute(&b, &a);
-        assert!((ab - ba).abs() < 0.01, "JSD should be symmetric: {} vs {}", ab, ba);
+        assert!(
+            (ab - ba).abs() < 0.01,
+            "JSD should be symmetric: {} vs {}",
+            ab,
+            ba
+        );
     }
 
     #[test]

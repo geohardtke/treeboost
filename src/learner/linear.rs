@@ -74,8 +74,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 ///
 /// Setting lambda=0 will cause numerical instability on correlated features.
 /// The minimum allowed value is 1e-6.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
 pub struct LinearConfig {
     /// Overall regularization strength
     ///
@@ -135,12 +134,12 @@ pub struct LinearConfig {
 impl Default for LinearConfig {
     fn default() -> Self {
         Self {
-            lambda: 1.0,              // Strong default regularization
-            l1_ratio: 0.0,            // Pure Ridge by default (most stable)
-            learning_rate: 0.3,       // Moderate step size for boosting
-            max_iter: 100,            // Many iterations for single-round convergence
-            tol: 1e-6,                // Tight convergence
-            max_weight: 100.0,        // Prevent extreme weights
+            lambda: 1.0,               // Strong default regularization
+            l1_ratio: 0.0,             // Pure Ridge by default (most stable)
+            learning_rate: 0.3,        // Moderate step size for boosting
+            max_iter: 100,             // Many iterations for single-round convergence
+            tol: 1e-6,                 // Tight convergence
+            max_weight: 100.0,         // Prevent extreme weights
             prediction_shrinkage: 0.0, // No shrinkage by default
         }
     }
@@ -282,8 +281,7 @@ impl LinearConfig {
 /// - Delta clamping prevents extreme updates
 /// - Weight clamping prevents explosion
 /// - Zero-variance features handled gracefully
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
 pub struct LinearBooster {
     /// Weights (one per feature)
     weights: Vec<f32>,
@@ -545,7 +543,12 @@ impl LinearBooster {
     ///
     /// # Returns
     /// Predictions on the training data after fitting
-    pub fn fit_direct(&mut self, features: &[f32], num_features: usize, targets: &[f32]) -> Result<Vec<f32>> {
+    pub fn fit_direct(
+        &mut self,
+        features: &[f32],
+        num_features: usize,
+        targets: &[f32],
+    ) -> Result<Vec<f32>> {
         let num_rows = targets.len();
         if features.len() != num_rows * num_features {
             return Err(TreeBoostError::Data(format!(
@@ -557,7 +560,15 @@ impl LinearBooster {
 
         // Fit scaler if not already fitted
         if !self.scaler_fitted {
+            eprintln!(
+                "[DEBUG LinearBooster.fit_direct] Fitting scaler on features: first 5 vals: {:?}",
+                &features[..features.len().min(5)]
+            );
             self.fit_scaler(features, num_features);
+            eprintln!(
+                "[DEBUG LinearBooster.fit_direct] After fit_scaler: means[0]={:.4}, stds[0]={:.4}",
+                self.means[0], self.stds[0]
+            );
         }
 
         let lambda = self.config.lambda as f64;
@@ -609,7 +620,9 @@ impl LinearBooster {
             // Find pivot
             let mut max_row = col;
             for row in (col + 1)..num_features {
-                if aug[row * (num_features + 1) + col].abs() > aug[max_row * (num_features + 1) + col].abs() {
+                if aug[row * (num_features + 1) + col].abs()
+                    > aug[max_row * (num_features + 1) + col].abs()
+                {
                     max_row = row;
                 }
             }
@@ -629,7 +642,8 @@ impl LinearBooster {
                 if row != col {
                     let factor = aug[row * (num_features + 1) + col] / pivot;
                     for k in 0..=num_features {
-                        aug[row * (num_features + 1) + k] -= factor * aug[col * (num_features + 1) + k];
+                        aug[row * (num_features + 1) + k] -=
+                            factor * aug[col * (num_features + 1) + k];
                     }
                 }
             }
@@ -646,7 +660,9 @@ impl LinearBooster {
         }
 
         // Compute bias: intercept = mean(y) - dot(weights, mean(X))
-        let weights_dot_xmean: f64 = self.weights.iter()
+        let weights_dot_xmean: f64 = self
+            .weights
+            .iter()
             .zip(x_means.iter())
             .map(|(&w, &xm)| w as f64 * xm)
             .sum();
@@ -826,14 +842,21 @@ mod tests {
             .with_max_iter(100);
 
         let mut booster = LinearBooster::new(1, config);
-        booster.fit_on_gradients(&features, 1, &gradients, &hessians).unwrap();
+        booster
+            .fit_on_gradients(&features, 1, &gradients, &hessians)
+            .unwrap();
 
         let predictions = booster.predict_batch(&features, 1);
 
         // Check predictions are reasonable (not exact due to regularization)
         for (pred, &target) in predictions.iter().zip(targets.iter()) {
             let error = (pred - target).abs();
-            assert!(error < 2.0, "Prediction {} too far from target {}", pred, target);
+            assert!(
+                error < 2.0,
+                "Prediction {} too far from target {}",
+                pred,
+                target
+            );
         }
     }
 
@@ -842,10 +865,10 @@ mod tests {
         // y = x1 + 2*x2
         // 4 rows, 2 features
         let features = vec![
-            1.0, 1.0,  // row 0: y = 1 + 2 = 3
-            2.0, 1.0,  // row 1: y = 2 + 2 = 4
-            1.0, 2.0,  // row 2: y = 1 + 4 = 5
-            2.0, 2.0,  // row 3: y = 2 + 4 = 6
+            1.0, 1.0, // row 0: y = 1 + 2 = 3
+            2.0, 1.0, // row 1: y = 2 + 2 = 4
+            1.0, 2.0, // row 2: y = 1 + 4 = 5
+            2.0, 2.0, // row 3: y = 2 + 4 = 6
         ];
         let targets = vec![3.0, 4.0, 5.0, 6.0];
         let gradients: Vec<f32> = targets.iter().map(|&t| -t).collect();
@@ -857,14 +880,22 @@ mod tests {
             .with_max_iter(200);
 
         let mut booster = LinearBooster::new(2, config);
-        booster.fit_on_gradients(&features, 2, &gradients, &hessians).unwrap();
+        booster
+            .fit_on_gradients(&features, 2, &gradients, &hessians)
+            .unwrap();
 
         let predictions = booster.predict_batch(&features, 2);
 
         // Check predictions
         for (i, (pred, &target)) in predictions.iter().zip(targets.iter()).enumerate() {
             let error = (pred - target).abs();
-            assert!(error < 1.5, "Row {}: pred {} too far from target {}", i, pred, target);
+            assert!(
+                error < 1.5,
+                "Row {}: pred {} too far from target {}",
+                i,
+                pred,
+                target
+            );
         }
     }
 
@@ -872,23 +903,27 @@ mod tests {
     fn test_linear_booster_no_nan() {
         // Test with correlated features (would cause NaN without regularization)
         let features = vec![
-            1.0, 1.0,  // x1 = x2 (perfect correlation)
-            2.0, 2.0,
-            3.0, 3.0,
-            4.0, 4.0,
+            1.0, 1.0, // x1 = x2 (perfect correlation)
+            2.0, 2.0, 3.0, 3.0, 4.0, 4.0,
         ];
         let gradients = vec![-1.0, -2.0, -3.0, -4.0];
         let hessians = vec![1.0; 4];
 
         let config = LinearConfig::default();
         let mut booster = LinearBooster::new(2, config);
-        booster.fit_on_gradients(&features, 2, &gradients, &hessians).unwrap();
+        booster
+            .fit_on_gradients(&features, 2, &gradients, &hessians)
+            .unwrap();
 
         let predictions = booster.predict_batch(&features, 2);
 
         // No NaN or Inf
         for pred in &predictions {
-            assert!(pred.is_finite(), "Prediction should be finite, got {}", pred);
+            assert!(
+                pred.is_finite(),
+                "Prediction should be finite, got {}",
+                pred
+            );
         }
     }
 
@@ -896,22 +931,27 @@ mod tests {
     fn test_linear_booster_constant_feature() {
         // One constant feature (std = 0)
         let features = vec![
-            1.0, 5.0,  // x2 is constant
-            2.0, 5.0,
-            3.0, 5.0,
+            1.0, 5.0, // x2 is constant
+            2.0, 5.0, 3.0, 5.0,
         ];
         let gradients = vec![-1.0, -2.0, -3.0];
         let hessians = vec![1.0; 3];
 
         let config = LinearConfig::default();
         let mut booster = LinearBooster::new(2, config);
-        booster.fit_on_gradients(&features, 2, &gradients, &hessians).unwrap();
+        booster
+            .fit_on_gradients(&features, 2, &gradients, &hessians)
+            .unwrap();
 
         let predictions = booster.predict_batch(&features, 2);
 
         // No NaN or Inf
         for pred in &predictions {
-            assert!(pred.is_finite(), "Prediction should be finite, got {}", pred);
+            assert!(
+                pred.is_finite(),
+                "Prediction should be finite, got {}",
+                pred
+            );
         }
     }
 
@@ -924,7 +964,9 @@ mod tests {
         let features = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let gradients = vec![-1.0, -2.0];
         let hessians = vec![1.0, 1.0];
-        booster.fit_on_gradients(&features, 3, &gradients, &hessians).unwrap();
+        booster
+            .fit_on_gradients(&features, 3, &gradients, &hessians)
+            .unwrap();
 
         // Weights should be non-zero
         let has_nonzero = booster.weights().iter().any(|&w| w.abs() > 1e-10);
@@ -937,7 +979,10 @@ mod tests {
         for &w in booster.weights() {
             assert!((w.abs()) < 1e-10, "Weights should be zero after reset");
         }
-        assert!((booster.bias().abs()) < 1e-10, "Bias should be zero after reset");
+        assert!(
+            (booster.bias().abs()) < 1e-10,
+            "Bias should be zero after reset"
+        );
     }
 
     #[test]
@@ -948,7 +993,9 @@ mod tests {
         let features = vec![1.0, 2.0, 3.0, 4.0];
         let gradients = vec![-5.0, -10.0];
         let hessians = vec![1.0, 1.0];
-        booster.fit_on_gradients(&features, 2, &gradients, &hessians).unwrap();
+        booster
+            .fit_on_gradients(&features, 2, &gradients, &hessians)
+            .unwrap();
 
         let batch_preds = booster.predict_batch(&features, 2);
         let single_pred_0 = booster.predict_row(&features, 2, 0);
@@ -983,11 +1030,11 @@ mod tests {
 
         for i in 0..n_samples {
             let x0 = (i as f32) / 10.0;
-            features.push(x0);         // Feature 0 - relevant
-            features.push(0.5);        // Feature 1 - noise (constant)
-            features.push(0.3);        // Feature 2 - noise (constant)
-            features.push(0.1);        // Feature 3 - noise (constant)
-            targets.push(3.0 * x0);    // Only depends on x0
+            features.push(x0); // Feature 0 - relevant
+            features.push(0.5); // Feature 1 - noise (constant)
+            features.push(0.3); // Feature 2 - noise (constant)
+            features.push(0.1); // Feature 3 - noise (constant)
+            targets.push(3.0 * x0); // Only depends on x0
         }
 
         let gradients: Vec<f32> = targets.iter().map(|&t| -t).collect();
@@ -999,10 +1046,15 @@ mod tests {
             .with_max_iter(200);
 
         let mut booster = LinearBooster::new(n_features, config);
-        booster.fit_on_gradients(&features, n_features, &gradients, &hessians).unwrap();
+        booster
+            .fit_on_gradients(&features, n_features, &gradients, &hessians)
+            .unwrap();
 
         // Feature 0 should have non-zero weight
-        assert!(booster.weights()[0].abs() > 0.1, "Feature 0 should be selected");
+        assert!(
+            booster.weights()[0].abs() > 0.1,
+            "Feature 0 should be selected"
+        );
 
         // LASSO should encourage sparsity
         let selected = booster.selected_features();
@@ -1038,7 +1090,7 @@ mod tests {
             for _ in 0..n_features {
                 features.push(x);
             }
-            targets.push(x);  // All features contribute equally
+            targets.push(x); // All features contribute equally
         }
 
         let gradients: Vec<f32> = targets.iter().map(|&t| -t).collect();
@@ -1049,14 +1101,18 @@ mod tests {
             .with_learning_rate(0.5)
             .with_max_iter(100);
         let mut ridge_booster = LinearBooster::new(n_features, ridge_config);
-        ridge_booster.fit_on_gradients(&features, n_features, &gradients, &hessians).unwrap();
+        ridge_booster
+            .fit_on_gradients(&features, n_features, &gradients, &hessians)
+            .unwrap();
 
         // LASSO - should have sparser weights
         let lasso_config = LinearConfig::lasso(0.5)
             .with_learning_rate(0.5)
             .with_max_iter(100);
         let mut lasso_booster = LinearBooster::new(n_features, lasso_config);
-        lasso_booster.fit_on_gradients(&features, n_features, &gradients, &hessians).unwrap();
+        lasso_booster
+            .fit_on_gradients(&features, n_features, &gradients, &hessians)
+            .unwrap();
 
         // Ridge typically has more non-zero weights than LASSO
         // (though in this degenerate case both may have many)
@@ -1076,26 +1132,30 @@ mod tests {
     fn test_elastic_net_stability() {
         // Elastic Net should handle correlated features better than pure LASSO
         let features = vec![
-            1.0, 1.0,  // x1 ≈ x2 (correlation)
-            2.0, 2.0,
-            3.0, 3.0,
-            4.0, 4.0,
+            1.0, 1.0, // x1 ≈ x2 (correlation)
+            2.0, 2.0, 3.0, 3.0, 4.0, 4.0,
         ];
         let gradients = vec![-1.0, -2.0, -3.0, -4.0];
         let hessians = vec![1.0; 4];
 
-        let config = LinearConfig::elastic_net(0.5, 0.5)  // 50% L1, 50% L2
+        let config = LinearConfig::elastic_net(0.5, 0.5) // 50% L1, 50% L2
             .with_learning_rate(0.5)
             .with_max_iter(100);
 
         let mut booster = LinearBooster::new(2, config);
-        booster.fit_on_gradients(&features, 2, &gradients, &hessians).unwrap();
+        booster
+            .fit_on_gradients(&features, 2, &gradients, &hessians)
+            .unwrap();
 
         let predictions = booster.predict_batch(&features, 2);
 
         // All predictions should be finite
         for pred in &predictions {
-            assert!(pred.is_finite(), "Elastic Net prediction should be finite, got {}", pred);
+            assert!(
+                pred.is_finite(),
+                "Elastic Net prediction should be finite, got {}",
+                pred
+            );
         }
     }
 }

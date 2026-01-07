@@ -107,7 +107,9 @@ impl From<TrialResult> for PyTrialResult {
 
 impl From<&TrialResult> for PyTrialResult {
     fn from(result: &TrialResult) -> Self {
-        Self { inner: result.clone() }
+        Self {
+            inner: result.clone(),
+        }
     }
 }
 
@@ -150,7 +152,8 @@ impl PySearchHistory {
 
     /// Get trials for a specific iteration
     fn trials_for_iteration(&self, iteration: usize) -> Vec<PyTrialResult> {
-        self.inner.trials_for_iteration(iteration)
+        self.inner
+            .trials_for_iteration(iteration)
             .into_iter()
             .map(|t| t.into())
             .collect()
@@ -189,9 +192,13 @@ impl PySearchHistory {
             let metric_a = get_metric_value(a, self.inner.optimization_metric());
             let metric_b = get_metric_value(b, self.inner.optimization_metric());
             if higher_is_better {
-                metric_b.partial_cmp(&metric_a).unwrap_or(std::cmp::Ordering::Equal)
+                metric_b
+                    .partial_cmp(&metric_a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             } else {
-                metric_a.partial_cmp(&metric_b).unwrap_or(std::cmp::Ordering::Equal)
+                metric_a
+                    .partial_cmp(&metric_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             }
         });
 
@@ -205,7 +212,10 @@ impl PySearchHistory {
 
     fn __repr__(&self) -> String {
         let best_info = if let Some(best) = self.inner.best() {
-            format!(", best_trial_id={}, best_val={:.6}", best.trial_id, best.val_metric)
+            format!(
+                ", best_trial_id={}, best_val={:.6}",
+                best.trial_id, best.val_metric
+            )
         } else {
             String::new()
         };

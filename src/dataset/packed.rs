@@ -12,8 +12,7 @@ use rayon::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// Storage mode for binned features
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize, Default)]
 pub enum StorageMode {
     /// Standard u8 storage (256 bins max)
     #[default]
@@ -21,7 +20,6 @@ pub enum StorageMode {
     /// Packed 4-bit storage (16 bins max, 2x memory savings)
     Packed4Bit,
 }
-
 
 /// Packed column storing two 4-bit bins per byte
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
@@ -43,11 +41,19 @@ impl PackedColumn {
         let mut data = Vec::with_capacity(packed_len);
 
         for chunk in bins.chunks(2) {
-            debug_assert!(chunk[0] <= 15, "Bin value {} exceeds 4-bit max (15)", chunk[0]);
+            debug_assert!(
+                chunk[0] <= 15,
+                "Bin value {} exceeds 4-bit max (15)",
+                chunk[0]
+            );
 
             let high = chunk[0] << 4;
             let low = if chunk.len() > 1 {
-                debug_assert!(chunk[1] <= 15, "Bin value {} exceeds 4-bit max (15)", chunk[1]);
+                debug_assert!(
+                    chunk[1] <= 15,
+                    "Bin value {} exceeds 4-bit max (15)",
+                    chunk[1]
+                );
                 chunk[1]
             } else {
                 0 // Padding for odd row count
@@ -132,7 +138,10 @@ impl PackedColumn {
         if start_row.is_multiple_of(2) && count.is_multiple_of(2) {
             let start_byte = start_row / 2;
             let byte_count = count / 2;
-            crate::kernel::unpack_4bit(&self.data[start_byte..start_byte + byte_count], &mut buffer[..count]);
+            crate::kernel::unpack_4bit(
+                &self.data[start_byte..start_byte + byte_count],
+                &mut buffer[..count],
+            );
             return;
         }
 
@@ -424,14 +433,12 @@ impl PackedDataset {
             features
                 .par_chunks_mut(chunk_size)
                 .zip(self.feature_data.par_iter())
-                .for_each(|(dest, storage)| {
-                    match storage {
-                        FeatureStorage::U8(data) => {
-                            dest.copy_from_slice(data);
-                        }
-                        FeatureStorage::Packed(packed) => {
-                            packed.unpack_to_buffer(dest);
-                        }
+                .for_each(|(dest, storage)| match storage {
+                    FeatureStorage::U8(data) => {
+                        dest.copy_from_slice(data);
+                    }
+                    FeatureStorage::Packed(packed) => {
+                        packed.unpack_to_buffer(dest);
                     }
                 });
         } else {

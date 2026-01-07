@@ -54,7 +54,10 @@ fn main() {
 
     println!("1. Generating dataset with noise...");
     println!("   Total samples: {}", n_total);
-    println!("   Training: {}, Calibration: {}, Test: {}", n_train, n_calib, n_test);
+    println!(
+        "   Training: {}, Calibration: {}, Test: {}",
+        n_train, n_calib, n_test
+    );
     println!("   Relationship: y = 10*f0 + 5*f1 + noise");
     println!();
 
@@ -98,10 +101,14 @@ fn main() {
 
     // 4. Compute quantile for 90% coverage
     let coverage = 0.9;
-    let quantile_idx = ((residuals.len() as f32 * coverage).ceil() as usize).min(residuals.len() - 1);
+    let quantile_idx =
+        ((residuals.len() as f32 * coverage).ceil() as usize).min(residuals.len() - 1);
     let quantile = residuals[quantile_idx];
 
-    println!("4. Computing prediction intervals for {:.0}% coverage...", coverage * 100.0);
+    println!(
+        "4. Computing prediction intervals for {:.0}% coverage...",
+        coverage * 100.0
+    );
     println!("   Quantile of absolute errors: {:.4}", quantile);
     println!();
 
@@ -163,7 +170,10 @@ fn main() {
     // 8. Show interval width statistics
     println!("8. Interval Width Statistics...");
 
-    let widths: Vec<f32> = intervals.iter().map(|(lower, _, upper)| upper - lower).collect();
+    let widths: Vec<f32> = intervals
+        .iter()
+        .map(|(lower, _, upper)| upper - lower)
+        .collect();
     let min_width = widths.iter().cloned().fold(f32::INFINITY, f32::min);
     let max_width = widths.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let mean_width = widths.iter().sum::<f32>() / widths.len() as f32;

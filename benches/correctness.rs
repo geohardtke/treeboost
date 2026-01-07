@@ -18,7 +18,11 @@ use gbdt::decision_tree::Data;
 use gbdt::gradient_boost::GBDT;
 
 /// Generate synthetic regression dataset with known pattern
-fn generate_regression_data(num_rows: usize, num_features: usize, seed: u64) -> (Vec<f64>, Vec<f64>) {
+fn generate_regression_data(
+    num_rows: usize,
+    num_features: usize,
+    seed: u64,
+) -> (Vec<f64>, Vec<f64>) {
     let mut rng = StdRng::seed_from_u64(seed);
 
     let mut features = Vec::with_capacity(num_rows * num_features);
@@ -234,12 +238,15 @@ fn main() {
     println!(
         "  Target range: [{:.4}, {:.4}]",
         train_targets.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
-        train_targets.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))
+        train_targets
+            .iter()
+            .fold(f64::NEG_INFINITY, |a, &b| a.max(b))
     );
 
     // Train TreeBoost
     print_header("TRAINING TREEBOOST");
-    let treeboost_train = to_treeboost_dataset(&train_features, &train_targets, train_rows, num_features);
+    let treeboost_train =
+        to_treeboost_dataset(&train_features, &train_targets, train_rows, num_features);
     let treeboost_config = GBDTConfig::new()
         .with_num_rounds(num_rounds)
         .with_max_depth(max_depth)
@@ -292,7 +299,8 @@ fn main() {
     print_header("PREDICTION");
 
     // TreeBoost predictions
-    let treeboost_test = to_treeboost_dataset(&test_features, &test_targets, test_rows, num_features);
+    let treeboost_test =
+        to_treeboost_dataset(&test_features, &test_targets, test_rows, num_features);
     let start = Instant::now();
     let treeboost_preds: Vec<f64> = treeboost_model
         .predict(&treeboost_test)
@@ -324,7 +332,10 @@ fn main() {
     // Evaluate accuracy against ground truth
     print_header("ACCURACY VS GROUND TRUTH");
 
-    println!("\n{:^20} {:>12} {:>12} {:>12} {:>12}", "Implementation", "MSE", "RMSE", "MAE", "R²");
+    println!(
+        "\n{:^20} {:>12} {:>12} {:>12} {:>12}",
+        "Implementation", "MSE", "RMSE", "MAE", "R²"
+    );
     println!("{}", "-".repeat(72));
 
     let tb_mse = mse(&treeboost_preds, &test_targets);
@@ -358,7 +369,10 @@ fn main() {
     print_header("CROSS-IMPLEMENTATION AGREEMENT");
 
     println!("\nPrediction correlation matrix:");
-    println!("{:^20} {:>15} {:>15} {:>15}", "", "TreeBoost", "gbdt-rs", "forust");
+    println!(
+        "{:^20} {:>15} {:>15} {:>15}",
+        "", "TreeBoost", "gbdt-rs", "forust"
+    );
     println!("{}", "-".repeat(65));
 
     let corr_tb_gbdt = correlation(&treeboost_preds, &gbdt_preds);
@@ -404,7 +418,10 @@ fn main() {
         (mean, std, min, max)
     }
 
-    println!("\n{:^20} {:>12} {:>12} {:>12} {:>12}", "Implementation", "Mean", "Std", "Min", "Max");
+    println!(
+        "\n{:^20} {:>12} {:>12} {:>12} {:>12}",
+        "Implementation", "Mean", "Std", "Min", "Max"
+    );
     println!("{}", "-".repeat(72));
 
     let (tb_mean, tb_std, tb_min, tb_max) = stats(&treeboost_preds);

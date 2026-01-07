@@ -317,7 +317,8 @@ impl PartitionKernel {
 
         self.partition_fn = Some(CudaDevice::load_function(&module, "partition_atomic"));
         self.partition_batched_fn = Some(CudaDevice::load_function(&module, "partition_batched"));
-        self.partition_gpu_resident_fn = Some(CudaDevice::load_function(&module, "partition_gpu_resident"));
+        self.partition_gpu_resident_fn =
+            Some(CudaDevice::load_function(&module, "partition_gpu_resident"));
         self.partition_fused_fn = Some(CudaDevice::load_function(&module, "partition_fused"));
         self.compact_partitions_fn = Some(CudaDevice::load_function(&module, "compact_partitions"));
         self.zero_counters_fn = Some(CudaDevice::load_function(&module, "zero_counters_n"));
@@ -447,7 +448,9 @@ impl PartitionKernel {
         self.device.synchronize();
 
         // Read back counters
-        let counters = self.device.dtoh_copy(self.cached_counters.as_ref().unwrap());
+        let counters = self
+            .device
+            .dtoh_copy(self.cached_counters.as_ref().unwrap());
         let left_count = counters[0];
         let right_count = counters[1];
 
@@ -495,7 +498,11 @@ impl PartitionKernel {
         self.ensure_bins_cached(bins);
 
         let num_nodes = node_splits.len();
-        let max_node_rows = node_splits.iter().map(|s| s.input_count as usize).max().unwrap_or(0);
+        let max_node_rows = node_splits
+            .iter()
+            .map(|s| s.input_count as usize)
+            .max()
+            .unwrap_or(0);
 
         // Prepare batch parameters
         let node_starts: Vec<u32> = node_splits.iter().map(|s| s.input_start).collect();
@@ -504,7 +511,9 @@ impl PartitionKernel {
         let split_thresholds: Vec<u32> = node_splits.iter().map(|s| s.split_threshold).collect();
 
         // Output starts: each node gets max_node_rows * 2 (left + right)
-        let output_starts: Vec<u32> = (0..num_nodes).map(|i| (i * max_node_rows * 2) as u32).collect();
+        let output_starts: Vec<u32> = (0..num_nodes)
+            .map(|i| (i * max_node_rows * 2) as u32)
+            .collect();
 
         // Ensure batch buffers are allocated
         let total_output = num_nodes * max_node_rows * 2;
@@ -514,7 +523,14 @@ impl PartitionKernel {
             self.cached_batch_output = Some(self.device.alloc_zeros(total_output));
             self.cached_batch_size = total_output;
         }
-        if self.cached_batch_counters.is_none() || self.cached_batch_counters.as_ref().map(|c| c.len()).unwrap_or(0) < num_counters {
+        if self.cached_batch_counters.is_none()
+            || self
+                .cached_batch_counters
+                .as_ref()
+                .map(|c| c.len())
+                .unwrap_or(0)
+                < num_counters
+        {
             self.cached_batch_counters = Some(self.device.alloc_zeros(num_counters));
         }
 
@@ -581,8 +597,12 @@ impl PartitionKernel {
         self.device.synchronize();
 
         // Read back results
-        let counters = self.device.dtoh_copy(self.cached_batch_counters.as_ref().unwrap());
-        let output = self.device.dtoh_copy(self.cached_batch_output.as_ref().unwrap());
+        let counters = self
+            .device
+            .dtoh_copy(self.cached_batch_counters.as_ref().unwrap());
+        let output = self
+            .device
+            .dtoh_copy(self.cached_batch_output.as_ref().unwrap());
 
         // Extract results for each node
         (0..num_nodes)
@@ -591,8 +611,11 @@ impl PartitionKernel {
                 let right_count = counters[i * 2 + 1];
                 let output_start = output_starts[i] as usize;
 
-                let left_indices = output[output_start..output_start + left_count as usize].to_vec();
-                let right_indices = output[output_start + max_node_rows..output_start + max_node_rows + right_count as usize].to_vec();
+                let left_indices =
+                    output[output_start..output_start + left_count as usize].to_vec();
+                let right_indices = output[output_start + max_node_rows
+                    ..output_start + max_node_rows + right_count as usize]
+                    .to_vec();
 
                 PartitionResult {
                     left_indices,
@@ -630,7 +653,11 @@ impl PartitionKernel {
         }
 
         let num_nodes = node_splits.len();
-        let max_node_rows = node_splits.iter().map(|s| s.input_count as usize).max().unwrap_or(0);
+        let max_node_rows = node_splits
+            .iter()
+            .map(|s| s.input_count as usize)
+            .max()
+            .unwrap_or(0);
 
         // Prepare node metadata
         let node_input_starts: Vec<u32> = node_splits.iter().map(|s| s.input_start).collect();
@@ -639,7 +666,9 @@ impl PartitionKernel {
         let split_thresholds: Vec<u32> = node_splits.iter().map(|s| s.split_threshold).collect();
 
         // Output layout: each node gets max_node_rows * 2 space (left then right)
-        let node_output_starts: Vec<u32> = (0..num_nodes).map(|i| (i * max_node_rows * 2) as u32).collect();
+        let node_output_starts: Vec<u32> = (0..num_nodes)
+            .map(|i| (i * max_node_rows * 2) as u32)
+            .collect();
 
         let d_node_input_starts = self.device.htod_copy(&node_input_starts);
         let d_node_counts = self.device.htod_copy(&node_counts);
@@ -649,7 +678,14 @@ impl PartitionKernel {
 
         // Ensure counters buffer
         let num_counters = num_nodes * 2;
-        if self.cached_batch_counters.is_none() || self.cached_batch_counters.as_ref().map(|c| c.len()).unwrap_or(0) < num_counters {
+        if self.cached_batch_counters.is_none()
+            || self
+                .cached_batch_counters
+                .as_ref()
+                .map(|c| c.len())
+                .unwrap_or(0)
+                < num_counters
+        {
             self.cached_batch_counters = Some(self.device.alloc_zeros(num_counters));
         }
 
@@ -706,7 +742,9 @@ impl PartitionKernel {
         self.device.synchronize();
 
         // Read back only counters (indices stay on GPU)
-        let counters = self.device.dtoh_copy(self.cached_batch_counters.as_ref().unwrap());
+        let counters = self
+            .device
+            .dtoh_copy(self.cached_batch_counters.as_ref().unwrap());
 
         // Return results with offsets
         (0..num_nodes)
@@ -781,7 +819,9 @@ impl PartitionKernel {
         self.device.synchronize();
 
         // Return (compacted_start, total_count) for each node
-        partition_results.iter().zip(compacted_output_starts.iter())
+        partition_results
+            .iter()
+            .zip(compacted_output_starts.iter())
             .map(|(r, &start)| (start, r.left_count + r.right_count))
             .collect()
     }
@@ -833,16 +873,39 @@ impl PartitionKernel {
         let split_thresholds: Vec<u32> = node_splits.iter().map(|s| s.split_threshold).collect();
 
         // Copy metadata to cached GPU buffers (htod_copy_into avoids allocation)
-        self.device.htod_copy_into(&node_input_starts, self.cached_node_input_starts.as_mut().unwrap());
-        self.device.htod_copy_into(&node_counts, self.cached_node_counts.as_mut().unwrap());
-        self.device.htod_copy_into(&split_features, self.cached_split_features.as_mut().unwrap());
-        self.device.htod_copy_into(&split_thresholds, self.cached_split_thresholds.as_mut().unwrap());
-        self.device.htod_copy_into(&output_offsets, self.cached_output_offsets.as_mut().unwrap());
-        self.device.htod_copy_into(&left_capacities, self.cached_left_capacities.as_mut().unwrap());
+        self.device.htod_copy_into(
+            &node_input_starts,
+            self.cached_node_input_starts.as_mut().unwrap(),
+        );
+        self.device
+            .htod_copy_into(&node_counts, self.cached_node_counts.as_mut().unwrap());
+        self.device.htod_copy_into(
+            &split_features,
+            self.cached_split_features.as_mut().unwrap(),
+        );
+        self.device.htod_copy_into(
+            &split_thresholds,
+            self.cached_split_thresholds.as_mut().unwrap(),
+        );
+        self.device.htod_copy_into(
+            &output_offsets,
+            self.cached_output_offsets.as_mut().unwrap(),
+        );
+        self.device.htod_copy_into(
+            &left_capacities,
+            self.cached_left_capacities.as_mut().unwrap(),
+        );
 
         // Ensure counters buffer
         let num_counters = num_nodes * 2;
-        if self.cached_batch_counters.is_none() || self.cached_batch_counters.as_ref().map(|c| c.len()).unwrap_or(0) < num_counters {
+        if self.cached_batch_counters.is_none()
+            || self
+                .cached_batch_counters
+                .as_ref()
+                .map(|c| c.len())
+                .unwrap_or(0)
+                < num_counters
+        {
             self.cached_batch_counters = Some(self.device.alloc_zeros(num_counters));
         }
 
@@ -866,7 +929,11 @@ impl PartitionKernel {
         }
 
         // Launch fused partition kernel
-        let max_node_rows = node_splits.iter().map(|s| s.input_count as usize).max().unwrap_or(0);
+        let max_node_rows = node_splits
+            .iter()
+            .map(|s| s.input_count as usize)
+            .max()
+            .unwrap_or(0);
         let threads_per_block = 256u32;
         let row_tiles = ((max_node_rows as u32) + threads_per_block - 1) / threads_per_block;
 
@@ -900,7 +967,9 @@ impl PartitionKernel {
         self.device.synchronize();
 
         // Read back only counters (indices stay on GPU)
-        let counters = self.device.dtoh_copy(self.cached_batch_counters.as_ref().unwrap());
+        let counters = self
+            .device
+            .dtoh_copy(self.cached_batch_counters.as_ref().unwrap());
 
         // Return (output_start, left_count, right_count) for each node
         (0..num_nodes)

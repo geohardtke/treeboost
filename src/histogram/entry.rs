@@ -73,7 +73,9 @@ impl Histogram {
     pub fn accumulate(&mut self, bin: u8, gradient: f32, hessian: f32) {
         // Use unsafe to avoid bounds check - bin is u8 so always < 256
         unsafe {
-            self.bins.get_unchecked_mut(bin as usize).accumulate(gradient, hessian);
+            self.bins
+                .get_unchecked_mut(bin as usize)
+                .accumulate(gradient, hessian);
         }
     }
 

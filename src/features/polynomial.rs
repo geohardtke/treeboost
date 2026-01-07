@@ -148,9 +148,7 @@ impl FeatureGenerator for PolynomialGenerator {
             let mut offset = f * features_per_input;
 
             // Extract column values
-            let values: Vec<f32> = (0..num_rows)
-                .map(|r| data[r * num_features + f])
-                .collect();
+            let values: Vec<f32> = (0..num_rows).map(|r| data[r * num_features + f]).collect();
 
             // x²
             if self.include_square {

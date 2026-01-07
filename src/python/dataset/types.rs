@@ -230,7 +230,11 @@ impl PyBinnedDataset {
     }
 
     /// Get bin values for a feature column as numpy array
-    fn feature_column<'py>(&self, py: Python<'py>, feature_idx: usize) -> PyResult<Bound<'py, PyArray1<u8>>> {
+    fn feature_column<'py>(
+        &self,
+        py: Python<'py>,
+        feature_idx: usize,
+    ) -> PyResult<Bound<'py, PyArray1<u8>>> {
         if feature_idx >= self.inner.num_features() {
             return Err(pyo3::exceptions::PyIndexError::new_err(format!(
                 "feature index {} out of range (num_features={})",
@@ -238,7 +242,10 @@ impl PyBinnedDataset {
                 self.inner.num_features()
             )));
         }
-        Ok(PyArray1::from_slice(py, self.inner.feature_column(feature_idx)))
+        Ok(PyArray1::from_slice(
+            py,
+            self.inner.feature_column(feature_idx),
+        ))
     }
 
     /// Get bin value for a specific row and feature

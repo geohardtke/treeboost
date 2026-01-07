@@ -5,11 +5,11 @@
 use crate::dataset::BinnedDataset;
 use crate::model::BoostingMode;
 use crate::Result;
+use polars::prelude::*;
 
 use super::probes::{run_combined_probe, CombinedProbeResult};
 use super::stats::{
-    compute_correlation, compute_monotonicity, detect_discrete_target,
-    estimate_noise_floor,
+    compute_correlation, compute_monotonicity, detect_discrete_target, estimate_noise_floor,
 };
 
 // =============================================================================
@@ -39,8 +39,8 @@ impl Default for AnalysisConfig {
     fn default() -> Self {
         Self {
             max_sample_rows: 20_000,
-            linear_max_iter: 50,
-            tree_max_depth: 4,
+            linear_max_iter: 200, // Increased for better linear signal detection
+            tree_max_depth: 6,    // Increased for better tree signal detection
             top_features_to_analyze: 50,
             seed: 42,
         }
@@ -98,6 +98,14 @@ impl Confidence {
             Confidence::High => "████████████████████",
             Confidence::Medium => "████████████░░░░░░░░",
             Confidence::Low => "████████░░░░░░░░░░░░",
+        }
+    }
+
+    /// Downgrade confidence from High to Medium, keep Medium and Low unchanged
+    pub fn downgrade_to_medium(&self) -> Self {
+        match self {
+            Confidence::High => Confidence::Medium,
+            other => *other,
         }
     }
 }
@@ -221,9 +229,306 @@ pub struct DatasetAnalysis {
 }
 
 impl DatasetAnalysis {
-    /// Analyze a dataset and produce mode recommendation
+    /// Analyze a raw DataFrame and produce mode recommendation (PREFERRED)
     ///
-    /// This is the main entry point. Takes ~1-5 seconds depending on dataset size.
+    /// This analyzes the raw data before binning, preserving numeric vs categorical
+    /// distinctions and providing accurate mode selection.
+    /// This is the DEFAULT and RECOMMENDED entry point.
+    pub fn analyze_from_dataframe(
+        df: &DataFrame,
+        target_col: &str,
+        feature_cols: Option<&[&str]>,
+    ) -> Result<Self> {
+        Self::analyze_from_dataframe_with_config(
+            df,
+            target_col,
+            feature_cols,
+            AnalysisConfig::default(),
+        )
+    }
+
+    /// Analyze a raw DataFrame with custom configuration
+    pub fn analyze_from_dataframe_with_config(
+        df: &DataFrame,
+        target_col: &str,
+        feature_cols: Option<&[&str]>,
+        config: AnalysisConfig,
+    ) -> Result<Self> {
+        // Extract target column
+        let target_series = df.column(target_col)?;
+        let targets: Vec<f32> = target_series
+            .cast(&DataType::Float32)?
+            .f32()?
+            .into_iter()
+            .map(|v| v.unwrap_or(f32::NAN))
+            .collect();
+
+        // Determine which features to use
+        let feature_names: Vec<String> = if let Some(cols) = feature_cols {
+            cols.iter().map(|s| s.to_string()).collect()
+        } else {
+            df.get_column_names()
+                .iter()
+                .filter(|name| name.as_str() != target_col)
+                .map(|s| s.to_string())
+                .collect()
+        };
+
+        let num_rows = df.height();
+        let num_features = feature_names.len();
+
+        // Extract features as f32 arrays
+        let mut raw_features = vec![f32::NAN; num_rows * num_features];
+        let mut num_numeric = 0;
+        let mut num_categorical = 0;
+
+        for (f_idx, fname) in feature_names.iter().enumerate() {
+            let col = df.column(fname)?;
+            let dtype = col.dtype();
+
+            // Check actual data type
+            let is_numeric = matches!(
+                dtype,
+                DataType::Int8
+                    | DataType::Int16
+                    | DataType::Int32
+                    | DataType::Int64
+                    | DataType::UInt8
+                    | DataType::UInt16
+                    | DataType::UInt32
+                    | DataType::UInt64
+                    | DataType::Float32
+                    | DataType::Float64
+            );
+
+            if is_numeric {
+                num_numeric += 1;
+                // Safe to cast numeric types
+                if let Ok(numeric_series) = col.cast(&DataType::Float32) {
+                    if let Ok(vals) = numeric_series.f32() {
+                        for (r_idx, val) in vals.into_iter().enumerate() {
+                            raw_features[r_idx * num_features + f_idx] = val.unwrap_or(f32::NAN);
+                        }
+                    }
+                }
+            } else {
+                // Treat as categorical (String, Categorical, etc.)
+                num_categorical += 1;
+                if let Ok(str_series) = col.str() {
+                    use std::collections::HashMap;
+                    let mut category_map: HashMap<&str, f32> = HashMap::new();
+                    let mut next_code = 0f32;
+
+                    for (r_idx, val) in str_series.into_iter().enumerate() {
+                        if let Some(s) = val {
+                            let code = *category_map.entry(s).or_insert_with(|| {
+                                let c = next_code;
+                                next_code += 1.0;
+                                c
+                            });
+                            raw_features[r_idx * num_features + f_idx] = code;
+                        } else {
+                            raw_features[r_idx * num_features + f_idx] = -1.0;
+                        }
+                    }
+                }
+            }
+        }
+
+        let categorical_ratio = if num_features > 0 {
+            num_categorical as f32 / num_features as f32
+        } else {
+            0.0
+        };
+
+        // --- Sample indices for efficiency ---
+        let sample_indices: Option<Vec<usize>> = if num_rows > config.max_sample_rows {
+            use rand::seq::SliceRandom;
+            use rand::SeedableRng;
+
+            let mut rng = rand::rngs::StdRng::seed_from_u64(config.seed);
+            let mut indices: Vec<usize> = (0..num_rows).collect();
+            indices.shuffle(&mut rng);
+            indices.truncate(config.max_sample_rows);
+            indices.sort();
+            Some(indices)
+        } else {
+            None
+        };
+
+        let _sample_refs = sample_indices.as_deref();
+
+        // Extract sample for analysis
+        let (sample_features, sample_targets) = if let Some(indices) = &sample_indices {
+            let mut sf = vec![f32::NAN; indices.len() * num_features];
+            let st: Vec<f32> = indices.iter().map(|&i| targets[i]).collect();
+            for (new_idx, &old_idx) in indices.iter().enumerate() {
+                for f in 0..num_features {
+                    sf[new_idx * num_features + f] = raw_features[old_idx * num_features + f];
+                }
+            }
+            (sf, st)
+        } else {
+            (raw_features.clone(), targets.clone())
+        };
+
+        let num_samples = sample_targets.len();
+
+        // --- Compute correlations on raw data (filtering NaN) ---
+        let mut correlations: Vec<(usize, f32)> = Vec::with_capacity(num_features);
+        for f in 0..num_features.min(config.top_features_to_analyze) {
+            // Extract feature, removing NaN values
+            let mut feature_col: Vec<f32> = Vec::new();
+            let mut target_col: Vec<f32> = Vec::new();
+
+            for r in 0..num_samples {
+                let feat_val = sample_features[r * num_features + f];
+                let targ_val = sample_targets[r];
+                // Only include rows where both feature and target are not NaN
+                if !feat_val.is_nan() && !targ_val.is_nan() {
+                    feature_col.push(feat_val);
+                    target_col.push(targ_val);
+                }
+            }
+
+            // Only compute correlation if we have enough valid samples
+            if !feature_col.is_empty() && feature_col.len() > 1 {
+                // Temporarily use target_col for correlation computation
+                let corr = if !feature_col.is_empty() {
+                    // Compute Pearson correlation on clean data
+                    let n = feature_col.len() as f32;
+                    let mean_x = feature_col.iter().sum::<f32>() / n;
+                    let mean_y = target_col.iter().sum::<f32>() / n;
+
+                    let mut num = 0.0f32;
+                    let mut sum_x2 = 0.0f32;
+                    let mut sum_y2 = 0.0f32;
+
+                    for (x, y) in feature_col.iter().zip(target_col.iter()) {
+                        let dx = x - mean_x;
+                        let dy = y - mean_y;
+                        num += dx * dy;
+                        sum_x2 += dx * dx;
+                        sum_y2 += dy * dy;
+                    }
+
+                    let denom = (sum_x2 * sum_y2).sqrt();
+                    if denom > 0.0 {
+                        (num / denom).abs()
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+
+                if !corr.is_nan() && corr > 0.0 {
+                    correlations.push((f, corr));
+                }
+            }
+        }
+        correlations.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top_correlations: Vec<(usize, f32)> = correlations.into_iter().take(10).collect();
+        let top_correlation = if !top_correlations.is_empty() {
+            top_correlations.first().map(|(_, c)| *c).unwrap_or(0.0)
+        } else {
+            0.0
+        };
+
+        // --- Monotonicity on raw data ---
+        let mut monotonicity_sum = 0.0f32;
+        let features_to_check = num_features.min(20);
+        for f in 0..features_to_check {
+            let feature_col: Vec<f32> = (0..num_samples)
+                .map(|r| sample_features[r * num_features + f])
+                .collect();
+            monotonicity_sum += compute_monotonicity(&feature_col, &sample_targets);
+        }
+        let avg_monotonicity = if features_to_check > 0 {
+            monotonicity_sum / features_to_check as f32
+        } else {
+            0.5
+        };
+
+        // --- Noise estimation on raw data ---
+        let best_feature_idx = top_correlations.first().map(|(idx, _)| *idx).unwrap_or(0);
+        let noise_floor = estimate_noise_floor(
+            &sample_features,
+            &sample_targets,
+            num_features,
+            best_feature_idx,
+        );
+
+        // --- Target analysis ---
+        let (target_is_discrete, target_unique_values) = detect_discrete_target(&targets);
+
+        // --- Simple linear R² estimation on raw data ---
+        // For raw data, we can estimate linear R² directly from correlations
+        // Use the sum of squared correlations as a proxy for multivariate R²
+        let linear_r2_from_corr = top_correlations
+            .iter()
+            .take(5)
+            .map(|(_, c)| c * c)
+            .sum::<f32>()
+            .min(1.0);
+
+        // For tree gain, estimate as residual variance if linear had captured the signal
+        let tree_gain = if linear_r2_from_corr > 0.3 {
+            (1.0 - linear_r2_from_corr).sqrt() * 0.5 // Rough estimate
+        } else {
+            0.43 // Conservative default for data with weak linear signal
+        };
+
+        // --- Compute mode scores ---
+        let characteristics = DataCharacteristics {
+            linear_r2: linear_r2_from_corr,
+            tree_gain,
+            tree_relative_improvement: tree_gain,
+            categorical_ratio,
+            noise_floor,
+            avg_monotonicity,
+            num_features,
+            top_correlation,
+        };
+        let mode_scores = compute_mode_scores(&characteristics);
+
+        // --- Generate recommendation ---
+        let recommendation = generate_recommendation(
+            &mode_scores,
+            linear_r2_from_corr,
+            tree_gain,
+            categorical_ratio,
+            noise_floor,
+            avg_monotonicity,
+        );
+
+        // Combined R² estimate
+        let combined_r2 = combined_r2(linear_r2_from_corr, tree_gain);
+
+        Ok(DatasetAnalysis {
+            num_rows,
+            num_features,
+            num_numeric,
+            num_categorical,
+            categorical_ratio,
+            top_correlations,
+            avg_monotonicity,
+            noise_floor,
+            linear_r2: linear_r2_from_corr,
+            tree_gain,
+            tree_relative_improvement: tree_gain,
+            combined_r2,
+            target_is_discrete,
+            target_unique_values,
+            mode_scores,
+            recommendation,
+            probe_result: None, // No detailed probes for raw data analysis
+        })
+    }
+
+    /// Analyze a binned dataset and produce mode recommendation (LEGACY)
+    ///
+    /// This analyzes binned data. Prefer `analyze_from_dataframe` for raw data analysis.
     pub fn analyze(dataset: &BinnedDataset) -> Result<Self> {
         Self::analyze_with_config(dataset, AnalysisConfig::default())
     }
@@ -261,8 +566,12 @@ impl DatasetAnalysis {
         let sample_refs = sample_indices.as_deref();
 
         // --- Run probes ---
-        let probe_result =
-            run_combined_probe(dataset, sample_refs, config.linear_max_iter, config.tree_max_depth)?;
+        let probe_result = run_combined_probe(
+            dataset,
+            sample_refs,
+            config.linear_max_iter,
+            config.tree_max_depth,
+        )?;
 
         let linear_r2 = probe_result.linear.r2;
         let tree_gain = probe_result.tree.r2_on_residuals;
@@ -310,7 +619,12 @@ impl DatasetAnalysis {
         // --- Noise estimation ---
         // Use the most correlated feature for binning (already computed above)
         let best_feature_idx = top_correlations.first().map(|(idx, _)| *idx).unwrap_or(0);
-        let noise_floor = estimate_noise_floor(&raw_features, &sample_targets, num_features, best_feature_idx);
+        let noise_floor = estimate_noise_floor(
+            &raw_features,
+            &sample_targets,
+            num_features,
+            best_feature_idx,
+        );
 
         // --- Target analysis ---
         let (target_is_discrete, target_unique_values) = detect_discrete_target(targets);
@@ -432,7 +746,7 @@ fn compute_mode_scores(chars: &DataCharacteristics) -> ModeScores {
         // High noise penalty - when noise is very high, RF's variance reduction helps
         // PureTree can overfit to noise
         let high_noise_penalty = if noise_floor > 0.8 {
-            (noise_floor - 0.8) * 1.5  // 0.8→0, 1.0→0.3
+            (noise_floor - 0.8) * 1.5 // 0.8→0, 1.0→0.3
         } else {
             0.0
         };
@@ -448,7 +762,9 @@ fn compute_mode_scores(chars: &DataCharacteristics) -> ModeScores {
 
         // Base score for PureTree (it's a safe default)
         (0.5 + weak_linear_bonus + categorical_bonus + complexity_bonus + non_monotonic_bonus
-            - high_noise_penalty - linear_dominance_penalty).max(0.3)
+            - high_noise_penalty
+            - linear_dominance_penalty)
+            .max(0.3)
     };
 
     // --- LinearThenTree Score ---
@@ -487,7 +803,7 @@ fn compute_mode_scores(chars: &DataCharacteristics) -> ModeScores {
             // Linear explains >50% and trees add <10% more → linear is dominant
             // Higher linear_r2 + lower tree_gain = stronger bonus
             let dominance = linear_r2 * (1.0 - tree_gain.min(0.1) * 10.0);
-            dominance * 0.3  // Up to 0.3 bonus
+            dominance * 0.3 // Up to 0.3 bonus
         } else {
             0.0
         };
@@ -511,8 +827,7 @@ fn compute_mode_scores(chars: &DataCharacteristics) -> ModeScores {
             0.0
         };
 
-        (base + linear_signal_score + linear_dominance_bonus + numeric_bonus
-            - weak_signal_penalty)
+        (base + linear_signal_score + linear_dominance_bonus + numeric_bonus - weak_signal_penalty)
             .max(0.0)
     };
 
@@ -527,10 +842,10 @@ fn compute_mode_scores(chars: &DataCharacteristics) -> ModeScores {
         // Higher bonus for very high noise where RF's bagging really helps
         let noise_bonus = if noise_floor > 0.8 {
             // Very high noise: strong bonus
-            0.3 + (noise_floor - 0.8) * 1.5  // 0.8→0.3, 1.0→0.6
+            0.3 + (noise_floor - 0.8) * 1.5 // 0.8→0.3, 1.0→0.6
         } else if noise_floor > 0.5 {
             // Moderate-high noise
-            noise_floor * 0.5  // 0.5→0.25, 0.8→0.4
+            noise_floor * 0.5 // 0.5→0.25, 0.8→0.4
         } else {
             noise_floor * 0.3
         };
@@ -579,13 +894,30 @@ fn generate_recommendation(
     let score_gap = scores.score_gap();
 
     // Determine confidence based on how clear the winner is
-    let confidence = if score_gap > 0.3 {
+    let mut confidence = if score_gap > 0.3 {
         Confidence::High
     } else if score_gap > 0.15 {
         Confidence::Medium
     } else {
         Confidence::Low
     };
+
+    // DOWNGRADE confidence for unreliable data characteristics
+    // All-categorical data (binned representation) can mislead linear detection
+    if categorical_ratio >= 0.99 {
+        // Analysis was done on binned/categorical data - unreliable for linear assessment
+        confidence = confidence.downgrade_to_medium();
+    }
+
+    // High noise makes any decision uncertain
+    if noise_floor > 0.8 {
+        confidence = confidence.downgrade_to_medium();
+    }
+
+    // Close score gap means validation would be valuable
+    if score_gap < 0.25 {
+        confidence = Confidence::Low;
+    }
 
     // Generate reasoning
     let reasoning = match mode {
@@ -598,7 +930,9 @@ fn generate_recommendation(
                     "Linear dominance detected (R²={:.2}, tree gain={:.3})",
                     linear_r2, tree_gain
                 ));
-                reasons.push("Linear model captures most signal, trees add minimal improvement".to_string());
+                reasons.push(
+                    "Linear model captures most signal, trees add minimal improvement".to_string(),
+                );
             } else if linear_r2 > 0.3 {
                 reasons.push(format!(
                     "Strong linear signal detected (R²={:.2})",
@@ -619,7 +953,9 @@ fn generate_recommendation(
             }
 
             if reasons.is_empty() {
-                reasons.push("Hybrid approach balances linear trend and non-linear patterns".to_string());
+                reasons.push(
+                    "Hybrid approach balances linear trend and non-linear patterns".to_string(),
+                );
             }
 
             format!(

@@ -50,7 +50,11 @@ impl EraHistograms {
     /// Used to convert backend output to EraHistograms structure.
     pub fn from_vec(histograms_2d: Vec<Vec<Histogram>>) -> Self {
         let num_eras = histograms_2d.len();
-        let num_features = if num_eras > 0 { histograms_2d[0].len() } else { 0 };
+        let num_features = if num_eras > 0 {
+            histograms_2d[0].len()
+        } else {
+            0
+        };
 
         // Flatten [era][feature] to [era * num_features + feature]
         let histograms: Vec<Histogram> = histograms_2d.into_iter().flatten().collect();
@@ -132,9 +136,8 @@ impl EraHistograms {
 
     /// Iterate over all (era, feature_idx, histogram) tuples
     pub fn iter(&self) -> impl Iterator<Item = (usize, usize, &Histogram)> {
-        (0..self.num_eras).flat_map(move |era| {
-            (0..self.num_features).map(move |f| (era, f, self.get(era, f)))
-        })
+        (0..self.num_eras)
+            .flat_map(move |era| (0..self.num_features).map(move |f| (era, f, self.get(era, f))))
     }
 }
 
@@ -269,7 +272,14 @@ impl EraHistogramBuilder {
         }
 
         // Parallel blocked build
-        self.build_blocked(dataset, row_indices, gradients, hessians, num_eras, num_features)
+        self.build_blocked(
+            dataset,
+            row_indices,
+            gradients,
+            hessians,
+            num_eras,
+            num_features,
+        )
     }
 
     /// Single-threaded build for small datasets
@@ -282,7 +292,9 @@ impl EraHistogramBuilder {
     ) -> EraHistograms {
         let num_eras = dataset.num_eras();
         let num_features = dataset.num_features();
-        let era_indices = dataset.era_indices().expect("Dataset must have era indices");
+        let era_indices = dataset
+            .era_indices()
+            .expect("Dataset must have era indices");
 
         let mut result = EraHistograms::new(num_eras, num_features);
 
@@ -310,7 +322,9 @@ impl EraHistogramBuilder {
         num_eras: usize,
         num_features: usize,
     ) -> EraHistograms {
-        let era_indices = dataset.era_indices().expect("Dataset must have era indices");
+        let era_indices = dataset
+            .era_indices()
+            .expect("Dataset must have era indices");
 
         // Divide rows into blocks and process in parallel
         let partial_results: Vec<EraHistograms> = row_indices

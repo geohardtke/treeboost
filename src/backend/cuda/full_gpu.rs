@@ -78,13 +78,15 @@ impl FullCudaTreeBuilder {
         // Cache bins and grad/hess on GPU (once per tree)
         let bins = dataset.as_row_major();
         self.histogram_kernel.ensure_bins_cached(bins);
-        self.histogram_kernel.ensure_grad_hess_cached(gradients, hessians);
+        self.histogram_kernel
+            .ensure_grad_hess_cached(gradients, hessians);
         self.partition_kernel.ensure_bins_cached(bins);
 
         // Initial indices -> GPU
         let initial_indices: Vec<u32> = row_indices.iter().map(|&r| r as u32).collect();
         self.ensure_indices_capacity(num_rows, max_depth);
-        self.device.htod_copy_into(&initial_indices, self.d_indices_a.as_mut().unwrap());
+        self.device
+            .htod_copy_into(&initial_indices, self.d_indices_a.as_mut().unwrap());
 
         // Compute initial sums
         let total_gradient: f32 = row_indices.iter().map(|&i| gradients[i]).sum();
@@ -150,7 +152,9 @@ impl FullCudaTreeBuilder {
                     // Check if next node is sibling (same parent)
                     if i + 1 < current_level.len() {
                         let node_j = &current_level[i + 1];
-                        if node_i.parent_hist_idx == node_j.parent_hist_idx && node_i.parent_hist_idx.is_some() {
+                        if node_i.parent_hist_idx == node_j.parent_hist_idx
+                            && node_i.parent_hist_idx.is_some()
+                        {
                             // These are siblings - determine smaller
                             if node_i.count <= node_j.count {
                                 nodes_needing_gpu_hist.push(i);
@@ -187,11 +191,8 @@ impl FullCudaTreeBuilder {
 
             // Build histograms only for nodes that need GPU computation
             let gpu_histograms = if !node_ranges.is_empty() {
-                self.histogram_kernel.build_histograms_gpu(
-                    d_indices,
-                    &node_ranges,
-                    num_features,
-                )
+                self.histogram_kernel
+                    .build_histograms_gpu(d_indices, &node_ranges, num_features)
             } else {
                 Vec::new()
             };
@@ -280,28 +281,21 @@ impl FullCudaTreeBuilder {
             let partition_results = if use_buffer_a {
                 let d_input = self.d_indices_a.as_ref().unwrap();
                 let d_output = self.d_indices_b.as_mut().unwrap();
-                self.partition_kernel.partition_fused(
-                    d_input,
-                    d_output,
-                    &node_splits,
-                    num_features,
-                )
+                self.partition_kernel
+                    .partition_fused(d_input, d_output, &node_splits, num_features)
             } else {
                 let d_input = self.d_indices_b.as_ref().unwrap();
                 let d_output = self.d_indices_a.as_mut().unwrap();
-                self.partition_kernel.partition_fused(
-                    d_input,
-                    d_output,
-                    &node_splits,
-                    num_features,
-                )
+                self.partition_kernel
+                    .partition_fused(d_input, d_output, &node_splits, num_features)
             };
 
             // Build next level and update tree
             let mut next_level: Vec<LevelNode> = Vec::new();
 
             for (split_idx, ((split, orig_node_idx), &(output_start, left_cnt, right_cnt))) in
-                splits_and_nodes.iter()
+                splits_and_nodes
+                    .iter()
                     .zip(partition_results.iter())
                     .enumerate()
             {
@@ -314,14 +308,28 @@ impl FullCudaTreeBuilder {
                 // Validate gradient/hessian sums (catches histogram computation bugs)
                 // Use relative error (1e-3 = 0.1%) to handle both large and small values
                 debug_assert!(
-                    approx_equal_relative(node.sum_gradients, split.left_gradient + split.right_gradient, 1e-3),
+                    approx_equal_relative(
+                        node.sum_gradients,
+                        split.left_gradient + split.right_gradient,
+                        1e-3
+                    ),
                     "Gradient sum mismatch in node {}: left({}) + right({}) != parent({})",
-                    node.node_idx, split.left_gradient, split.right_gradient, node.sum_gradients
+                    node.node_idx,
+                    split.left_gradient,
+                    split.right_gradient,
+                    node.sum_gradients
                 );
                 debug_assert!(
-                    approx_equal_relative(node.sum_hessians, split.left_hessian + split.right_hessian, 1e-3),
+                    approx_equal_relative(
+                        node.sum_hessians,
+                        split.left_hessian + split.right_hessian,
+                        1e-3
+                    ),
                     "Hessian sum mismatch in node {}: left({}) + right({}) != parent({})",
-                    node.node_idx, split.left_hessian, split.right_hessian, node.sum_hessians
+                    node.node_idx,
+                    split.left_hessian,
+                    split.right_hessian,
+                    node.sum_hessians
                 );
 
                 let current_node = tree.get_node(node.node_idx);

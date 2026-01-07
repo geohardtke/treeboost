@@ -108,8 +108,7 @@ fn test_console_progress_callback() {
     let df = create_test_dataset(150);
 
     // Use the built-in console progress
-    let builder = AutoBuilder::new()
-        .with_progress_callback(Arc::new(ConsoleProgress::detailed()));
+    let builder = AutoBuilder::new().with_progress_callback(Arc::new(ConsoleProgress::detailed()));
 
     let _result = builder.fit(&df, "target").expect("Training should succeed");
 
@@ -144,10 +143,7 @@ fn test_progress_with_time_budget() {
     );
 
     // Check that messages reflect skipped phases
-    let messages: Vec<String> = updates
-        .iter()
-        .filter_map(|u| u.message.clone())
-        .collect();
+    let messages: Vec<String> = updates.iter().filter_map(|u| u.message.clone()).collect();
 
     println!("Progress messages with time budget:");
     for msg in &messages {

@@ -232,14 +232,8 @@ impl FeatureBundler {
         ordered_sparse.sort_by_key(|&f| feature_stats[f].non_zero_count);
 
         // Step 4: Greedy bundling
-        let max_conflicts =
-            ((num_rows as f32) * self.config.max_conflict_ratio).ceil() as usize;
-        let bundles = self.greedy_bundle(
-            dataset,
-            &feature_stats,
-            &ordered_sparse,
-            max_conflicts,
-        );
+        let max_conflicts = ((num_rows as f32) * self.config.max_conflict_ratio).ceil() as usize;
+        let bundles = self.greedy_bundle(dataset, &feature_stats, &ordered_sparse, max_conflicts);
 
         // Step 5: Add remaining dense features as single-feature bundles
         let bundled_features: std::collections::HashSet<usize> = bundles
@@ -322,10 +316,8 @@ impl FeatureBundler {
                 }
 
                 // Check conflict constraint (expensive)
-                let conflicts = self.count_conflicts(
-                    &stats.non_zero_indices,
-                    &bundle.non_zero_union,
-                );
+                let conflicts =
+                    self.count_conflicts(&stats.non_zero_indices, &bundle.non_zero_union);
                 if conflicts <= max_conflicts {
                     // Add to this bundle
                     let bundle = &mut bundles[i];
@@ -372,7 +364,8 @@ impl FeatureBundler {
         let mut j = 0;
 
         // Get max conflicts from config for early termination
-        let max_conflicts = ((feature_indices.len() as f32) * self.config.max_conflict_ratio * 10.0) as usize + 1;
+        let max_conflicts =
+            ((feature_indices.len() as f32) * self.config.max_conflict_ratio * 10.0) as usize + 1;
 
         while i < feature_indices.len() && j < bundle_union.len() {
             match feature_indices[i].cmp(&bundle_union[j]) {
@@ -425,7 +418,11 @@ impl FeatureBundler {
         let bundles: Vec<FeatureBundle> = (0..num_features)
             .map(|f| {
                 let info = dataset.feature_info(f);
-                FeatureBundle::new(vec![f], std::slice::from_ref(&info.num_bins), std::slice::from_ref(&info.name))
+                FeatureBundle::new(
+                    vec![f],
+                    std::slice::from_ref(&info.num_bins),
+                    std::slice::from_ref(&info.name),
+                )
             })
             .collect();
 
@@ -789,11 +786,7 @@ mod tests {
 
     #[test]
     fn test_bin_offset_mapping() {
-        let bundle = FeatureBundle::new(
-            vec![0, 1],
-            &[5, 3],
-            &["a".to_string(), "b".to_string()],
-        );
+        let bundle = FeatureBundle::new(vec![0, 1], &[5, 3], &["a".to_string(), "b".to_string()]);
 
         // Feature 0: bins 0-4 (5 bins)
         // Feature 1: bins 5-7 (3 bins, offset by 5)

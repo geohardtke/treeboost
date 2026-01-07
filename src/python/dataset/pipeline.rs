@@ -82,7 +82,10 @@ impl PyPipelineConfig {
             ));
         }
         Ok(Self {
-            inner: self.inner.clone().with_cms_params(eps, confidence, min_count),
+            inner: self
+                .inner
+                .clone()
+                .with_cms_params(eps, confidence, min_count),
         })
     }
 
@@ -162,11 +165,7 @@ impl PyPipelineState {
     /// Get feature info for all columns
     #[getter]
     fn feature_info(&self) -> Vec<PyFeatureInfo> {
-        self.inner
-            .feature_info
-            .iter()
-            .map(|fi| fi.into())
-            .collect()
+        self.inner.feature_info.iter().map(|fi| fi.into()).collect()
     }
 
     /// Column names in order
@@ -288,7 +287,8 @@ impl PyDataPipeline {
             .map(|v| v.iter().map(|s| s.as_str()).collect());
 
         let result = py.allow_threads(|| {
-            self.inner.load_csv_for_training(path, target, cat_refs.as_deref())
+            self.inner
+                .load_csv_for_training(path, target, cat_refs.as_deref())
         });
 
         match result {
@@ -330,7 +330,8 @@ impl PyDataPipeline {
             .map(|v| v.iter().map(|s| s.as_str()).collect());
 
         let result = py.allow_threads(|| {
-            self.inner.load_parquet_for_training(path, target, cat_refs.as_deref())
+            self.inner
+                .load_parquet_for_training(path, target, cat_refs.as_deref())
         });
 
         match result {
@@ -360,9 +361,7 @@ impl PyDataPipeline {
         path: &str,
         state: &PyPipelineState,
     ) -> PyResult<PyBinnedDataset> {
-        let result = py.allow_threads(|| {
-            self.inner.load_csv_for_inference(path, &state.inner)
-        });
+        let result = py.allow_threads(|| self.inner.load_csv_for_inference(path, &state.inner));
 
         match result {
             Ok(dataset) => Ok(PyBinnedDataset::from(dataset)),
@@ -389,9 +388,7 @@ impl PyDataPipeline {
         path: &str,
         state: &PyPipelineState,
     ) -> PyResult<PyBinnedDataset> {
-        let result = py.allow_threads(|| {
-            self.inner.load_parquet_for_inference(path, &state.inner)
-        });
+        let result = py.allow_threads(|| self.inner.load_parquet_for_inference(path, &state.inner));
 
         match result {
             Ok(dataset) => Ok(PyBinnedDataset::from(dataset)),

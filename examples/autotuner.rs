@@ -77,9 +77,7 @@ fn main() {
     println!("-------------------------------------------------------------\n");
 
     // Create base configuration (non-tuned parameters)
-    let base_config = GBDTConfig::new()
-        .with_num_rounds(50)
-        .with_seed(123);
+    let base_config = GBDTConfig::new().with_num_rounds(50).with_seed(123);
 
     // Create tuner with default regression parameter space
     let tuner_config = TunerConfig::new()
@@ -113,8 +111,8 @@ fn main() {
 
     // Train final model with best config
     println!("\nTraining final model with best configuration...");
-    let final_model = GBDTModel::train_binned(&dataset, best_config.clone())
-        .expect("Training should succeed");
+    let final_model =
+        GBDTModel::train_binned(&dataset, best_config.clone()).expect("Training should succeed");
 
     let predictions = final_model.predict(&dataset);
     let mse: f32 = predictions
@@ -135,7 +133,11 @@ fn main() {
     // Define custom parameter space
     let custom_space = ParameterSpace::new()
         .with_param("max_depth", ParamBounds::discrete(3, 10), 6.0)
-        .with_param("learning_rate", ParamBounds::log_continuous(0.005, 0.5), 0.05)
+        .with_param(
+            "learning_rate",
+            ParamBounds::log_continuous(0.005, 0.5),
+            0.05,
+        )
         .with_param("subsample", ParamBounds::continuous(0.6, 1.0), 0.8)
         .with_param("lambda", ParamBounds::continuous(0.0, 5.0), 1.0);
 
@@ -259,7 +261,10 @@ fn main() {
     if let Some(best) = history.best() {
         println!("\nBest trial:");
         println!("  val_metric (MSE): {:.6}", best.val_metric);
-        println!("  num_trees: {} (early stopped from max 200)", best.num_trees);
+        println!(
+            "  num_trees: {} (early stopped from max 200)",
+            best.num_trees
+        );
     }
 
     // Show tree counts distribution (demonstrates early stopping)
@@ -295,7 +300,9 @@ fn main() {
     println!("  Formats: rkyv (zero-copy) and bincode (compact)\n");
 
     let start = Instant::now();
-    let (best_config, history) = tuner.tune(&dataset).expect("Tuning with save should succeed");
+    let (best_config, history) = tuner
+        .tune(&dataset)
+        .expect("Tuning with save should succeed");
     let elapsed = start.elapsed();
 
     println!("\n--- Results ---");
@@ -315,7 +322,14 @@ fn main() {
     if let Ok(entries) = std::fs::read_dir(output_dir) {
         for entry in entries.flatten() {
             let run_dir = entry.path();
-            if run_dir.is_dir() && run_dir.file_name().unwrap().to_str().unwrap().starts_with("run_") {
+            if run_dir.is_dir()
+                && run_dir
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("run_")
+            {
                 println!("Run directory: {}", run_dir.display());
 
                 // List files in run directory
@@ -323,7 +337,11 @@ fn main() {
                     for file in files.flatten() {
                         let path = file.path();
                         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                        println!("  {} ({} bytes)", path.file_name().unwrap().to_str().unwrap(), size);
+                        println!(
+                            "  {} ({} bytes)",
+                            path.file_name().unwrap().to_str().unwrap(),
+                            size
+                        );
                     }
                 }
 
@@ -342,7 +360,8 @@ fn main() {
                         .unwrap()
                         .predict(&dataset);
                     let loaded_preds = loaded.predict(&dataset);
-                    let max_diff: f32 = orig_preds.iter()
+                    let max_diff: f32 = orig_preds
+                        .iter()
                         .zip(loaded_preds.iter())
                         .map(|(a, b)| (a - b).abs())
                         .fold(0.0, f32::max);

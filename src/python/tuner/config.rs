@@ -11,7 +11,9 @@ use pyo3::prelude::*;
 
 use crate::tuner::{ModelFormat, ParamBounds, ParameterSpace, TunerConfig};
 
-use super::enums::{PyEvalStrategy, PyGridStrategy, PyModelFormat, PyOptimizationMetric, PyTaskType, PyTuningMode};
+use super::enums::{
+    PyEvalStrategy, PyGridStrategy, PyModelFormat, PyOptimizationMetric, PyTaskType, PyTuningMode,
+};
 
 /// Python wrapper for ParamBounds
 ///
@@ -140,7 +142,11 @@ impl PyParamBounds {
 
     fn __repr__(&self) -> String {
         match &self.inner {
-            ParamBounds::Continuous { min, max, log_scale } => {
+            ParamBounds::Continuous {
+                min,
+                max,
+                log_scale,
+            } => {
                 if *log_scale {
                     format!("ParamBounds.log_continuous({}, {})", min, max)
                 } else {
@@ -224,7 +230,10 @@ impl PyParameterSpace {
     ///     Self for method chaining
     fn with_param(&self, name: &str, bounds: &PyParamBounds, center: f32) -> Self {
         Self {
-            inner: self.inner.clone().with_param(name, bounds.inner.clone(), center),
+            inner: self
+                .inner
+                .clone()
+                .with_param(name, bounds.inner.clone(), center),
         }
     }
 
@@ -245,7 +254,10 @@ impl PyParameterSpace {
             ));
         }
         Ok(Self {
-            inner: self.inner.clone().with_param(name, ParamBounds::continuous(min, max), center),
+            inner: self
+                .inner
+                .clone()
+                .with_param(name, ParamBounds::continuous(min, max), center),
         })
     }
 
@@ -271,7 +283,11 @@ impl PyParameterSpace {
             ));
         }
         Ok(Self {
-            inner: self.inner.clone().with_param(name, ParamBounds::log_continuous(min, max), center),
+            inner: self.inner.clone().with_param(
+                name,
+                ParamBounds::log_continuous(min, max),
+                center,
+            ),
         })
     }
 
@@ -292,7 +308,10 @@ impl PyParameterSpace {
             ));
         }
         Ok(Self {
-            inner: self.inner.clone().with_param(name, ParamBounds::discrete(min, max), center),
+            inner: self
+                .inner
+                .clone()
+                .with_param(name, ParamBounds::discrete(min, max), center),
         })
     }
 
@@ -307,7 +326,14 @@ impl PyParameterSpace {
     ///
     /// Returns:
     ///     Self for method chaining
-    fn add_integer_range(&self, name: &str, min: usize, max: usize, step: usize, center: f32) -> PyResult<Self> {
+    fn add_integer_range(
+        &self,
+        name: &str,
+        min: usize,
+        max: usize,
+        step: usize,
+        center: f32,
+    ) -> PyResult<Self> {
         if min >= max {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "min must be less than max",
@@ -319,7 +345,11 @@ impl PyParameterSpace {
             ));
         }
         Ok(Self {
-            inner: self.inner.clone().with_param(name, ParamBounds::discrete_step(min, max, step), center),
+            inner: self.inner.clone().with_param(
+                name,
+                ParamBounds::discrete_step(min, max, step),
+                center,
+            ),
         })
     }
 
@@ -361,9 +391,9 @@ impl PyParameterSpace {
 
     /// Validate the parameter space
     fn validate(&self) -> PyResult<()> {
-        self.inner.validate().map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(e)
-        })
+        self.inner
+            .validate()
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
     }
 
     fn __repr__(&self) -> String {
@@ -510,7 +540,10 @@ impl PyTunerConfig {
             ));
         }
         Ok(Self {
-            inner: self.inner.clone().with_early_stopping(rounds, validation_ratio),
+            inner: self
+                .inner
+                .clone()
+                .with_early_stopping(rounds, validation_ratio),
         })
     }
 
@@ -722,14 +755,17 @@ impl PyTunerConfig {
     /// Output directory (None if not set)
     #[getter]
     fn output_dir(&self) -> Option<String> {
-        self.inner.output_dir.as_ref().map(|p| p.to_string_lossy().to_string())
+        self.inner
+            .output_dir
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
     }
 
     /// Validate the configuration
     fn validate(&self) -> PyResult<()> {
-        self.inner.validate().map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(e)
-        })
+        self.inner
+            .validate()
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
     }
 
     /// Estimate total number of trials
@@ -745,9 +781,7 @@ impl PyTunerConfig {
     fn __repr__(&self) -> String {
         format!(
             "TunerConfig(iterations={}, rounds={}, grid={:?})",
-            self.inner.n_iterations,
-            self.inner.num_rounds,
-            self.inner.grid_strategy
+            self.inner.n_iterations, self.inner.num_rounds, self.inner.grid_strategy
         )
     }
 }

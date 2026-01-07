@@ -24,7 +24,10 @@ impl ConformalPredictor {
     /// * `residuals` - Absolute residuals |y - ŷ| from calibration set
     /// * `coverage` - Desired coverage level (e.g., 0.9 for 90%)
     pub fn from_residuals(residuals: &[f32], coverage: f32) -> Self {
-        assert!(coverage > 0.0 && coverage < 1.0, "coverage must be in (0, 1)");
+        assert!(
+            coverage > 0.0 && coverage < 1.0,
+            "coverage must be in (0, 1)"
+        );
 
         let quantile = Self::compute_quantile(residuals, coverage);
 

@@ -26,8 +26,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 ///
 /// Contains only tree hyperparameters. Backend selection is a runtime concern
 /// handled separately by TreeBooster.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
 pub struct TreeConfig {
     /// Maximum depth of tree
     pub max_depth: usize,
@@ -158,7 +157,11 @@ impl TreeConfig {
     /// # Arguments
     /// - `num_features`: Number of features in dataset
     /// - `backend`: Optional backend override (uses Auto if None)
-    pub(crate) fn build_grower(&self, num_features: usize, backend: Option<BackendType>) -> TreeGrower {
+    pub(crate) fn build_grower(
+        &self,
+        num_features: usize,
+        backend: Option<BackendType>,
+    ) -> TreeGrower {
         let interaction_constraints = if self.interaction_groups.is_empty() {
             InteractionConstraints::new()
         } else {
@@ -374,8 +377,7 @@ impl TreeBooster {
 // =============================================================================
 
 /// Serializable version of TreeBooster (tree + config only)
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
 pub struct SerializableTreeBooster {
     /// The trained tree
     pub tree: Option<Tree>,
@@ -473,12 +475,12 @@ mod tests {
         let gradients: Vec<f32> = (0..100).map(|i| if i < 50 { -1.0 } else { 1.0 }).collect();
         let hessians = vec![1.0; 100];
 
-        let config = TreeConfig::default()
-            .with_max_depth(3)
-            .with_min_gain(0.0);
+        let config = TreeConfig::default().with_max_depth(3).with_min_gain(0.0);
 
         let mut booster = TreeBooster::new(config);
-        booster.fit_on_gradients(&dataset, &gradients, &hessians, None).unwrap();
+        booster
+            .fit_on_gradients(&dataset, &gradients, &hessians, None)
+            .unwrap();
 
         assert!(booster.is_fitted());
         assert!(booster.tree().is_some());
@@ -493,7 +495,9 @@ mod tests {
 
         let config = TreeConfig::default();
         let mut booster = TreeBooster::new(config);
-        booster.fit_on_gradients(&dataset, &gradients, &hessians, None).unwrap();
+        booster
+            .fit_on_gradients(&dataset, &gradients, &hessians, None)
+            .unwrap();
 
         let predictions = booster.predict_batch(&dataset);
         assert_eq!(predictions.len(), 100);
@@ -512,7 +516,9 @@ mod tests {
 
         let config = TreeConfig::default();
         let mut booster = TreeBooster::new(config);
-        booster.fit_on_gradients(&dataset, &gradients, &hessians, None).unwrap();
+        booster
+            .fit_on_gradients(&dataset, &gradients, &hessians, None)
+            .unwrap();
 
         // Predict batch
         let batch_preds = booster.predict_batch(&dataset);
@@ -538,7 +544,9 @@ mod tests {
 
         let config = TreeConfig::default();
         let mut booster = TreeBooster::new(config);
-        booster.fit_on_gradients(&dataset, &gradients, &hessians, Some(&row_indices)).unwrap();
+        booster
+            .fit_on_gradients(&dataset, &gradients, &hessians, Some(&row_indices))
+            .unwrap();
 
         assert!(booster.is_fitted());
     }
@@ -551,7 +559,9 @@ mod tests {
 
         let config = TreeConfig::default();
         let mut booster = TreeBooster::new(config);
-        booster.fit_on_gradients(&dataset, &gradients, &hessians, None).unwrap();
+        booster
+            .fit_on_gradients(&dataset, &gradients, &hessians, None)
+            .unwrap();
 
         assert!(booster.is_fitted());
         booster.reset();
@@ -566,7 +576,9 @@ mod tests {
 
         let config = TreeConfig::default();
         let mut booster = TreeBooster::new(config);
-        booster.fit_on_gradients(&dataset, &gradients, &hessians, None).unwrap();
+        booster
+            .fit_on_gradients(&dataset, &gradients, &hessians, None)
+            .unwrap();
 
         // Convert to serializable
         let ser: SerializableTreeBooster = booster.into();

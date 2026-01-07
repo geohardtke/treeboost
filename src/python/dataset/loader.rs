@@ -82,10 +82,8 @@ impl PyDatasetLoader {
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
 
-        let result = py.allow_threads(|| {
-            self.inner
-                .load_csv(path, target, feature_refs.as_deref())
-        });
+        let result =
+            py.allow_threads(|| self.inner.load_csv(path, target, feature_refs.as_deref()));
 
         match result {
             Ok(dataset) => Ok(PyBinnedDataset::from(dataset)),
@@ -164,7 +162,9 @@ impl PyDatasetLoader {
 
         // Generate feature names if not provided
         let names: Vec<String> = feature_names.unwrap_or_else(|| {
-            (0..num_features).map(|i| format!("feature_{}", i)).collect()
+            (0..num_features)
+                .map(|i| format!("feature_{}", i))
+                .collect()
         });
 
         if names.len() != num_features {
@@ -231,14 +231,9 @@ impl PyDatasetLoader {
         path: &str,
         feature_info: Vec<PyFeatureInfo>,
     ) -> PyResult<PyBinnedDataset> {
-        let info_vec: Vec<FeatureInfo> = feature_info
-            .into_iter()
-            .map(|fi| fi.into())
-            .collect();
+        let info_vec: Vec<FeatureInfo> = feature_info.into_iter().map(|fi| fi.into()).collect();
 
-        let result = py.allow_threads(|| {
-            self.inner.load_csv_for_prediction(path, &info_vec)
-        });
+        let result = py.allow_threads(|| self.inner.load_csv_for_prediction(path, &info_vec));
 
         match result {
             Ok(dataset) => Ok(PyBinnedDataset::from(dataset)),
@@ -265,14 +260,9 @@ impl PyDatasetLoader {
         path: &str,
         feature_info: Vec<PyFeatureInfo>,
     ) -> PyResult<PyBinnedDataset> {
-        let info_vec: Vec<FeatureInfo> = feature_info
-            .into_iter()
-            .map(|fi| fi.into())
-            .collect();
+        let info_vec: Vec<FeatureInfo> = feature_info.into_iter().map(|fi| fi.into()).collect();
 
-        let result = py.allow_threads(|| {
-            self.inner.load_parquet_for_prediction(path, &info_vec)
-        });
+        let result = py.allow_threads(|| self.inner.load_parquet_for_prediction(path, &info_vec));
 
         match result {
             Ok(dataset) => Ok(PyBinnedDataset::from(dataset)),

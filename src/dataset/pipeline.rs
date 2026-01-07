@@ -127,7 +127,7 @@ impl DataPipeline {
         path: impl AsRef<Path>,
         target_column: &str,
         categorical_columns: Option<&[&str]>,
-    ) -> Result<(BinnedDataset, PipelineState)> {
+    ) -> Result<(BinnedDataset, PipelineState, DataFrame)> {
         let df = CsvReadOptions::default()
             .try_into_reader_with_file_path(Some(path.as_ref().to_path_buf()))?
             .finish()?;
@@ -140,7 +140,7 @@ impl DataPipeline {
         path: impl AsRef<Path>,
         target_column: &str,
         categorical_columns: Option<&[&str]>,
-    ) -> Result<(BinnedDataset, PipelineState)> {
+    ) -> Result<(BinnedDataset, PipelineState, DataFrame)> {
         let pl_path = PlPath::new(&path.as_ref().to_string_lossy());
         let df = LazyFrame::scan_parquet(pl_path, Default::default())?.collect()?;
         self.process_for_training(df, target_column, categorical_columns)
@@ -154,15 +154,44 @@ impl DataPipeline {
         df: DataFrame,
         target_column: &str,
         categorical_columns: Option<&[&str]>,
-    ) -> Result<(BinnedDataset, PipelineState)> {
+    ) -> Result<(BinnedDataset, PipelineState, DataFrame)> {
+        eprintln!(
+            "[PHASE1 DataPipeline] Input DataFrame: {} rows, {} cols",
+            df.height(),
+            df.width()
+        );
+        eprintln!(
+            "[PHASE1 DataPipeline] Column names: {:?}",
+            df.get_column_names()
+        );
+
         let num_rows = df.height();
 
         // Extract target column
         let target_col = df.column(target_column).map_err(|e| {
-            TreeBoostError::Data(format!("Target column '{}' not found: {}", target_column, e))
+            TreeBoostError::Data(format!(
+                "Target column '{}' not found: {}",
+                target_column, e
+            ))
         })?;
         let targets: Vec<f64> = self.series_to_f64(target_col.as_materialized_series())?;
-        let targets_f32: Vec<f32> = targets.iter().map(|&t| t as f32).collect();
+
+        // Fill NaN targets with 0 instead of filtering rows
+        // This preserves all data and allows the model to learn from patterns
+        let mut targets_filled: Vec<f64> = targets;
+        for t in targets_filled.iter_mut() {
+            if t.is_nan() {
+                *t = 0.0;
+            }
+        }
+
+        // Convert to f32 for training
+        let targets_f32: Vec<f32> = targets_filled.iter().map(|&t| t as f32).collect();
+
+        // Keep f64 version for categorical encoding
+        let targets_filtered: Vec<f64> = targets_filled;
+
+        let num_rows = targets_f32.len();
 
         // Determine feature columns (excluding target)
         let feature_names: Vec<String> = df
@@ -204,7 +233,7 @@ impl DataPipeline {
             if categorical_set.contains(name.as_str()) {
                 // Categorical column: CMS filter → Target Encode → Bin
                 let (binned, info, encoding_state) =
-                    self.process_categorical_column(name.clone(), series, &targets)?;
+                    self.process_categorical_column(name.clone(), series, &targets_filtered)?;
                 all_binned.push(binned);
                 all_info.push(info);
                 categorical_encodings.push(encoding_state);
@@ -223,7 +252,20 @@ impl DataPipeline {
             features.extend(binned_col);
         }
 
-        let dataset = BinnedDataset::new(num_rows, features, targets_f32, all_info.clone());
+        let dataset = BinnedDataset::new(num_rows, features, targets_f32.clone(), all_info.clone());
+
+        eprintln!(
+            "[PHASE2 DataPipeline] After binning: {} rows, {} features",
+            num_rows,
+            all_info.len()
+        );
+        eprintln!("[PHASE2 DataPipeline] Feature names: {:?}", feature_names);
+        eprintln!(
+            "[PHASE2 DataPipeline] Targets: len={}, mean={:.4}, first 5: {:?}",
+            targets_f32.len(),
+            targets_f32.iter().sum::<f32>() / targets_f32.len() as f32,
+            &targets_f32[..targets_f32.len().min(5)]
+        );
 
         let state = PipelineState {
             feature_info: all_info,
@@ -232,7 +274,7 @@ impl DataPipeline {
             categorical_indices,
         };
 
-        Ok((dataset, state))
+        Ok((dataset, state, df))
     }
 
     /// Load and process a CSV file for inference using learned state
@@ -264,6 +306,17 @@ impl DataPipeline {
         df: DataFrame,
         state: &PipelineState,
     ) -> Result<BinnedDataset> {
+        eprintln!(
+            "[DEBUG process_for_inference] Input df: {} rows, {} cols",
+            df.height(),
+            df.width()
+        );
+        eprintln!(
+            "[DEBUG process_for_inference] State has {} features, {} categorical",
+            state.feature_info.len(),
+            state.categorical_indices.len()
+        );
+
         let num_rows = df.height();
 
         // Build lookup for categorical encoding states
@@ -285,6 +338,10 @@ impl DataPipeline {
             let series = col.as_materialized_series();
 
             if cat_indices_set.contains(&col_idx) {
+                eprintln!(
+                    "[DEBUG process_for_inference] Column {}: '{}' - CATEGORICAL",
+                    col_idx, name
+                );
                 // Categorical: use learned encoding
                 let encoding_state = cat_state_map.get(name.as_str()).ok_or_else(|| {
                     TreeBoostError::Data(format!(
@@ -295,6 +352,10 @@ impl DataPipeline {
                 let binned = self.apply_categorical_encoding(series, encoding_state)?;
                 all_binned.push(binned);
             } else {
+                eprintln!(
+                    "[DEBUG process_for_inference] Column {}: '{}' - NUMERIC",
+                    col_idx, name
+                );
                 // Numeric: use learned bin boundaries
                 let info = &state.feature_info[col_idx];
                 let binned = self.apply_numeric_binning(series, info)?;
@@ -325,7 +386,37 @@ impl DataPipeline {
         name: String,
         series: &Series,
     ) -> Result<(Vec<u8>, FeatureInfo)> {
-        let values = self.series_to_f64(series)?;
+        let mut values = self.series_to_f64(series)?;
+
+        if name == "id" {
+            eprintln!(
+                "[DEBUG process_numeric_column TRAINING] Feature 'id': first 5 values: {:?}",
+                &values[..values.len().min(5)]
+            );
+        }
+
+        // Impute NaN values with median (more robust than mean for outliers)
+        let non_nan_values: Vec<f64> = values.iter().copied().filter(|v| !v.is_nan()).collect();
+        let impute_value = if !non_nan_values.is_empty() {
+            // Compute median
+            let mut sorted = non_nan_values.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mid = sorted.len() / 2;
+            if sorted.len() % 2 == 0 {
+                (sorted[mid - 1] + sorted[mid]) / 2.0
+            } else {
+                sorted[mid]
+            }
+        } else {
+            0.0 // If all values are NaN, use 0
+        };
+
+        // Replace NaN with imputed value
+        for v in values.iter_mut() {
+            if v.is_nan() {
+                *v = impute_value;
+            }
+        }
 
         // Compute bin boundaries using T-Digest
         let boundaries = self.binner.compute_boundaries(&values);
@@ -369,7 +460,12 @@ impl DataPipeline {
         }
 
         // Collect unique categories and finalize
-        let unique: Vec<String> = categories.iter().cloned().collect::<std::collections::HashSet<_>>().into_iter().collect();
+        let unique: Vec<String> = categories
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
         filter.finalize(unique);
 
         // Filter rare categories to "unknown"
@@ -442,16 +538,33 @@ impl DataPipeline {
             .map(|&v| QuantileBinner::bin_value(v, &state.bin_boundaries))
             .collect();
 
+        eprintln!("[DEBUG apply_categorical_encoding] Feature '{}': {} bins, first 5 encoded: {:?}, first 5 bins: {:?}",
+            state.name, state.bin_boundaries.len(), &encoded[..encoded.len().min(5)], &binned[..binned.len().min(5)]);
+
         Ok(binned)
     }
 
     /// Apply learned numeric binning for inference
     fn apply_numeric_binning(&self, series: &Series, info: &FeatureInfo) -> Result<Vec<u8>> {
         let values = self.series_to_f64(series)?;
+
+        eprintln!(
+            "[DEBUG apply_numeric_binning] Feature '{}': {} boundaries, first 5 values: {:?}",
+            info.name,
+            info.bin_boundaries.len(),
+            &values[..values.len().min(5)]
+        );
+
         let binned: Vec<u8> = values
             .iter()
             .map(|&v| QuantileBinner::bin_value(v, &info.bin_boundaries))
             .collect();
+
+        eprintln!(
+            "[DEBUG apply_numeric_binning] First 5 bins: {:?}",
+            &binned[..binned.len().min(5)]
+        );
+
         Ok(binned)
     }
 
@@ -498,9 +611,8 @@ mod tests {
         .unwrap();
 
         let pipeline = DataPipeline::new(PipelineConfig::new().with_num_bins(4));
-        let (dataset, state) = pipeline
-            .process_for_training(df, "target", None)
-            .unwrap();
+        let (dataset, state, _filtered_df) =
+            pipeline.process_for_training(df, "target", None).unwrap();
 
         assert_eq!(dataset.num_rows(), 10);
         assert_eq!(dataset.num_features(), 2);
@@ -524,7 +636,7 @@ mod tests {
                 .with_smoothing(1.0),
         );
 
-        let (dataset, state) = pipeline
+        let (dataset, state, _filtered_df) = pipeline
             .process_for_training(df, "target", Some(&["category"]))
             .unwrap();
 
@@ -559,7 +671,7 @@ mod tests {
                 .with_smoothing(1.0),
         );
 
-        let (_train_dataset, state) = pipeline
+        let (_train_dataset, state, _filtered_df) = pipeline
             .process_for_training(train_df, "target", Some(&["category"]))
             .unwrap();
 
@@ -600,7 +712,7 @@ mod tests {
                 .with_smoothing(0.0), // No smoothing for clearer testing
         );
 
-        let (dataset, state) = pipeline
+        let (dataset, state, _filtered_df) = pipeline
             .process_for_training(df, "target", Some(&["category"]))
             .unwrap();
 

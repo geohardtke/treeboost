@@ -1,9 +1,9 @@
 //! Integration tests for preprocessing module
 
 use treeboost::preprocessing::{
-    FrequencyEncoder, ImputeStrategy, LabelEncoder, MinMaxScaler, OneHotEncoder,
-    OutlierAction, OutlierDetector, OutlierMethod, RobustScaler, Scaler, SimpleImputer,
-    StandardScaler, TransformResult, UnknownStrategy,
+    FrequencyEncoder, ImputeStrategy, LabelEncoder, MinMaxScaler, OneHotEncoder, OutlierAction,
+    OutlierDetector, OutlierMethod, RobustScaler, Scaler, SimpleImputer, StandardScaler,
+    TransformResult, UnknownStrategy,
 };
 
 /// Test StandardScaler end-to-end workflow
@@ -140,7 +140,10 @@ fn test_preprocessing_robust_scaler_outliers() {
         .iter()
         .cloned()
         .fold(f32::NEG_INFINITY, f32::max);
-    let min_non_outlier = non_outlier_vals.iter().cloned().fold(f32::INFINITY, f32::min);
+    let min_non_outlier = non_outlier_vals
+        .iter()
+        .cloned()
+        .fold(f32::INFINITY, f32::min);
 
     // Robust scaling should keep non-outliers in reasonable range
     assert!(
@@ -161,7 +164,7 @@ fn test_preprocessing_frequency_encoder_workflow() {
     let categories = vec!["apple", "banana", "apple", "cherry", "apple", "banana"];
 
     let mut encoder = FrequencyEncoder::new().with_normalize(true);
-    encoder.fit(&categories);
+    let _ = encoder.fit(&categories);
 
     assert!(encoder.is_fitted());
     assert_eq!(encoder.num_categories(), 3);
@@ -186,7 +189,7 @@ fn test_preprocessing_label_encoder_roundtrip() {
     let categories = vec!["red", "green", "blue", "red", "green"];
 
     let mut encoder = LabelEncoder::new();
-    encoder.fit(&categories);
+    let _ = encoder.fit(&categories);
 
     let labels = encoder
         .transform(&categories)
@@ -211,7 +214,7 @@ fn test_preprocessing_onehot_encoder_drop_first() {
     let mut encoder = OneHotEncoder::new()
         .with_drop_first(true)
         .with_unknown_strategy(UnknownStrategy::AllZeros);
-    encoder.fit(&categories);
+    let _ = encoder.fit(&categories);
 
     // 3 categories with drop_first → 2 columns
     assert_eq!(encoder.num_columns(), 2);
@@ -266,7 +269,9 @@ fn test_preprocessing_simple_imputer_strategies() {
 
     // Mean imputation
     let mut imputer = SimpleImputer::new(ImputeStrategy::Mean);
-    imputer.fit(&data, num_features).expect("Fit should succeed");
+    imputer
+        .fit(&data, num_features)
+        .expect("Fit should succeed");
 
     let mut imputed = data.clone();
     imputer
@@ -314,7 +319,9 @@ fn test_timeseries_lag_generator_workflow() {
 
     // Create lags for t-1, t-7 (daily, weekly)
     let gen = LagGenerator::new(vec![1, 7]);
-    let lagged = gen.transform(&prices, num_features).expect("Transform should succeed");
+    let lagged = gen
+        .transform(&prices, num_features)
+        .expect("Transform should succeed");
 
     // Output: 30 rows × 6 features (2 original + 2 lag1 + 2 lag7)
     assert_eq!(lagged.len(), 30 * 6);
@@ -367,7 +374,12 @@ fn test_timeseries_rolling_generator_workflow() {
     let data: Vec<f32> = (0..num_rows).map(|i| 100.0 + (i as f32) * 2.0).collect();
 
     let gen = RollingGenerator::new(5)
-        .with_stats(vec![RollingStat::Mean, RollingStat::Std, RollingStat::Min, RollingStat::Max])
+        .with_stats(vec![
+            RollingStat::Mean,
+            RollingStat::Std,
+            RollingStat::Min,
+            RollingStat::Max,
+        ])
         .with_min_periods(3);
 
     let rolled = gen.transform(&data, 1).expect("Transform should succeed");
@@ -384,7 +396,7 @@ fn test_timeseries_rolling_generator_workflow() {
 
     assert_eq!(rolled[row50_start], 200.0); // original value
     assert!((rolled[row50_start + 1] - expected_mean).abs() < 0.01); // rolling mean
-    // std has more tolerance due to sample vs population
+                                                                     // std has more tolerance due to sample vs population
     assert!((rolled[row50_start + 3] - expected_min).abs() < 0.01); // rolling min
     assert!((rolled[row50_start + 4] - expected_max).abs() < 0.01); // rolling max
 
@@ -397,7 +409,9 @@ fn test_timeseries_rolling_generator_workflow() {
 #[test]
 fn test_timeseries_ewma_workflow() {
     // Noisy data with trend
-    let data: Vec<f32> = (0..50).map(|i| 10.0 * i as f32 + ((i * 7) % 13) as f32).collect();
+    let data: Vec<f32> = (0..50)
+        .map(|i| 10.0 * i as f32 + ((i * 7) % 13) as f32)
+        .collect();
 
     // Create EWMA with alpha=0.3
     let gen = EwmaGenerator::new(0.3);
@@ -427,9 +441,7 @@ fn test_timeseries_ewma_workflow() {
 fn test_timeseries_seasonal_generator_workflow() {
     // Create timestamps for one week (168 hours), hourly
     let base_ts = 1705276800.0; // 2024-01-15 00:00:00 UTC (Monday)
-    let timestamps: Vec<f64> = (0..168)
-        .map(|h| base_ts + (h * 3600) as f64)
-        .collect();
+    let timestamps: Vec<f64> = (0..168).map(|h| base_ts + (h * 3600) as f64).collect();
 
     let gen = SeasonalGenerator::new(vec![
         SeasonalComponent::Hour,
@@ -475,7 +487,7 @@ fn test_timeseries_seasonal_cyclical_encoding() {
 
     let base_ts = 1705276800.0; // 2024-01-15 00:00:00 UTC
     let timestamps = vec![
-        base_ts,          // Hour 0
+        base_ts,           // Hour 0
         base_ts + 21600.0, // Hour 6
         base_ts + 43200.0, // Hour 12
         base_ts + 64800.0, // Hour 18
@@ -518,14 +530,18 @@ fn test_timeseries_combined_feature_engineering() {
 
     // Apply lag features
     let lag_gen = LagGenerator::new(vec![1, 7]);
-    let lagged = lag_gen.transform(&data, 1).expect("Lag transform should succeed");
+    let lagged = lag_gen
+        .transform(&data, 1)
+        .expect("Lag transform should succeed");
 
     // Apply rolling features to lagged data (on original feature only)
     // Note: in real workflow, you'd apply to specific columns
     let roll_gen = RollingGenerator::new(7)
         .with_stats(vec![RollingStat::Mean, RollingStat::Std])
         .with_min_periods(3);
-    let rolled = roll_gen.transform(&data, 1).expect("Roll transform should succeed");
+    let rolled = roll_gen
+        .transform(&data, 1)
+        .expect("Roll transform should succeed");
 
     // Both should have correct number of rows
     assert_eq!(lagged.len() / 3, num_rows); // 1 orig + 2 lags
@@ -535,8 +551,16 @@ fn test_timeseries_combined_feature_engineering() {
     for row in 7..num_rows {
         // Lag features
         let lag_start = row * 3;
-        assert!(!lagged[lag_start + 1].is_nan(), "Lag1 at row {} should be valid", row);
-        assert!(!lagged[lag_start + 2].is_nan(), "Lag7 at row {} should be valid", row);
+        assert!(
+            !lagged[lag_start + 1].is_nan(),
+            "Lag1 at row {} should be valid",
+            row
+        );
+        assert!(
+            !lagged[lag_start + 2].is_nan(),
+            "Lag7 at row {} should be valid",
+            row
+        );
 
         // Rolling features
         let roll_start = row * 3;
@@ -585,8 +609,7 @@ fn test_outlier_iqr_cap_workflow() {
     data.push(-500.0); // f0 outlier (low)
     data.push(5000.0); // f1 outlier (high)
 
-    let mut detector = OutlierDetector::new(OutlierMethod::iqr())
-        .with_action(OutlierAction::Cap);
+    let mut detector = OutlierDetector::new(OutlierMethod::iqr()).with_action(OutlierAction::Cap);
 
     detector.fit(&data, 2).expect("Fit should succeed");
 
@@ -637,8 +660,8 @@ fn test_outlier_zscore_flag_workflow() {
     data.push(47.0); // f0 normal
     data.push(500.0); // f1 extreme outlier
 
-    let mut detector = OutlierDetector::new(OutlierMethod::zscore())
-        .with_action(OutlierAction::Flag);
+    let mut detector =
+        OutlierDetector::new(OutlierMethod::zscore()).with_action(OutlierAction::Flag);
 
     detector.fit(&data, 2).expect("Fit should succeed");
 
@@ -659,7 +682,11 @@ fn test_outlier_zscore_flag_workflow() {
 
         // Count flagged outliers
         let flagged: usize = indicators.iter().filter(|&&v| v > 0.0).count();
-        assert!(flagged >= 2, "Should flag at least 2 outliers, got {}", flagged);
+        assert!(
+            flagged >= 2,
+            "Should flag at least 2 outliers, got {}",
+            flagged
+        );
     } else {
         panic!("Expected Flagged result");
     }
@@ -683,8 +710,8 @@ fn test_outlier_remove_workflow() {
     data.push(5.0); // f0 normal
     data.push(10000.0); // f1 outlier
 
-    let mut detector = OutlierDetector::new(OutlierMethod::iqr())
-        .with_action(OutlierAction::Remove);
+    let mut detector =
+        OutlierDetector::new(OutlierMethod::iqr()).with_action(OutlierAction::Remove);
 
     detector.fit(&data, 2).expect("Fit should succeed");
 
@@ -735,8 +762,7 @@ fn test_outlier_then_scale_pipeline() {
     data.push(10000.0); // extreme outlier
 
     // Step 1: Cap outliers
-    let mut detector = OutlierDetector::new(OutlierMethod::iqr())
-        .with_action(OutlierAction::Cap);
+    let mut detector = OutlierDetector::new(OutlierMethod::iqr()).with_action(OutlierAction::Cap);
     detector.fit(&data, 1).expect("Fit should succeed");
     detector
         .transform(&mut data, 1, &["f0".into()])
@@ -745,7 +771,9 @@ fn test_outlier_then_scale_pipeline() {
     // Step 2: Scale the capped data
     let mut scaler = StandardScaler::new();
     scaler.fit(&data, 1).expect("Fit should succeed");
-    scaler.transform(&mut data, 1).expect("Transform should succeed");
+    scaler
+        .transform(&mut data, 1)
+        .expect("Transform should succeed");
 
     // Verify: scaled data should have reasonable values
     for val in &data {
@@ -783,7 +811,9 @@ fn test_outlier_multifeature() {
     data.push(2.0); // f3 normal
 
     let mut detector = OutlierDetector::new(OutlierMethod::iqr());
-    detector.fit(&data, num_features).expect("Fit should succeed");
+    detector
+        .fit(&data, num_features)
+        .expect("Fit should succeed");
 
     let counts = detector
         .outlier_counts(&data, num_features)

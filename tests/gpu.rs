@@ -112,11 +112,7 @@ fn test_gpu_backend_histogram_correctness() {
 fn test_gpu_backend_with_subsampling() {
     let dataset = create_synthetic_dataset(5000, 123);
 
-    let grad_hess: Vec<(f32, f32)> = dataset
-        .targets()
-        .iter()
-        .map(|&t| (-t, 1.0))
-        .collect();
+    let grad_hess: Vec<(f32, f32)> = dataset.targets().iter().map(|&t| (-t, 1.0)).collect();
 
     // Use only even-indexed rows (50% subsample)
     let row_indices: Vec<usize> = (0..dataset.num_rows()).filter(|i| i % 2 == 0).collect();
@@ -155,11 +151,7 @@ fn test_gpu_backend_with_subsampling() {
 fn test_gpu_backend_split_finding() {
     let dataset = create_synthetic_dataset(10000, 456);
 
-    let grad_hess: Vec<(f32, f32)> = dataset
-        .targets()
-        .iter()
-        .map(|&t| (-t, 1.0))
-        .collect();
+    let grad_hess: Vec<(f32, f32)> = dataset.targets().iter().map(|&t| (-t, 1.0)).collect();
 
     let row_indices: Vec<usize> = (0..dataset.num_rows()).collect();
 
@@ -267,16 +259,8 @@ fn test_gpu_training_end_to_end() {
 
     // Predictions should be very similar (small numerical differences due to floating point)
     // Using a tolerance of 1% of the target range
-    let target_range = dataset
-        .targets()
-        .iter()
-        .cloned()
-        .fold(f32::MIN, f32::max)
-        - dataset
-            .targets()
-            .iter()
-            .cloned()
-            .fold(f32::MAX, f32::min);
+    let target_range = dataset.targets().iter().cloned().fold(f32::MIN, f32::max)
+        - dataset.targets().iter().cloned().fold(f32::MAX, f32::min);
     let tolerance = target_range * 0.01;
 
     println!(

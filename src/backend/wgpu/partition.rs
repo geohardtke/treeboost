@@ -152,7 +152,8 @@ impl PartitionKernel {
         // Get bind group layouts
         let bind_group_layout_zero_counters = pipeline_zero_counters.get_bind_group_layout(0);
         let bind_group_layout_atomic = pipeline_atomic.get_bind_group_layout(0);
-        let bind_group_layout_zero_node_counters = pipeline_zero_node_counters.get_bind_group_layout(0);
+        let bind_group_layout_zero_node_counters =
+            pipeline_zero_node_counters.get_bind_group_layout(0);
         let bind_group_layout_batched = pipeline_batched_atomic.get_bind_group_layout(0);
 
         Self {
@@ -236,7 +237,8 @@ impl PartitionKernel {
         Self::ensure_staging_buffer(dev, &mut pool.staging_left, "staging_left", indices_size);
         Self::ensure_staging_buffer(dev, &mut pool.staging_right, "staging_right", indices_size);
         if pool.staging_counters.is_none() {
-            pool.staging_counters = Some(dev.create_staging_buffer("staging_counters", counters_size));
+            pool.staging_counters =
+                Some(dev.create_staging_buffer("staging_counters", counters_size));
         }
 
         // Upload data
@@ -268,15 +270,30 @@ impl PartitionKernel {
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: pool.input_indices.as_ref().unwrap().buffer.as_entire_binding(),
+                    resource: pool
+                        .input_indices
+                        .as_ref()
+                        .unwrap()
+                        .buffer
+                        .as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: pool.left_indices.as_ref().unwrap().buffer.as_entire_binding(),
+                    resource: pool
+                        .left_indices
+                        .as_ref()
+                        .unwrap()
+                        .buffer
+                        .as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 4,
-                    resource: pool.right_indices.as_ref().unwrap().buffer.as_entire_binding(),
+                    resource: pool
+                        .right_indices
+                        .as_ref()
+                        .unwrap()
+                        .buffer
+                        .as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 9,
@@ -346,10 +363,7 @@ impl PartitionKernel {
         let mut right_data = vec![0u32; right_count as usize];
 
         if left_count > 0 {
-            dev.read_buffer_partial(
-                &pool.staging_left.as_ref().unwrap().buffer,
-                &mut left_data,
-            );
+            dev.read_buffer_partial(&pool.staging_left.as_ref().unwrap().buffer, &mut left_data);
         }
         if right_count > 0 {
             dev.read_buffer_partial(
@@ -413,7 +427,12 @@ impl PartitionKernel {
         Self::ensure_storage_buffer(dev, &mut pool.left_indices, "left_indices", indices_size);
         Self::ensure_storage_buffer(dev, &mut pool.right_indices, "right_indices", indices_size);
         Self::ensure_storage_buffer(dev, &mut pool.node_splits, "node_splits", node_splits_size);
-        Self::ensure_storage_buffer(dev, &mut pool.node_counters, "node_counters", node_counters_size);
+        Self::ensure_storage_buffer(
+            dev,
+            &mut pool.node_counters,
+            "node_counters",
+            node_counters_size,
+        );
 
         // Bins buffer
         let bins_buffer = dev.create_storage_buffer("partition_bins", bins_size, false);
@@ -423,7 +442,8 @@ impl PartitionKernel {
         Self::ensure_staging_buffer(dev, &mut pool.staging_left, "staging_left", indices_size);
         Self::ensure_staging_buffer(dev, &mut pool.staging_right, "staging_right", indices_size);
 
-        let staging_counters = dev.create_staging_buffer("staging_node_counters", node_counters_size);
+        let staging_counters =
+            dev.create_staging_buffer("staging_node_counters", node_counters_size);
 
         // Upload data
         dev.write_buffer(pool.batched_params.as_ref().unwrap(), &[batched_params]);
@@ -441,7 +461,12 @@ impl PartitionKernel {
                 },
                 BindGroupEntry {
                     binding: 12,
-                    resource: pool.node_counters.as_ref().unwrap().buffer.as_entire_binding(),
+                    resource: pool
+                        .node_counters
+                        .as_ref()
+                        .unwrap()
+                        .buffer
+                        .as_entire_binding(),
                 },
             ],
         });
@@ -458,15 +483,30 @@ impl PartitionKernel {
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: pool.input_indices.as_ref().unwrap().buffer.as_entire_binding(),
+                    resource: pool
+                        .input_indices
+                        .as_ref()
+                        .unwrap()
+                        .buffer
+                        .as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 3,
-                    resource: pool.left_indices.as_ref().unwrap().buffer.as_entire_binding(),
+                    resource: pool
+                        .left_indices
+                        .as_ref()
+                        .unwrap()
+                        .buffer
+                        .as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 4,
-                    resource: pool.right_indices.as_ref().unwrap().buffer.as_entire_binding(),
+                    resource: pool
+                        .right_indices
+                        .as_ref()
+                        .unwrap()
+                        .buffer
+                        .as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 10,
@@ -474,11 +514,21 @@ impl PartitionKernel {
                 },
                 BindGroupEntry {
                     binding: 11,
-                    resource: pool.node_splits.as_ref().unwrap().buffer.as_entire_binding(),
+                    resource: pool
+                        .node_splits
+                        .as_ref()
+                        .unwrap()
+                        .buffer
+                        .as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 12,
-                    resource: pool.node_counters.as_ref().unwrap().buffer.as_entire_binding(),
+                    resource: pool
+                        .node_counters
+                        .as_ref()
+                        .unwrap()
+                        .buffer
+                        .as_entire_binding(),
                 },
             ],
         });
@@ -636,9 +686,10 @@ mod tests {
         let bins_packed: Vec<u32> = bins
             .chunks(4)
             .map(|chunk| {
-                chunk.iter().enumerate().fold(0u32, |acc, (i, &b)| {
-                    acc | ((b as u32) << (i * 8))
-                })
+                chunk
+                    .iter()
+                    .enumerate()
+                    .fold(0u32, |acc, (i, &b)| acc | ((b as u32) << (i * 8)))
             })
             .collect();
 

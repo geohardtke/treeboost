@@ -6,8 +6,7 @@ use rayon::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// Decision tree
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
 pub struct Tree {
     /// Nodes in the tree (index 0 is root)
     nodes: Vec<Node>,
@@ -159,7 +158,12 @@ impl Tree {
     /// * `num_features` - Number of features per row
     /// * `predictions` - Mutable slice to accumulate predictions into
     #[inline]
-    pub fn predict_batch_add_raw(&self, features: &[f64], num_features: usize, predictions: &mut [f32]) {
+    pub fn predict_batch_add_raw(
+        &self,
+        features: &[f64],
+        num_features: usize,
+        predictions: &mut [f32],
+    ) {
         let num_rows = predictions.len();
         debug_assert_eq!(features.len(), num_rows * num_features);
 
@@ -168,9 +172,12 @@ impl Tree {
 
         if num_rows >= PARALLEL_THRESHOLD {
             // Parallel: each row is independent
-            predictions.par_iter_mut().enumerate().for_each(|(row_idx, pred)| {
-                *pred += self.predict_row_raw_inner(features, num_features, row_idx);
-            });
+            predictions
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(row_idx, pred)| {
+                    *pred += self.predict_row_raw_inner(features, num_features, row_idx);
+                });
         } else {
             // Sequential for small datasets
             for (row_idx, pred) in predictions.iter_mut().enumerate() {
@@ -229,9 +236,12 @@ impl Tree {
 
         if num_rows >= PARALLEL_THRESHOLD {
             // Parallel: each row is independent
-            predictions.par_iter_mut().enumerate().for_each(|(row_idx, pred)| {
-                *pred += self.predict_row_inner(dataset, row_idx);
-            });
+            predictions
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(row_idx, pred)| {
+                    *pred += self.predict_row_inner(dataset, row_idx);
+                });
         } else {
             // Sequential for small datasets
             for (row_idx, pred) in predictions.iter_mut().enumerate() {
@@ -322,18 +332,12 @@ impl Tree {
 
     /// Get all leaf nodes
     pub fn leaves(&self) -> impl Iterator<Item = (usize, &Node)> {
-        self.nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| n.is_leaf())
+        self.nodes.iter().enumerate().filter(|(_, n)| n.is_leaf())
     }
 
     /// Get all internal nodes
     pub fn internal_nodes(&self) -> impl Iterator<Item = (usize, &Node)> {
-        self.nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| !n.is_leaf())
+        self.nodes.iter().enumerate().filter(|(_, n)| !n.is_leaf())
     }
 
     /// Get nodes as slice

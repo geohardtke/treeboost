@@ -169,13 +169,16 @@ impl HistogramBackend for CudaBackend {
         batches: &[&[usize]],
     ) -> Vec<Vec<Histogram>> {
         let bins_row_major = bins.as_row_major().expect("CUDA requires row-major bins");
-        self.histogram_kernel.lock().unwrap().build_histograms_batched(
-            bins_row_major,
-            grad_hess,
-            batches,
-            bins.num_rows(),
-            bins.num_features(),
-        )
+        self.histogram_kernel
+            .lock()
+            .unwrap()
+            .build_histograms_batched(
+                bins_row_major,
+                grad_hess,
+                batches,
+                bins.num_rows(),
+                bins.num_features(),
+            )
     }
 
     fn build_era_histograms(

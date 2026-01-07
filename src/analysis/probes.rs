@@ -348,7 +348,7 @@ mod tests {
             .map(|i| {
                 let x0 = x0_bins[i] as f32 / 255.0;
                 let x1 = x1_bins[i] as f32 / 255.0;
-                2.0 * x0 + 3.0 * x1 + (i % 10) as f32 * 0.001  // Small noise
+                2.0 * x0 + 3.0 * x1 + (i % 10) as f32 * 0.001 // Small noise
             })
             .collect();
 
@@ -371,7 +371,11 @@ mod tests {
 
         // Linear probe on binned data has inherent approximation errors
         // The key test is that it runs successfully and produces valid output
-        assert!(result.r2 >= 0.0 && result.r2 <= 1.0, "R² should be in valid range: {}", result.r2);
+        assert!(
+            result.r2 >= 0.0 && result.r2 <= 1.0,
+            "R² should be in valid range: {}",
+            result.r2
+        );
         assert!(!result.predictions.is_empty(), "Should produce predictions");
         assert_eq!(result.residuals.len(), result.predictions.len());
     }
@@ -385,7 +389,10 @@ mod tests {
         // Tree probe should run successfully and produce valid metrics
         // Note: On discretized/binned data, trees often capture structure better
         // than linear models because they work directly on bins
-        assert!(tree_result.r2_on_residuals >= 0.0, "R² on residuals should be valid");
+        assert!(
+            tree_result.r2_on_residuals >= 0.0,
+            "R² on residuals should be valid"
+        );
         assert!(tree_result.num_splits > 0, "Tree should have splits");
     }
 

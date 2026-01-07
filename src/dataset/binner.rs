@@ -31,7 +31,10 @@ impl Default for QuantileBinner {
 impl QuantileBinner {
     /// Create a new quantile binner
     pub fn new(num_bins: usize) -> Self {
-        assert!(num_bins > 0 && num_bins <= MAX_BINS, "num_bins must be in [1, 256]");
+        assert!(
+            num_bins > 0 && num_bins <= MAX_BINS,
+            "num_bins must be in [1, 256]"
+        );
         Self {
             num_bins,
             compression: 100.0, // Good balance of accuracy and memory

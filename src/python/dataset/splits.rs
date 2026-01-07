@@ -187,10 +187,7 @@ impl PyKFoldSplit {
         }
 
         let (train, val) = self.inner.get_fold(fold_idx);
-        Ok((
-            PyArray1::from_vec(py, train),
-            PyArray1::from_vec(py, val),
-        ))
+        Ok((PyArray1::from_vec(py, train), PyArray1::from_vec(py, val)))
     }
 
     /// Get the size of each fold

@@ -42,9 +42,7 @@ use crate::tuner::ModelFormat;
 /// Extract features from a 2D numpy array (f64 or f32) into a flat Vec<f64>
 ///
 /// Returns (num_features, flattened_row_major_data)
-fn extract_features_array<'py>(
-    features: &Bound<'py, PyAny>,
-) -> PyResult<(usize, Vec<f64>)> {
+fn extract_features_array<'py>(features: &Bound<'py, PyAny>) -> PyResult<(usize, Vec<f64>)> {
     // Try f64 first (most common for numpy), then f32
     if let Ok(arr) = features.extract::<PyReadonlyArray2<'py, f64>>() {
         let arr = arr.as_array();
@@ -87,9 +85,7 @@ fn parse_model_format(format: &str) -> PyResult<ModelFormat> {
     match format.to_lowercase().as_str() {
         "rkyv" => Ok(ModelFormat::Rkyv),
         "bincode" | "bin" => Ok(ModelFormat::Bincode),
-        _ => Err(PyValueError::new_err(
-            "format must be 'rkyv' or 'bincode'"
-        )),
+        _ => Err(PyValueError::new_err("format must be 'rkyv' or 'bincode'")),
     }
 }
 
@@ -120,19 +116,25 @@ impl PyMonotonicConstraint {
     /// Create an increasing constraint (larger values -> larger predictions)
     #[staticmethod]
     fn increasing() -> Self {
-        Self { inner: MonotonicConstraint::Increasing }
+        Self {
+            inner: MonotonicConstraint::Increasing,
+        }
     }
 
     /// Create a decreasing constraint (larger values -> smaller predictions)
     #[staticmethod]
     fn decreasing() -> Self {
-        Self { inner: MonotonicConstraint::Decreasing }
+        Self {
+            inner: MonotonicConstraint::Decreasing,
+        }
     }
 
     /// Create no constraint (no monotonic restriction)
     #[staticmethod]
     fn none() -> Self {
-        Self { inner: MonotonicConstraint::None }
+        Self {
+            inner: MonotonicConstraint::None,
+        }
     }
 
     /// Check if this is an increasing constraint
@@ -195,7 +197,9 @@ impl PyGBDTConfig {
     /// Create a new configuration with default values
     #[new]
     fn new() -> Self {
-        Self { inner: GBDTConfig::default() }
+        Self {
+            inner: GBDTConfig::default(),
+        }
     }
 
     // Ensemble parameters
@@ -559,9 +563,11 @@ impl PyGBDTConfig {
             "auto" => GpuMode::Auto,
             "hybrid" => GpuMode::Hybrid,
             "full" => GpuMode::Full,
-            _ => return Err(PyValueError::new_err(
-                "gpu_mode must be one of: 'auto', 'hybrid', 'full'"
-            )),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "gpu_mode must be one of: 'auto', 'hybrid', 'full'",
+                ))
+            }
         };
         Ok(())
     }
@@ -769,7 +775,9 @@ impl PyGBDTConfig {
     /// Set calibration set ratio for conformal prediction (0.0 to disable)
     fn with_calibration_ratio(&self, value: f32) -> PyResult<Self> {
         if value < 0.0 || value >= 1.0 {
-            return Err(PyValueError::new_err("calibration_ratio must be in [0.0, 1.0)"));
+            return Err(PyValueError::new_err(
+                "calibration_ratio must be in [0.0, 1.0)",
+            ));
         }
         let mut new = self.clone();
         new.inner.calibration_ratio = value;
@@ -779,7 +787,9 @@ impl PyGBDTConfig {
     /// Set conformal prediction quantile (e.g., 0.9 for 90% coverage)
     fn with_conformal_quantile(&self, value: f32) -> PyResult<Self> {
         if value <= 0.0 || value >= 1.0 {
-            return Err(PyValueError::new_err("conformal_quantile must be in (0.0, 1.0)"));
+            return Err(PyValueError::new_err(
+                "conformal_quantile must be in (0.0, 1.0)",
+            ));
         }
         let mut new = self.clone();
         new.inner.conformal_quantile = value;
@@ -796,7 +806,9 @@ impl PyGBDTConfig {
     /// Set validation ratio for early stopping (0.0 to disable)
     fn with_validation_ratio(&self, value: f32) -> PyResult<Self> {
         if value < 0.0 || value >= 1.0 {
-            return Err(PyValueError::new_err("validation_ratio must be in [0.0, 1.0)"));
+            return Err(PyValueError::new_err(
+                "validation_ratio must be in [0.0, 1.0)",
+            ));
         }
         let mut new = self.clone();
         new.inner.validation_ratio = value;
@@ -862,9 +874,11 @@ impl PyGBDTConfig {
             "auto" => GpuMode::Auto,
             "hybrid" => GpuMode::Hybrid,
             "full" => GpuMode::Full,
-            _ => return Err(PyValueError::new_err(
-                "gpu_mode must be one of: 'auto', 'hybrid', 'full'"
-            )),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "gpu_mode must be one of: 'auto', 'hybrid', 'full'",
+                ))
+            }
         };
         Ok(new)
     }
@@ -947,10 +961,7 @@ impl PyGBDTConfig {
     ///         MonotonicConstraint.none()
     ///     ])
     fn with_constraints(&self, constraints: Vec<PyMonotonicConstraint>) -> PyResult<Self> {
-        let parsed: Vec<MonotonicConstraint> = constraints
-            .into_iter()
-            .map(|c| c.into())
-            .collect();
+        let parsed: Vec<MonotonicConstraint> = constraints.into_iter().map(|c| c.into()).collect();
 
         let mut new = self.clone();
         new.inner.monotonic_constraints = parsed;
@@ -1029,20 +1040,25 @@ impl PyGBDTModel {
 
         // Train model using high-level Rust API (release GIL during training)
         // Binning is now done in Rust with Rayon parallelization
-        let model = py.allow_threads(|| {
-            GBDTModel::train(
-                &features_flat,
-                num_features,
-                &targets_vec,
-                config.inner.clone(),
-                feature_names,
-            )
-        }).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let model = py
+            .allow_threads(|| {
+                GBDTModel::train(
+                    &features_flat,
+                    num_features,
+                    &targets_vec,
+                    config.inner.clone(),
+                    feature_names,
+                )
+            })
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         // If output_dir provided, save model and config
         if let Some(ref dir) = output_dir {
-            model.save_to_directory(dir, &config.inner, &[ModelFormat::Rkyv])
-                .map_err(|e| PyIOError::new_err(format!("Failed to save to output directory: {}", e)))?;
+            model
+                .save_to_directory(dir, &config.inner, &[ModelFormat::Rkyv])
+                .map_err(|e| {
+                    PyIOError::new_err(format!("Failed to save to output directory: {}", e))
+                })?;
         }
 
         Ok(Self { model })
@@ -1097,7 +1113,7 @@ impl PyGBDTModel {
         // Validate era_splitting is enabled
         if !config.inner.era_splitting {
             return Err(PyValueError::new_err(
-                "era_splitting must be True in config when using train_with_eras"
+                "era_splitting must be True in config when using train_with_eras",
             ));
         }
 
@@ -1111,16 +1127,18 @@ impl PyGBDTModel {
         let era_indices_vec: Vec<u16> = era_indices_arr.to_vec();
 
         // Train model using high-level Rust API (release GIL during training)
-        let model = py.allow_threads(|| {
-            GBDTModel::train_with_eras(
-                &features_flat,
-                num_features,
-                &targets_vec,
-                &era_indices_vec,
-                config.inner.clone(),
-                feature_names,
-            )
-        }).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let model = py
+            .allow_threads(|| {
+                GBDTModel::train_with_eras(
+                    &features_flat,
+                    num_features,
+                    &targets_vec,
+                    &era_indices_vec,
+                    config.inner.clone(),
+                    feature_names,
+                )
+            })
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         Ok(Self { model })
     }
@@ -1207,7 +1225,7 @@ impl PyGBDTModel {
         if self.model.is_multiclass() {
             return Err(PyValueError::new_err(
                 "predict_proba() is for binary classification only. \
-                 For multi-class models, use predict_proba_multiclass() instead."
+                 For multi-class models, use predict_proba_multiclass() instead.",
             ));
         }
 
@@ -1246,7 +1264,7 @@ impl PyGBDTModel {
         if self.model.is_multiclass() {
             return Err(PyValueError::new_err(
                 "predict_class() is for binary classification only. \
-                 For multi-class models, use predict_class_multiclass() instead."
+                 For multi-class models, use predict_class_multiclass() instead.",
             ));
         }
 
@@ -1299,7 +1317,7 @@ impl PyGBDTModel {
         if !self.model.is_multiclass() {
             return Err(PyValueError::new_err(
                 "predict_proba_multiclass() is for multi-class models only. \
-                 For binary classification, use predict_proba() instead."
+                 For binary classification, use predict_proba() instead.",
             ));
         }
 
@@ -1313,7 +1331,7 @@ impl PyGBDTModel {
         let expected_cols = proba[0].len();
         if !proba.iter().all(|row| row.len() == expected_cols) {
             return Err(PyValueError::new_err(
-                "Internal error: jagged probability array returned"
+                "Internal error: jagged probability array returned",
             ));
         }
 
@@ -1349,7 +1367,7 @@ impl PyGBDTModel {
         if !self.model.is_multiclass() {
             return Err(PyValueError::new_err(
                 "predict_class_multiclass() is for multi-class models only. \
-                 For binary classification, use predict_class() instead."
+                 For binary classification, use predict_class() instead.",
             ));
         }
 
@@ -1424,22 +1442,21 @@ impl PyGBDTModel {
                 } else if let Ok(list) = obj.extract::<Vec<String>>() {
                     // List of format strings
                     if list.is_empty() {
-                        return Err(PyValueError::new_err(
-                            "formats list must not be empty"
-                        ));
+                        return Err(PyValueError::new_err("formats list must not be empty"));
                     }
                     list.iter()
                         .map(|s| parse_model_format(s))
                         .collect::<PyResult<Vec<_>>>()?
                 } else {
                     return Err(PyValueError::new_err(
-                        "formats must be a string ('rkyv' or 'bincode') or a list of strings"
+                        "formats must be a string ('rkyv' or 'bincode') or a list of strings",
                     ));
                 }
             }
         };
 
-        self.model.save_to_directory(output_dir, &config.inner, &model_formats)
+        self.model
+            .save_to_directory(output_dir, &config.inner, &model_formats)
             .map_err(|e| PyIOError::new_err(e.to_string()))
     }
 

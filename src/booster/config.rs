@@ -15,9 +15,18 @@ use rkyv::{Archive, Deserialize, Serialize};
 pub const DEFAULT_MIN_EARLY_STOPPING_TREES: usize = 20;
 
 /// Loss function type for serialization
-#[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
-#[derive(Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Archive,
+    Serialize,
+    Deserialize,
+    serde::Serialize,
+    serde::Deserialize,
+    Default,
+)]
 pub enum LossType {
     /// Mean Squared Error (regression)
     #[default]
@@ -29,7 +38,6 @@ pub enum LossType {
     /// Multi-class Log Loss / Softmax Cross-Entropy (multi-class classification)
     MultiClassLogLoss { num_classes: usize },
 }
-
 
 impl LossType {
     /// Create a boxed loss function for regression and binary classification
@@ -74,8 +82,7 @@ impl LossType {
 }
 
 /// GBDT training configuration
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
 pub struct GBDTConfig {
     // Ensemble parameters
     /// Number of boosting rounds (trees)
@@ -259,7 +266,7 @@ impl Default for GBDTConfig {
 
             // Backend selection (Auto = GPU for large datasets, CPU otherwise)
             backend_type: BackendType::Auto,
-            gpu_mode: GpuMode::Auto, // Auto-select: CUDA→Full, WGPU→Hybrid
+            gpu_mode: GpuMode::Auto,  // Auto-select: CUDA→Full, WGPU→Hybrid
             use_gpu_subgroups: false, // Disabled by default (minimal benefit on modern NVIDIA)
 
             // Monotonic constraints

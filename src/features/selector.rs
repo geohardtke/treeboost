@@ -156,20 +156,26 @@ impl FeatureSelector {
         if self.config.use_target_selection {
             if let Some(targets) = targets {
                 if targets.len() == num_rows {
-                // Compute target correlations
-                let mut scored: Vec<(usize, f32)> = candidates
-                    .iter()
-                    .map(|&(f, _)| {
-                        let corr =
-                            compute_target_correlation(candidate_data, candidate_num_features, num_rows, f, targets);
-                        (f, corr.abs())
-                    })
-                    .collect();
+                    // Compute target correlations
+                    let mut scored: Vec<(usize, f32)> = candidates
+                        .iter()
+                        .map(|&(f, _)| {
+                            let corr = compute_target_correlation(
+                                candidate_data,
+                                candidate_num_features,
+                                num_rows,
+                                f,
+                                targets,
+                            );
+                            (f, corr.abs())
+                        })
+                        .collect();
 
-                // Sort by target correlation (descending)
-                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    // Sort by target correlation (descending)
+                    scored
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-                candidates = scored;
+                    candidates = scored;
                 }
             }
         }
@@ -192,7 +198,8 @@ impl FeatureSelector {
 
         for (new_idx, &orig_idx) in selected_indices.iter().enumerate() {
             for r in 0..num_rows {
-                selected_data[r * n_selected + new_idx] = candidate_data[r * candidate_num_features + orig_idx];
+                selected_data[r * n_selected + new_idx] =
+                    candidate_data[r * candidate_num_features + orig_idx];
             }
         }
 
@@ -270,7 +277,7 @@ impl FeatureSelector {
                 if corr.abs() > threshold {
                     // Decide which feature to drop based on target correlation or variance
                     let drop_j = match &target_corrs {
-                        Some(tc) => tc[i] >= tc[j], // Keep feature with higher target corr
+                        Some(tc) => tc[i] >= tc[j],       // Keep feature with higher target corr
                         None => stats[i].2 >= stats[j].2, // Keep feature with higher variance
                     };
 
@@ -285,9 +292,7 @@ impl FeatureSelector {
         }
 
         // Extract non-dropped features
-        let kept_indices: Vec<usize> = (0..num_features)
-            .filter(|&f| !dropped[f])
-            .collect();
+        let kept_indices: Vec<usize> = (0..num_features).filter(|&f| !dropped[f]).collect();
 
         let kept_names: Vec<String> = kept_indices
             .iter()
@@ -531,7 +536,9 @@ mod tests {
 
     #[test]
     fn test_variance_filter() {
-        let config = SelectionConfig::new().with_min_variance(0.5).with_max_features(100);
+        let config = SelectionConfig::new()
+            .with_min_variance(0.5)
+            .with_max_features(100);
         let selector = FeatureSelector::new(config);
 
         // Feature 0: high variance (1,2,3,4) -> var = 1.25
@@ -548,7 +555,9 @@ mod tests {
 
     #[test]
     fn test_max_features_limit() {
-        let config = SelectionConfig::new().with_min_variance(0.0).with_max_features(2);
+        let config = SelectionConfig::new()
+            .with_min_variance(0.0)
+            .with_max_features(2);
         let selector = FeatureSelector::new(config);
 
         // 4 features
@@ -585,7 +594,8 @@ mod tests {
         let names = vec!["uncorrelated".to_string(), "correlated".to_string()];
         let targets = vec![1.0, 2.0, 3.0, 4.0];
 
-        let (_, selected_names, _) = selector.select(&[], 0, &candidates, 2, &names, Some(&targets));
+        let (_, selected_names, _) =
+            selector.select(&[], 0, &candidates, 2, &names, Some(&targets));
 
         // Correlated feature should be selected
         assert_eq!(selected_names.len(), 1);
@@ -644,7 +654,8 @@ mod tests {
         ];
         let names = vec!["f0".to_string(), "f1".to_string(), "f2".to_string()];
 
-        let (_, kept_names, kept_indices) = selector.drop_collinear_features(&data, 3, &names, None);
+        let (_, kept_names, kept_indices) =
+            selector.drop_collinear_features(&data, 3, &names, None);
 
         // Features 0 and 1 are perfectly correlated (corr = 1.0), one should be dropped
         // Features 0 and 2 are perfectly negatively correlated (corr = -1.0), one should be dropped

@@ -82,8 +82,14 @@ pub unsafe fn histogram_accumulate_avx2(params: HistogramAccumParams) {
 
         // Create gather indices for gradients/hessians
         let indices = _mm256_set_epi32(
-            idx7 as i32, idx6 as i32, idx5 as i32, idx4 as i32,
-            idx3 as i32, idx2 as i32, idx1 as i32, idx0 as i32,
+            idx7 as i32,
+            idx6 as i32,
+            idx5 as i32,
+            idx4 as i32,
+            idx3 as i32,
+            idx2 as i32,
+            idx1 as i32,
+            idx0 as i32,
         );
 
         // Gather 8 gradients using AVX2 gather
@@ -358,19 +364,35 @@ mod tests {
         }
 
         // Bin 0: rows 0, 3, 6 -> grads 1+4+7=12
-        assert!((hist_grads[0] - 12.0).abs() < 1e-5, "Bin 0 grad mismatch: {}", hist_grads[0]);
+        assert!(
+            (hist_grads[0] - 12.0).abs() < 1e-5,
+            "Bin 0 grad mismatch: {}",
+            hist_grads[0]
+        );
         assert_eq!(hist_counts[0], 3);
 
         // Bin 1: rows 1, 4, 7 -> grads 2+5+8=15
-        assert!((hist_grads[1] - 15.0).abs() < 1e-5, "Bin 1 grad mismatch: {}", hist_grads[1]);
+        assert!(
+            (hist_grads[1] - 15.0).abs() < 1e-5,
+            "Bin 1 grad mismatch: {}",
+            hist_grads[1]
+        );
         assert_eq!(hist_counts[1], 3);
 
         // Bin 2: rows 2, 5, 8 -> grads 3+6+9=18
-        assert!((hist_grads[2] - 18.0).abs() < 1e-5, "Bin 2 grad mismatch: {}", hist_grads[2]);
+        assert!(
+            (hist_grads[2] - 18.0).abs() < 1e-5,
+            "Bin 2 grad mismatch: {}",
+            hist_grads[2]
+        );
         assert_eq!(hist_counts[2], 3);
 
         // Bin 3: row 9 -> grad 10
-        assert!((hist_grads[3] - 10.0).abs() < 1e-5, "Bin 3 grad mismatch: {}", hist_grads[3]);
+        assert!(
+            (hist_grads[3] - 10.0).abs() < 1e-5,
+            "Bin 3 grad mismatch: {}",
+            hist_grads[3]
+        );
         assert_eq!(hist_counts[3], 1);
     }
 
@@ -448,7 +470,9 @@ mod tests {
             let count = hist_counts[bin];
             assert!(
                 count >= expected_per_bin as u32 - 1 && count <= expected_per_bin as u32 + 1,
-                "Bin {} has unexpected count: {}", bin, count
+                "Bin {} has unexpected count: {}",
+                bin,
+                count
             );
         }
     }

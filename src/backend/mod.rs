@@ -212,7 +212,9 @@ mod tests {
         let backend = selector.select(100_000);
         // Accept CUDA, WGPU, or Scalar depending on GPU availability
         assert!(
-            backend.name() == "CUDA" || backend.name() == "WGPU" || backend.name().starts_with("Scalar"),
+            backend.name() == "CUDA"
+                || backend.name() == "WGPU"
+                || backend.name().starts_with("Scalar"),
             "Expected CUDA, WGPU, or Scalar, got: {}",
             backend.name()
         );
@@ -233,7 +235,9 @@ mod tests {
         // Uses GPU if available, otherwise falls back to scalar
         let backend = selector.select(100_000);
         assert!(
-            backend.name() == "CUDA" || backend.name() == "WGPU" || backend.name().starts_with("Scalar"),
+            backend.name() == "CUDA"
+                || backend.name() == "WGPU"
+                || backend.name().starts_with("Scalar"),
             "Expected CUDA, WGPU, or Scalar, got: {}",
             backend.name()
         );
