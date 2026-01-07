@@ -34,9 +34,8 @@ impl TrialLogger {
         // Create timestamped run directory with milliseconds to avoid collisions
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S%.3f");
         let run_dir = output_dir.join(format!("run_{}", timestamp));
-        fs::create_dir_all(&run_dir).map_err(|e| {
-            TreeBoostError::Data(format!("Failed to create run directory: {}", e))
-        })?;
+        fs::create_dir_all(&run_dir)
+            .map_err(|e| TreeBoostError::Data(format!("Failed to create run directory: {}", e)))?;
 
         // Fixed params that are always logged (not being tuned)
         let extra_param_names = vec![
@@ -61,10 +60,11 @@ impl TrialLogger {
         self.close()?;
 
         // Create new CSV file for this iteration
-        let path = self.run_dir.join(format!("iteration_{}.csv", iteration + 1));
-        let mut writer = csv::Writer::from_path(&path).map_err(|e| {
-            TreeBoostError::Data(format!("Failed to create CSV: {}", e))
-        })?;
+        let path = self
+            .run_dir
+            .join(format!("iteration_{}.csv", iteration + 1));
+        let mut writer = csv::Writer::from_path(&path)
+            .map_err(|e| TreeBoostError::Data(format!("Failed to create CSV: {}", e)))?;
 
         // Write header row using TrialResult's headers
         let mut headers: Vec<String> = TrialResult::csv_headers()
@@ -74,12 +74,12 @@ impl TrialLogger {
         headers.extend(self.param_names.clone());
         headers.extend(self.extra_param_names.clone());
 
-        writer.write_record(&headers).map_err(|e| {
-            TreeBoostError::Data(format!("Failed to write CSV header: {}", e))
-        })?;
-        writer.flush().map_err(|e| {
-            TreeBoostError::Data(format!("Failed to flush CSV: {}", e))
-        })?;
+        writer
+            .write_record(&headers)
+            .map_err(|e| TreeBoostError::Data(format!("Failed to write CSV header: {}", e)))?;
+        writer
+            .flush()
+            .map_err(|e| TreeBoostError::Data(format!("Failed to flush CSV: {}", e)))?;
 
         self.writer = Some(writer);
         Ok(())
@@ -101,12 +101,12 @@ impl TrialLogger {
                 row.push(trial.param_to_csv(name));
             }
 
-            writer.write_record(&row).map_err(|e| {
-                TreeBoostError::Data(format!("Failed to write CSV row: {}", e))
-            })?;
-            writer.flush().map_err(|e| {
-                TreeBoostError::Data(format!("Failed to flush CSV: {}", e))
-            })?;
+            writer
+                .write_record(&row)
+                .map_err(|e| TreeBoostError::Data(format!("Failed to write CSV row: {}", e)))?;
+            writer
+                .flush()
+                .map_err(|e| TreeBoostError::Data(format!("Failed to flush CSV: {}", e)))?;
         }
         Ok(())
     }
@@ -114,9 +114,9 @@ impl TrialLogger {
     /// Close the current CSV writer, flushing any remaining data
     pub fn close(&mut self) -> Result<()> {
         if let Some(ref mut writer) = self.writer.take() {
-            writer.flush().map_err(|e| {
-                TreeBoostError::Data(format!("Failed to flush final CSV: {}", e))
-            })?;
+            writer
+                .flush()
+                .map_err(|e| TreeBoostError::Data(format!("Failed to flush final CSV: {}", e)))?;
         }
         Ok(())
     }
@@ -138,12 +138,10 @@ impl TrialLogger {
             "num_trees": best.num_trees,
             "params": best.params,
         });
-        let file = File::create(&path).map_err(|e| {
-            TreeBoostError::Data(format!("Failed to create params file: {}", e))
-        })?;
-        serde_json::to_writer_pretty(file, &json).map_err(|e| {
-            TreeBoostError::Data(format!("Failed to write params JSON: {}", e))
-        })?;
+        let file = File::create(&path)
+            .map_err(|e| TreeBoostError::Data(format!("Failed to create params file: {}", e)))?;
+        serde_json::to_writer_pretty(file, &json)
+            .map_err(|e| TreeBoostError::Data(format!("Failed to write params JSON: {}", e)))?;
         Ok(())
     }
 
@@ -160,12 +158,10 @@ impl TrialLogger {
             "best_roc_auc": best.and_then(|b| b.roc_auc),
             "optimization_metric": format!("{:?}", history.optimization_metric()),
         });
-        let file = File::create(&path).map_err(|e| {
-            TreeBoostError::Data(format!("Failed to create summary file: {}", e))
-        })?;
-        serde_json::to_writer_pretty(file, &json).map_err(|e| {
-            TreeBoostError::Data(format!("Failed to write summary JSON: {}", e))
-        })?;
+        let file = File::create(&path)
+            .map_err(|e| TreeBoostError::Data(format!("Failed to create summary file: {}", e)))?;
+        serde_json::to_writer_pretty(file, &json)
+            .map_err(|e| TreeBoostError::Data(format!("Failed to write summary JSON: {}", e)))?;
         Ok(())
     }
 
@@ -215,7 +211,10 @@ pub(crate) fn init_logger(
         if verbose {
             println!("  Logging to: {}", dir.display());
         }
-        Ok(Some(Arc::new(Mutex::new(TrialLogger::new(dir, param_names)?))))
+        Ok(Some(Arc::new(Mutex::new(TrialLogger::new(
+            dir,
+            param_names,
+        )?))))
     } else {
         Ok(None)
     }
@@ -244,7 +243,10 @@ pub(crate) fn log_trial(logger: Option<&SharedLogger>, trial: &TrialResult) {
                 }
             }
             Err(e) => {
-                eprintln!("Warning: Failed to lock logger for trial {}: {}", trial.trial_id, e);
+                eprintln!(
+                    "Warning: Failed to lock logger for trial {}: {}",
+                    trial.trial_id, e
+                );
             }
         }
     }
@@ -257,13 +259,13 @@ pub(crate) fn finalize_logging(
     best: &TrialResult,
     duration_secs: f64,
 ) -> Result<PathBuf> {
-    let l = logger.as_ref().ok_or_else(|| {
-        TreeBoostError::Data("Logger not initialized".into())
-    })?;
+    let l = logger
+        .as_ref()
+        .ok_or_else(|| TreeBoostError::Data("Logger not initialized".into()))?;
 
-    let guard = l.lock().map_err(|e| {
-        TreeBoostError::Data(format!("Failed to lock logger: {}", e))
-    })?;
+    let guard = l
+        .lock()
+        .map_err(|e| TreeBoostError::Data(format!("Failed to lock logger: {}", e)))?;
 
     guard.export_best_params(best)?;
     guard.export_summary(history, duration_secs)?;
@@ -278,9 +280,9 @@ pub(crate) fn save_model_formats<M: super::TunableModel>(
     formats: &[ModelFormat],
 ) -> Result<()> {
     if let Some(ref l) = logger {
-        let guard = l.lock().map_err(|e| {
-            TreeBoostError::Data(format!("Failed to lock logger: {}", e))
-        })?;
+        let guard = l
+            .lock()
+            .map_err(|e| TreeBoostError::Data(format!("Failed to lock logger: {}", e)))?;
         guard.save_models(model, formats)?;
     }
     Ok(())

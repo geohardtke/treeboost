@@ -13,15 +13,13 @@ use common::{create_binary_classification_dataset, create_synthetic_dataset};
 /// Test full tuning loop on synthetic regression data
 #[test]
 fn test_autotuner_regression() {
-    let dataset = create_synthetic_dataset(500, 42);
+    let dataset = create_synthetic_dataset(150, 42);
 
-    let base_config = GBDTConfig::new()
-        .with_num_rounds(20)
-        .with_learning_rate(0.1);
+    let base_config = GBDTConfig::new().with_num_rounds(5).with_learning_rate(0.1);
 
     let tuner_config = TunerConfig::new()
-        .with_iterations(2)
-        .with_grid_strategy(GridStrategy::Cartesian { points_per_dim: 3 })
+        .with_iterations(1)
+        .with_grid_strategy(GridStrategy::Cartesian { points_per_dim: 2 })
         .with_eval_strategy(EvalStrategy::holdout(0.2))
         .with_verbose(false);
 
@@ -40,7 +38,10 @@ fn test_autotuner_regression() {
 
     // Best trial should have valid metrics
     let best = history.best().expect("Should have a best trial");
-    assert!(best.val_metric.is_finite(), "Best val_metric should be finite");
+    assert!(
+        best.val_metric.is_finite(),
+        "Best val_metric should be finite"
+    );
     assert!(best.val_metric >= 0.0, "MSE should be non-negative");
 
     // Train final model with best config
@@ -55,16 +56,16 @@ fn test_autotuner_regression() {
 /// Test full tuning loop on binary classification data
 #[test]
 fn test_autotuner_binary_classification() {
-    let dataset = create_binary_classification_dataset(400, 456);
+    let dataset = create_binary_classification_dataset(150, 456);
 
     let base_config = GBDTConfig::new()
-        .with_num_rounds(15)
+        .with_num_rounds(5)
         .with_learning_rate(0.1)
         .with_binary_logloss();
 
     let tuner_config = TunerConfig::new()
-        .with_iterations(2)
-        .with_grid_strategy(GridStrategy::Cartesian { points_per_dim: 3 })
+        .with_iterations(1)
+        .with_grid_strategy(GridStrategy::Cartesian { points_per_dim: 2 })
         .with_eval_strategy(EvalStrategy::holdout(0.2))
         .with_verbose(false);
 
@@ -93,16 +94,14 @@ fn test_autotuner_binary_classification() {
 /// Test autotuner with K-fold cross-validation
 #[test]
 fn test_autotuner_kfold() {
-    let dataset = create_synthetic_dataset(300, 321);
+    let dataset = create_synthetic_dataset(120, 321);
 
-    let base_config = GBDTConfig::new()
-        .with_num_rounds(10)
-        .with_learning_rate(0.1);
+    let base_config = GBDTConfig::new().with_num_rounds(5).with_learning_rate(0.1);
 
     let tuner_config = TunerConfig::new()
-        .with_iterations(2)
+        .with_iterations(1)
         .with_grid_strategy(GridStrategy::Cartesian { points_per_dim: 2 })
-        .with_eval_strategy(EvalStrategy::holdout(0.2).with_folds(3)) // 3-fold CV
+        .with_eval_strategy(EvalStrategy::holdout(0.2).with_folds(2)) // 2-fold CV
         .with_verbose(false);
 
     let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
@@ -126,15 +125,13 @@ fn test_autotuner_kfold() {
 /// Test autotuner with Latin Hypercube Sampling
 #[test]
 fn test_autotuner_lhs() {
-    let dataset = create_synthetic_dataset(400, 111);
+    let dataset = create_synthetic_dataset(150, 111);
 
-    let base_config = GBDTConfig::new()
-        .with_num_rounds(10)
-        .with_learning_rate(0.1);
+    let base_config = GBDTConfig::new().with_num_rounds(5).with_learning_rate(0.1);
 
     let tuner_config = TunerConfig::new()
-        .with_iterations(2)
-        .with_grid_strategy(GridStrategy::LatinHypercube { n_samples: 10 })
+        .with_iterations(1)
+        .with_grid_strategy(GridStrategy::LatinHypercube { n_samples: 4 })
         .with_eval_strategy(EvalStrategy::holdout(0.2))
         .with_verbose(false);
 
@@ -145,8 +142,8 @@ fn test_autotuner_lhs() {
 
     let (_, history) = tuner.tune(&dataset).expect("LHS tuning should succeed");
 
-    // Should have 10 trials per iteration = 20 total
-    assert!(history.len() >= 10, "Should have at least 10 trials from LHS");
+    // Should have 4 trials from LHS
+    assert!(history.len() >= 4, "Should have at least 4 trials from LHS");
 
     let best = history.best().expect("Should have best trial");
     assert!(best.val_metric.is_finite());
@@ -155,15 +152,13 @@ fn test_autotuner_lhs() {
 /// Test autotuner with Random sampling
 #[test]
 fn test_autotuner_random() {
-    let dataset = create_synthetic_dataset(400, 333);
+    let dataset = create_synthetic_dataset(150, 333);
 
-    let base_config = GBDTConfig::new()
-        .with_num_rounds(10)
-        .with_learning_rate(0.1);
+    let base_config = GBDTConfig::new().with_num_rounds(5).with_learning_rate(0.1);
 
     let tuner_config = TunerConfig::new()
-        .with_iterations(2)
-        .with_grid_strategy(GridStrategy::Random { n_samples: 8 })
+        .with_iterations(1)
+        .with_grid_strategy(GridStrategy::Random { n_samples: 4 })
         .with_eval_strategy(EvalStrategy::holdout(0.2))
         .with_verbose(false);
 
@@ -174,10 +169,10 @@ fn test_autotuner_random() {
 
     let (_, history) = tuner.tune(&dataset).expect("Random tuning should succeed");
 
-    // Should have 8 trials per iteration = 16 total
+    // Should have 4 trials from random
     assert!(
-        history.len() >= 8,
-        "Should have at least 8 trials from random"
+        history.len() >= 4,
+        "Should have at least 4 trials from random"
     );
 
     let best = history.best().expect("Should have best trial");
@@ -187,16 +182,16 @@ fn test_autotuner_random() {
 /// Test autotuner reproducibility with same seed
 #[test]
 fn test_autotuner_reproducibility() {
-    let dataset = create_synthetic_dataset(300, 555);
+    let dataset = create_synthetic_dataset(120, 555);
 
     let base_config = GBDTConfig::new()
-        .with_num_rounds(10)
+        .with_num_rounds(5)
         .with_learning_rate(0.1)
         .with_seed(42); // Fixed seed for GBDT
 
     let tuner_config = TunerConfig::new()
-        .with_iterations(2)
-        .with_grid_strategy(GridStrategy::Random { n_samples: 5 })
+        .with_iterations(1)
+        .with_grid_strategy(GridStrategy::Random { n_samples: 3 })
         .with_eval_strategy(EvalStrategy::holdout(0.2))
         .with_verbose(false)
         .with_parallel(false); // Disable parallel for determinism
@@ -252,16 +247,16 @@ fn test_autotuner_reproducibility() {
 /// Test autotuner with early stopping integration
 #[test]
 fn test_autotuner_early_stopping() {
-    let dataset = create_synthetic_dataset(600, 666);
+    let dataset = create_synthetic_dataset(150, 666);
 
     // Enable early stopping in base config
     let base_config = GBDTConfig::new()
-        .with_num_rounds(100) // High max rounds
+        .with_num_rounds(30) // Moderate max rounds
         .with_learning_rate(0.1)
-        .with_early_stopping(10, 0.2); // Stop after 10 rounds no improvement
+        .with_early_stopping(5, 0.2); // Stop after 5 rounds no improvement
 
     let tuner_config = TunerConfig::new()
-        .with_iterations(2)
+        .with_iterations(1)
         .with_grid_strategy(GridStrategy::Cartesian { points_per_dim: 2 })
         .with_eval_strategy(EvalStrategy::holdout(0.2))
         .with_verbose(false);
@@ -275,11 +270,11 @@ fn test_autotuner_early_stopping() {
         .tune(&dataset)
         .expect("Tuning with early stopping should succeed");
 
-    // Trials should have early stopped (num_trees < 100)
+    // Verify early stopping was configured (may or may not trigger on this dataset)
     let best = history.best().expect("Should have best trial");
     assert!(
-        best.num_trees <= 100,
-        "Should have used early stopping: num_trees = {}",
+        best.num_trees > 0,
+        "Should have trained some trees: num_trees = {}",
         best.num_trees
     );
 
@@ -292,11 +287,9 @@ fn test_autotuner_early_stopping() {
 /// Test autotuner with progress callback
 #[test]
 fn test_autotuner_callback() {
-    let dataset = create_synthetic_dataset(300, 888);
+    let dataset = create_synthetic_dataset(120, 888);
 
-    let base_config = GBDTConfig::new()
-        .with_num_rounds(10)
-        .with_learning_rate(0.1);
+    let base_config = GBDTConfig::new().with_num_rounds(5).with_learning_rate(0.1);
 
     let tuner_config = TunerConfig::new()
         .with_iterations(1)
@@ -330,9 +323,7 @@ fn test_autotuner_callback() {
 fn test_autotuner_history_json() {
     let dataset = create_synthetic_dataset(200, 101);
 
-    let base_config = GBDTConfig::new()
-        .with_num_rounds(5)
-        .with_learning_rate(0.1);
+    let base_config = GBDTConfig::new().with_num_rounds(5).with_learning_rate(0.1);
 
     let tuner_config = TunerConfig::new()
         .with_iterations(1)

@@ -43,12 +43,12 @@
 //! let predictions = model.predict(&test_df)?;
 //! ```
 
-use crate::analysis::{Confidence, DatasetAnalysis, DataFrameProfile};
-use crate::dataset::{BinnedDataset, DataPipeline, PipelineConfig};
-use crate::features::{SmartFeatureEngine, FeaturePlan};
-use crate::model::{BoostingMode, UniversalConfig, UniversalModel};
+use crate::analysis::{Confidence, DataFrameProfile, DatasetAnalysis};
+use crate::dataset::{BinnedDataset, DataPipeline};
+use crate::features::{FeaturePlan, SmartFeatureEngine};
 use crate::model::config::{AutoConfig, BuildPhaseTimes, BuildResult, TuningLevel};
 use crate::model::progress::{ProgressCallback, ProgressUpdate, TrainingPhase};
+use crate::model::{BoostingMode, UniversalConfig, UniversalModel};
 use crate::preprocessing::{ModelType, PreprocessingPlan, SmartPreprocessor};
 use crate::Result;
 use polars::prelude::*;
@@ -57,7 +57,6 @@ use std::time::{Duration, Instant};
 
 // Import tuning functions
 use super::tuning;
-
 
 /// AutoBuilder: High-level AutoML interface
 pub struct AutoBuilder {
@@ -194,7 +193,13 @@ impl AutoBuilder {
             phase: TrainingPhase::Preprocessing,
             progress_pct: TrainingPhase::Preprocessing.progress_pct(),
             elapsed: start.elapsed(),
-            message: Some(format!("{} columns retained", profile.columns.len().saturating_sub(profile.drop_columns.len()))),
+            message: Some(format!(
+                "{} columns retained",
+                profile
+                    .columns
+                    .len()
+                    .saturating_sub(profile.drop_columns.len())
+            )),
         });
 
         let phase_start = Instant::now();
@@ -229,7 +234,11 @@ impl AutoBuilder {
             phase: TrainingPhase::FeatureEngineering,
             progress_pct: TrainingPhase::FeatureEngineering.progress_pct(),
             elapsed: start.elapsed(),
-            message: if skip_features { Some("Skipped".to_string()) } else { Some("Planning features".to_string()) },
+            message: if skip_features {
+                Some("Skipped".to_string())
+            } else {
+                Some("Planning features".to_string())
+            },
         });
 
         let phase_start = Instant::now();
@@ -260,7 +269,8 @@ impl AutoBuilder {
             message: Some(format!("{} rows", df.height())),
         });
 
-        let (dataset, pipeline_state) = self.prepare_dataset_and_state(df, target_col)?;
+        let (dataset, pipeline_state, _filtered_df) =
+            self.prepare_dataset_and_state(df, target_col)?;
 
         // === Phase 5: Dataset Analysis (for mode selection) ===
         self.config.progress_callback.on_progress(&ProgressUpdate {
@@ -313,23 +323,21 @@ impl AutoBuilder {
         });
 
         let phase_start = Instant::now();
-        let (universal_config, ltt_tuning, tree_tuning) = if adapted_config.tuning_level == TuningLevel::None {
+        let (universal_config, ltt_tuning, tree_tuning) = if adapted_config.tuning_level
+            == TuningLevel::None
+        {
             // Skip tuning, use defaults
             let config = tuning::create_config_for_mode(mode, self.config.tuning_level);
             (config, None, None)
         } else {
-            tuning::tune_hyperparameters(&self.config, 
-                &dataset,
-                mode,
-                df,
-                target_col,
-                &profile,
-            )?
+            tuning::tune_hyperparameters(&self.config, &dataset, mode, df, target_col, &profile)?
         };
         phase_times.tuning = phase_start.elapsed();
 
         if self.config.verbose {
-            let num_trials = ltt_tuning.as_ref().map(|t| t.history.linear_trials.len())
+            let num_trials = ltt_tuning
+                .as_ref()
+                .map(|t| t.history.linear_trials.len())
                 .or_else(|| tree_tuning.as_ref().map(|t| t.num_trials))
                 .unwrap_or(0);
             println!("  [Tuning] {} trials completed", num_trials);
@@ -344,14 +352,21 @@ impl AutoBuilder {
         });
 
         let phase_start = Instant::now();
-        let model = self.train_model(&dataset, universal_config)?;
+        // Create FeatureExtractor for LinearThenTree mode to ensure consistent feature extraction
+        let (feature_extractor, raw_features) = if matches!(mode, BoostingMode::LinearThenTree) {
+            let extractor = crate::dataset::feature_extractor::FeatureExtractor::new();
+            // Extract raw features from original DataFrame for linear model
+            let (features, _num_features) = extractor.extract(df, target_col)?;
+            (Some(extractor), Some(features))
+        } else {
+            (None, None)
+        };
+        let model =
+            self.train_model(&dataset, universal_config, feature_extractor, raw_features)?;
         phase_times.training = phase_start.elapsed();
 
         if self.config.verbose {
-            println!(
-                "  [Train] Model trained in {:?}",
-                phase_times.training
-            );
+            println!("  [Train] Model trained in {:?}", phase_times.training);
         }
 
         // Emit completion progress
@@ -373,7 +388,7 @@ impl AutoBuilder {
             tree_tuning,
             column_profile: Some(profile),
             analysis,
-            pipeline_state: Some(pipeline_state),  // CRITICAL for inference!
+            pipeline_state: Some(pipeline_state), // CRITICAL for inference!
             build_time: start.elapsed(),
             phase_times,
         })
@@ -385,12 +400,17 @@ impl AutoBuilder {
     }
 
     /// Plan preprocessing based on profile and model type
-    fn plan_preprocessing(&self, profile: &DataFrameProfile) -> Result<(ModelType, PreprocessingPlan)> {
+    fn plan_preprocessing(
+        &self,
+        profile: &DataFrameProfile,
+    ) -> Result<(ModelType, PreprocessingPlan)> {
         // For now, use a simple heuristic based on profile
         // If the data looks linear (high correlation with target), use LinearThenTree
         // Otherwise use Tree
         let has_linear_signal = profile.columns.iter().any(|c| {
-            c.target_correlation.map(|r| r.abs() > 0.3).unwrap_or(false)
+            c.target_correlation
+                .map(|r| r.abs() > crate::model::config::LINEAR_SIGNAL_THRESHOLD)
+                .unwrap_or(false)
         });
 
         let model_type = if has_linear_signal {
@@ -414,29 +434,16 @@ impl AutoBuilder {
         &self,
         df: &DataFrame,
         target_col: &str,
-    ) -> Result<(BinnedDataset, crate::dataset::PipelineState)> {
-        // Get feature column names (all except target)
-        let feature_cols: Vec<String> = df
-            .get_column_names()
-            .iter()
-            .filter(|&name| name.as_str() != target_col)
-            .map(|s| s.to_string())
-            .collect();
-
-        // Convert to &str slice for DataPipeline
-        let feature_col_refs: Vec<&str> = feature_cols.iter().map(|s| s.as_str()).collect();
-
+    ) -> Result<(BinnedDataset, crate::dataset::PipelineState, DataFrame)> {
         // Use DataPipeline to create BinnedDataset
-        let pipeline_config = PipelineConfig::default();
-        let pipeline = DataPipeline::new(pipeline_config);
+        let pipeline = DataPipeline::with_defaults();
 
-        let (dataset, pipeline_state) = pipeline.process_for_training(
-            df.clone(),
-            target_col,
-            Some(&feature_col_refs),
-        )?;
+        // Pass None for categorical_columns to enable auto-detection
+        // (String/Categorical dtypes will be treated as categorical)
+        let (dataset, pipeline_state, filtered_df) =
+            pipeline.process_for_training(df.clone(), target_col, None)?;
 
-        Ok((dataset, pipeline_state))
+        Ok((dataset, pipeline_state, filtered_df))
     }
 
     /// Select boosting mode based on analysis
@@ -444,6 +451,11 @@ impl AutoBuilder {
         &self,
         dataset: &BinnedDataset,
     ) -> Result<(BoostingMode, Option<DatasetAnalysis>, Confidence)> {
+        // If custom config provided, use its mode
+        if let Some(ref custom) = self.config.custom_config {
+            return Ok((custom.mode, None, Confidence::High));
+        }
+
         // If mode is forced, use it
         if let Some(mode) = self.config.force_mode {
             return Ok((mode, None, Confidence::High));
@@ -470,10 +482,26 @@ impl AutoBuilder {
         &self,
         dataset: &BinnedDataset,
         config: UniversalConfig,
+        feature_extractor: Option<crate::dataset::feature_extractor::FeatureExtractor>,
+        raw_features: Option<Vec<f32>>,
     ) -> Result<UniversalModel> {
         // Use MSE loss as default (could be made configurable)
         let loss = crate::loss::MseLoss;
-        UniversalModel::train(dataset, config, &loss)
+
+        // Pass raw features to training if we're in LTT mode
+        if matches!(config.mode, crate::model::BoostingMode::LinearThenTree)
+            && raw_features.is_some()
+        {
+            UniversalModel::train_with_raw_features(
+                dataset,
+                &raw_features.as_ref().unwrap(),
+                config,
+                &loss,
+                feature_extractor,
+            )
+        } else {
+            UniversalModel::train(dataset, config, &loss, feature_extractor)
+        }
     }
 }
 

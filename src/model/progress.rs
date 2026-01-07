@@ -153,7 +153,9 @@ impl ProgressCallback for ConsoleProgress {
         } else {
             println!(
                 "[{:3}%] {} │{}│",
-                update.progress_pct, update.phase.name(), bar
+                update.progress_pct,
+                update.phase.name(),
+                bar
             );
         }
     }

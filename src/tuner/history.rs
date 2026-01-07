@@ -132,9 +132,15 @@ impl SearchHistory {
             json.push_str(&format!("      \"trial_id\": {},\n", trial.trial_id));
             json.push_str(&format!("      \"iteration\": {},\n", trial.iteration));
             json.push_str(&format!("      \"val_metric\": {},\n", trial.val_metric));
-            json.push_str(&format!("      \"train_metric\": {},\n", trial.train_metric));
+            json.push_str(&format!(
+                "      \"train_metric\": {},\n",
+                trial.train_metric
+            ));
             json.push_str(&format!("      \"num_trees\": {},\n", trial.num_trees));
-            json.push_str(&format!("      \"train_time_ms\": {},\n", trial.train_time_ms));
+            json.push_str(&format!(
+                "      \"train_time_ms\": {},\n",
+                trial.train_time_ms
+            ));
             json.push_str("      \"params\": {\n");
             for (j, (k, v)) in trial.params.iter().enumerate() {
                 let comma = if j < trial.params.len() - 1 { "," } else { "" };

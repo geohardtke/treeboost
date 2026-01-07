@@ -116,6 +116,13 @@ impl DataPipeline {
         }
     }
 
+    /// Create a new data pipeline with default configuration
+    ///
+    /// This is a convenience method equivalent to `DataPipeline::new(PipelineConfig::default())`.
+    pub fn with_defaults() -> Self {
+        Self::new(PipelineConfig::default())
+    }
+
     /// Create with default configuration
     pub fn default_config() -> Self {
         Self::new(PipelineConfig::default())
@@ -165,7 +172,7 @@ impl DataPipeline {
             df.get_column_names()
         );
 
-        let num_rows = df.height();
+        let _num_rows = df.height();
 
         // Extract target column
         let target_col = df.column(target_column).map_err(|e| {

@@ -35,11 +35,11 @@
 //! ```
 
 use crate::analysis::{Confidence, DataFrameProfile, DatasetAnalysis};
-use crate::dataset::{BinnedDataset, DataPipeline, PipelineConfig};
+use crate::dataset::{BinnedDataset, DataPipeline};
 use crate::features::FeaturePlan;
 use crate::model::{
-    AutoBuilder, AutoConfig, BoostingMode, BuildPhaseTimes, BuildResult, TreeTuningResult, TuningLevel,
-    UniversalModel,
+    AutoBuilder, AutoConfig, BoostingMode, BuildPhaseTimes, BuildResult, TreeTuningResult,
+    TuningLevel, UniversalModel,
 };
 use crate::preprocessing::PreprocessingPlan;
 use crate::tuner::ltt::LttTuningResult;
@@ -143,22 +143,14 @@ impl AutoModel {
     }
 
     /// Train with a specific mode (bypass auto-selection)
-    pub fn train_with_mode(
-        df: &DataFrame,
-        target_col: &str,
-        mode: BoostingMode,
-    ) -> Result<Self> {
+    pub fn train_with_mode(df: &DataFrame, target_col: &str, mode: BoostingMode) -> Result<Self> {
         let builder = AutoBuilder::new().with_mode(mode);
         let result = builder.fit(df, target_col)?;
         Ok(Self::from_build_result(result))
     }
 
     /// Train with custom configuration
-    pub fn train_with_config(
-        df: &DataFrame,
-        target_col: &str,
-        config: AutoConfig,
-    ) -> Result<Self> {
+    pub fn train_with_config(df: &DataFrame, target_col: &str, config: AutoConfig) -> Result<Self> {
         let builder = AutoBuilder::with_config(config);
         let result = builder.fit(df, target_col)?;
         Ok(Self::from_build_result(result))
@@ -170,6 +162,19 @@ impl AutoModel {
     pub fn predict(&self, df: &DataFrame) -> Result<Vec<f32>> {
         // Convert DataFrame to BinnedDataset for prediction
         let dataset = self.prepare_dataset_for_prediction(df)?;
+
+        // For LinearThenTree, use dual-representation inference if FeatureExtractor is stored
+        if matches!(self.mode, crate::model::BoostingMode::LinearThenTree) {
+            if let Some(ref extractor) = self.model.feature_extractor() {
+                // Extract raw features using same FeatureExtractor as training
+                let (raw_features, _num_features) = extractor.extract(df, &self.target_column)?;
+
+                return Ok(self
+                    .model
+                    .predict_with_raw_features(&dataset, &raw_features));
+            }
+        }
+
         Ok(self.model.predict(&dataset))
     }
 
@@ -251,7 +256,10 @@ impl AutoModel {
             lines.push(format!("  Columns: {} total", profile.columns.len()));
             lines.push(format!("    • Numeric: {}", profile.num_numeric));
             lines.push(format!("    • Categorical: {}", profile.num_categorical));
-            lines.push(format!("  Target: {} ({:?})", self.target_column, profile.task_type));
+            lines.push(format!(
+                "  Target: {} ({:?})",
+                self.target_column, profile.task_type
+            ));
 
             if !profile.drop_columns.is_empty() {
                 lines.push("".to_string());
@@ -281,7 +289,10 @@ impl AutoModel {
             lines.push("═══ FEATURE ENGINEERING ═══".to_string());
 
             if !plan.polynomial_features.is_empty() {
-                lines.push(format!("  Polynomial features ({}): ", plan.polynomial_features.len()));
+                lines.push(format!(
+                    "  Polynomial features ({}): ",
+                    plan.polynomial_features.len()
+                ));
                 for feat in &plan.polynomial_features {
                     lines.push(format!("    • {}", feat));
                 }
@@ -295,12 +306,18 @@ impl AutoModel {
             }
 
             if !plan.interaction_pairs.is_empty() {
-                lines.push(format!("  Interaction features ({}): ", plan.interaction_pairs.len()));
+                lines.push(format!(
+                    "  Interaction features ({}): ",
+                    plan.interaction_pairs.len()
+                ));
                 for (f1, f2) in plan.interaction_pairs.iter().take(5) {
                     lines.push(format!("    • {} × {}", f1, f2));
                 }
                 if plan.interaction_pairs.len() > 5 {
-                    lines.push(format!("    ... and {} more", plan.interaction_pairs.len() - 5));
+                    lines.push(format!(
+                        "    ... and {} more",
+                        plan.interaction_pairs.len() - 5
+                    ));
                 }
             }
 
@@ -317,20 +334,38 @@ impl AutoModel {
         // Section 4: Mode Selection
         lines.push("═══ MODE SELECTION ═══".to_string());
         lines.push(format!("  Selected: {:?}", self.mode));
-        lines.push(format!("  Confidence: {:?}",
-            self.mode_confidence.as_ref().map(|c| format!("{:?}", c)).unwrap_or("N/A".to_string())
+        lines.push(format!(
+            "  Confidence: {:?}",
+            self.mode_confidence
+                .as_ref()
+                .map(|c| format!("{:?}", c))
+                .unwrap_or("N/A".to_string())
         ));
 
         if let Some(ref analysis) = self.analysis {
             lines.push("".to_string());
             lines.push("  Analysis Results:".to_string());
-            lines.push(format!("    • Linear R²: {:.4} ({})",
+            lines.push(format!(
+                "    • Linear R²: {:.4} ({})",
                 analysis.linear_r2,
-                if analysis.linear_r2 > 0.5 { "Strong" } else if analysis.linear_r2 > 0.3 { "Moderate" } else { "Weak" }
+                if analysis.linear_r2 > 0.5 {
+                    "Strong"
+                } else if analysis.linear_r2 > 0.3 {
+                    "Moderate"
+                } else {
+                    "Weak"
+                }
             ));
-            lines.push(format!("    • Tree Gain: {:.4} ({})",
+            lines.push(format!(
+                "    • Tree Gain: {:.4} ({})",
                 analysis.tree_gain,
-                if analysis.tree_gain > 0.3 { "Strong" } else if analysis.tree_gain > 0.1 { "Moderate" } else { "Weak" }
+                if analysis.tree_gain > 0.3 {
+                    "Strong"
+                } else if analysis.tree_gain > 0.1 {
+                    "Moderate"
+                } else {
+                    "Weak"
+                }
             ));
 
             // Show the recommended mode from analysis
@@ -357,17 +392,28 @@ impl AutoModel {
             lines.push("  Linear Phase:".to_string());
             lines.push(format!("    • R²: {:.4}", tuning.linear_r2));
             lines.push(format!("    • Lambda: {:.4}", tuning.linear_params.lambda));
-            lines.push(format!("    • L1 Ratio: {:.4} ({})",
+            lines.push(format!(
+                "    • L1 Ratio: {:.4} ({})",
                 tuning.linear_params.l1_ratio,
-                if tuning.linear_params.l1_ratio == 0.0 { "Ridge" }
-                else if tuning.linear_params.l1_ratio == 1.0 { "LASSO" }
-                else { "ElasticNet" }
+                if tuning.linear_params.l1_ratio == 0.0 {
+                    "Ridge"
+                } else if tuning.linear_params.l1_ratio == 1.0 {
+                    "LASSO"
+                } else {
+                    "ElasticNet"
+                }
             ));
             lines.push("".to_string());
             lines.push("  Tree Phase:".to_string());
             lines.push(format!("    • Max Depth: {}", tuning.tree_params.max_depth));
-            lines.push(format!("    • Learning Rate: {:.4}", tuning.tree_params.learning_rate));
-            lines.push(format!("    • Num Rounds: {}", tuning.tree_params.num_rounds));
+            lines.push(format!(
+                "    • Learning Rate: {:.4}",
+                tuning.tree_params.learning_rate
+            ));
+            lines.push(format!(
+                "    • Num Rounds: {}",
+                tuning.tree_params.num_rounds
+            ));
             lines.push("".to_string());
             lines.push(format!("  Final RMSE: {:.4}", tuning.final_rmse));
             lines.push("".to_string());
@@ -375,20 +421,35 @@ impl AutoModel {
 
         // Section 6: Training Summary
         lines.push("═══ TRAINING SUMMARY ═══".to_string());
-        lines.push(format!("  Total Time: {:.3}s", self.build_time.as_secs_f64()));
+        lines.push(format!(
+            "  Total Time: {:.3}s",
+            self.build_time.as_secs_f64()
+        ));
         lines.push("".to_string());
         lines.push("  Phase Breakdown:".to_string());
         lines.push(format!("    • Profiling: {:?}", self.phase_times.profiling));
-        lines.push(format!("    • Preprocessing: {:?}", self.phase_times.preprocessing));
-        lines.push(format!("    • Feature Engineering: {:?}", self.phase_times.feature_engineering));
+        lines.push(format!(
+            "    • Preprocessing: {:?}",
+            self.phase_times.preprocessing
+        ));
+        lines.push(format!(
+            "    • Feature Engineering: {:?}",
+            self.phase_times.feature_engineering
+        ));
         lines.push(format!("    • Analysis: {:?}", self.phase_times.analysis));
         lines.push(format!("    • Tuning: {:?}", self.phase_times.tuning));
         lines.push(format!("    • Training: {:?}", self.phase_times.training));
         lines.push("".to_string());
 
-        lines.push("┌─────────────────────────────────────────────────────────────────┐".to_string());
-        lines.push("│      TreeBoost: The Smart Engineer That Explains Itself         │".to_string());
-        lines.push("└─────────────────────────────────────────────────────────────────┘".to_string());
+        lines.push(
+            "┌─────────────────────────────────────────────────────────────────┐".to_string(),
+        );
+        lines.push(
+            "│      TreeBoost: The Smart Engineer That Explains Itself         │".to_string(),
+        );
+        lines.push(
+            "└─────────────────────────────────────────────────────────────────┘".to_string(),
+        );
 
         lines.join("\n")
     }
@@ -398,14 +459,14 @@ impl AutoModel {
         // CRITICAL: Use the fitted pipeline state from training!
         // Without this, predictions will be nonsense because the model expects
         // features encoded the same way as during training.
-        let pipeline_state = self.pipeline_state.as_ref()
-            .ok_or_else(|| TreeBoostError::Data(
-                "AutoModel missing fitted pipeline state - cannot make predictions".to_string()
-            ))?;
+        let pipeline_state = self.pipeline_state.as_ref().ok_or_else(|| {
+            TreeBoostError::Data(
+                "AutoModel missing fitted pipeline state - cannot make predictions".to_string(),
+            )
+        })?;
 
         // Use DataPipeline to transform the test data using the fitted state
-        let pipeline_config = PipelineConfig::default();
-        let pipeline = DataPipeline::new(pipeline_config);
+        let pipeline = DataPipeline::with_defaults();
 
         // process_for_inference() applies the learned encodings/scalers/binners
         let dataset = pipeline.process_for_inference(df.clone(), pipeline_state)?;

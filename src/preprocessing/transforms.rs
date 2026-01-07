@@ -422,11 +422,7 @@ mod tests {
         let mut transform = YeoJohnsonTransform::new();
 
         // Skewed data - should find lambda that normalizes it
-        let data = vec![
-            0.1, 10.0,
-            1.0, 100.0,
-            5.0, 1000.0,
-        ]; // 3 rows × 2 features
+        let data = vec![0.1, 10.0, 1.0, 100.0, 5.0, 1000.0]; // 3 rows × 2 features
 
         transform.fit(&data, 2).unwrap();
 
@@ -501,10 +497,7 @@ mod tests {
         let mut transform = YeoJohnsonTransform::new();
 
         // Data with NaN
-        let mut data = vec![
-            1.0, f32::NAN,
-            5.0, 10.0,
-        ];
+        let mut data = vec![1.0, f32::NAN, 5.0, 10.0];
 
         transform.fit_transform(&mut data, 2).unwrap();
 
@@ -542,10 +535,7 @@ mod tests {
         let mut transform = YeoJohnsonTransform::new();
 
         // Column 0 all NaN
-        let data = vec![
-            f32::NAN, 1.0,
-            f32::NAN, 2.0,
-        ];
+        let data = vec![f32::NAN, 1.0, f32::NAN, 2.0];
 
         transform.fit(&data, 2).unwrap();
 

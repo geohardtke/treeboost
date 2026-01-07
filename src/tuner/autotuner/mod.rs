@@ -236,11 +236,14 @@ impl<M: TunableModel> AutoTuner<M> {
     }
 
     /// Internal tune method that works with BinnedDataset
-    fn run_tune_with_dataset(&mut self, dataset: &BinnedDataset) -> Result<(M::Config, SearchHistory)> {
+    fn run_tune_with_dataset(
+        &mut self,
+        dataset: &BinnedDataset,
+    ) -> Result<(M::Config, SearchHistory)> {
         // Validate configuration
-        self.config.validate().map_err(|e| {
-            TreeBoostError::Config(format!("Invalid tuner configuration: {}", e))
-        })?;
+        self.config
+            .validate()
+            .map_err(|e| TreeBoostError::Config(format!("Invalid tuner configuration: {}", e)))?;
 
         let total_trials = self.config.estimated_trials();
         let use_parallel = self.config.parallel_trials && !self.is_gpu_backend();
@@ -320,13 +323,18 @@ impl<M: TunableModel> AutoTuner<M> {
 
                     if is_best {
                         // Show metrics based on eval strategy and task type
-                        let is_conformal = matches!(self.config.eval_strategy, EvalStrategy::Conformal { .. });
+                        let is_conformal =
+                            matches!(self.config.eval_strategy, EvalStrategy::Conformal { .. });
                         let metric_str = if is_conformal {
                             // Conformal: val_metric is interval width (quantile q)
                             format!("q={:.5} (interval width)", result.val_metric)
                         } else if self.config.task_type.is_regression() {
                             // Regression: show MSE and RMSE
-                            format!("MSE={:.5} RMSE={:.4}", result.val_metric, result.val_metric.sqrt())
+                            format!(
+                                "MSE={:.5} RMSE={:.4}",
+                                result.val_metric,
+                                result.val_metric.sqrt()
+                            )
                         } else {
                             // Classification: show LogLoss, AUC, F1
                             let auc_str = result
@@ -340,7 +348,9 @@ impl<M: TunableModel> AutoTuner<M> {
                             format!("LogLoss={:.5}{}{}", result.val_metric, auc_str, f1_str)
                         };
                         // Show learning_rate from params if tuned, otherwise from base_config
-                        let lr = result.params.get("learning_rate")
+                        let lr = result
+                            .params
+                            .get("learning_rate")
                             .copied()
                             .unwrap_or(M::get_learning_rate(&self.base_config));
                         println!(
@@ -359,7 +369,10 @@ impl<M: TunableModel> AutoTuner<M> {
             // Check if we found improvement using the configured optimization metric
             let improved = if let Some(best_after) = self.history.best() {
                 // Find best trial from previous iterations
-                let best_before_trial = self.history.trials().iter()
+                let best_before_trial = self
+                    .history
+                    .trials()
+                    .iter()
                     .filter(|t| t.iteration < iteration)
                     .max_by(|a, b| {
                         if self.history.compare_trials(a, b) {
@@ -397,14 +410,19 @@ impl<M: TunableModel> AutoTuner<M> {
 
                 if zone_switch_fails >= MAX_ZONE_SWITCH_FAILS {
                     if self.config.verbose {
-                        println!("  {} consecutive zone switches failed, stopping search.", zone_switch_fails);
+                        println!(
+                            "  {} consecutive zone switches failed, stopping search.",
+                            zone_switch_fails
+                        );
                     }
                     break;
                 }
 
                 if self.config.verbose {
-                    println!("  No improvement found, switching zone ({}/{} fails)...",
-                             zone_switch_fails, MAX_ZONE_SWITCH_FAILS);
+                    println!(
+                        "  No improvement found, switching zone ({}/{} fails)...",
+                        zone_switch_fails, MAX_ZONE_SWITCH_FAILS
+                    );
                 }
                 // Reset zoom level to explore wider
                 zoom_level = 0;
@@ -430,9 +448,10 @@ impl<M: TunableModel> AutoTuner<M> {
         }
 
         // Build final config from best trial
-        let best = self.history.best().ok_or_else(|| {
-            TreeBoostError::Training("No successful trials".into())
-        })?;
+        let best = self
+            .history
+            .best()
+            .ok_or_else(|| TreeBoostError::Training("No successful trials".into()))?;
 
         if self.config.verbose {
             println!("\n=== Tuning Complete ===");
@@ -442,7 +461,11 @@ impl<M: TunableModel> AutoTuner<M> {
             if is_conformal {
                 println!("  Best interval width (q): {:.6}", best.val_metric);
             } else if self.config.task_type.is_regression() {
-                println!("  Best MSE: {:.6} (RMSE: {:.4})", best.val_metric, best.val_metric.sqrt());
+                println!(
+                    "  Best MSE: {:.6} (RMSE: {:.4})",
+                    best.val_metric,
+                    best.val_metric.sqrt()
+                );
             } else {
                 println!("  Best LogLoss: {:.6}", best.val_metric);
                 if let Some(auc) = best.roc_auc {
@@ -481,7 +504,10 @@ impl<M: TunableModel> AutoTuner<M> {
                 save_model_formats(&logger, &final_model, &self.config.save_model_formats)?;
 
                 if self.config.verbose {
-                    println!("  Model saved in {} format(s)", self.config.save_model_formats.len());
+                    println!(
+                        "  Model saved in {} format(s)",
+                        self.config.save_model_formats.len()
+                    );
                 }
             }
 
@@ -535,9 +561,9 @@ impl<M: TunableModel> AutoTuner<M> {
     /// Internal tuning loop (shared by tune and tune_dataframe)
     fn tune_internal(&mut self) -> Result<(M::Config, SearchHistory)> {
         // Validate configuration
-        self.config.validate().map_err(|e| {
-            TreeBoostError::Config(format!("Invalid tuner configuration: {}", e))
-        })?;
+        self.config
+            .validate()
+            .map_err(|e| TreeBoostError::Config(format!("Invalid tuner configuration: {}", e)))?;
 
         let total_trials = self.config.estimated_trials();
         let use_parallel = self.config.parallel_trials && !self.is_gpu_backend();
@@ -620,13 +646,18 @@ impl<M: TunableModel> AutoTuner<M> {
 
                     if is_best {
                         // Show metrics based on eval strategy and task type
-                        let is_conformal = matches!(self.config.eval_strategy, EvalStrategy::Conformal { .. });
+                        let is_conformal =
+                            matches!(self.config.eval_strategy, EvalStrategy::Conformal { .. });
                         let metric_str = if is_conformal {
                             // Conformal: val_metric is interval width (quantile q)
                             format!("q={:.5} (interval width)", result.val_metric)
                         } else if self.config.task_type.is_regression() {
                             // Regression: show MSE and RMSE
-                            format!("MSE={:.5} RMSE={:.4}", result.val_metric, result.val_metric.sqrt())
+                            format!(
+                                "MSE={:.5} RMSE={:.4}",
+                                result.val_metric,
+                                result.val_metric.sqrt()
+                            )
                         } else {
                             // Classification: show LogLoss, AUC, F1
                             let auc_str = result
@@ -640,7 +671,9 @@ impl<M: TunableModel> AutoTuner<M> {
                             format!("LogLoss={:.5}{}{}", result.val_metric, auc_str, f1_str)
                         };
                         // Show learning_rate from params if tuned, otherwise from base_config
-                        let lr = result.params.get("learning_rate")
+                        let lr = result
+                            .params
+                            .get("learning_rate")
                             .copied()
                             .unwrap_or(M::get_learning_rate(&self.base_config));
                         println!(
@@ -659,7 +692,10 @@ impl<M: TunableModel> AutoTuner<M> {
             // Check if we found improvement using the configured optimization metric
             let improved = if let Some(best_after) = self.history.best() {
                 // Find best trial from previous iterations
-                let best_before_trial = self.history.trials().iter()
+                let best_before_trial = self
+                    .history
+                    .trials()
+                    .iter()
                     .filter(|t| t.iteration < iteration)
                     .max_by(|a, b| {
                         if self.history.compare_trials(a, b) {
@@ -697,14 +733,19 @@ impl<M: TunableModel> AutoTuner<M> {
 
                 if zone_switch_fails >= MAX_ZONE_SWITCH_FAILS {
                     if self.config.verbose {
-                        println!("  {} consecutive zone switches failed, stopping search.", zone_switch_fails);
+                        println!(
+                            "  {} consecutive zone switches failed, stopping search.",
+                            zone_switch_fails
+                        );
                     }
                     break;
                 }
 
                 if self.config.verbose {
-                    println!("  No improvement found, switching zone ({}/{} fails)...",
-                             zone_switch_fails, MAX_ZONE_SWITCH_FAILS);
+                    println!(
+                        "  No improvement found, switching zone ({}/{} fails)...",
+                        zone_switch_fails, MAX_ZONE_SWITCH_FAILS
+                    );
                 }
                 // Reset zoom level to explore wider
                 zoom_level = 0;
@@ -730,9 +771,10 @@ impl<M: TunableModel> AutoTuner<M> {
         }
 
         // Build final config from best trial
-        let best = self.history.best().ok_or_else(|| {
-            TreeBoostError::Training("No successful trials".into())
-        })?;
+        let best = self
+            .history
+            .best()
+            .ok_or_else(|| TreeBoostError::Training("No successful trials".into()))?;
 
         if self.config.verbose {
             println!("\n=== Tuning Complete ===");
@@ -742,7 +784,11 @@ impl<M: TunableModel> AutoTuner<M> {
             if is_conformal {
                 println!("  Best interval width (q): {:.6}", best.val_metric);
             } else if self.config.task_type.is_regression() {
-                println!("  Best MSE: {:.6} (RMSE: {:.4})", best.val_metric, best.val_metric.sqrt());
+                println!(
+                    "  Best MSE: {:.6} (RMSE: {:.4})",
+                    best.val_metric,
+                    best.val_metric.sqrt()
+                );
             } else {
                 println!("  Best LogLoss: {:.6}", best.val_metric);
                 if let Some(auc) = best.roc_auc {
@@ -787,7 +833,10 @@ impl<M: TunableModel> AutoTuner<M> {
                         save_model_formats(&logger, &final_model, &self.config.save_model_formats)?;
 
                         if self.config.verbose {
-                            println!("  Model saved in {} format(s)", self.config.save_model_formats.len());
+                            println!(
+                                "  Model saved in {} format(s)",
+                                self.config.save_model_formats.len()
+                            );
                         }
                     }
                     _ => {
@@ -812,12 +861,8 @@ impl<M: TunableModel> AutoTuner<M> {
             GridStrategy::Cartesian { points_per_dim } => {
                 self.generate_cartesian_grid(spread, points_per_dim)
             }
-            GridStrategy::LatinHypercube { n_samples } => {
-                self.generate_lhs_grid(spread, n_samples)
-            }
-            GridStrategy::Random { n_samples } => {
-                self.generate_random_grid(spread, n_samples)
-            }
+            GridStrategy::LatinHypercube { n_samples } => self.generate_lhs_grid(spread, n_samples),
+            GridStrategy::Random { n_samples } => self.generate_random_grid(spread, n_samples),
         }
     }
 
@@ -889,12 +934,7 @@ impl<M: TunableModel> AutoTuner<M> {
     }
 
     /// Generate values for a single parameter
-    fn generate_param_values(
-        &self,
-        param: &ParamDef,
-        spread: f32,
-        points: usize,
-    ) -> Vec<f32> {
+    fn generate_param_values(&self, param: &ParamDef, spread: f32, points: usize) -> Vec<f32> {
         let center = param.center;
         let (min, max) = (param.bounds.min_value(), param.bounds.max_value());
 
@@ -948,10 +988,7 @@ impl<M: TunableModel> AutoTuner<M> {
                 let low = (low / step) * step;
                 let high = high.div_ceil(*step) * step;
 
-                let mut values: Vec<f32> = (low..=high)
-                    .step_by(*step)
-                    .map(|v| v as f32)
-                    .collect();
+                let mut values: Vec<f32> = (low..=high).step_by(*step).map(|v| v as f32).collect();
 
                 // Limit to points_per_dim values, evenly spaced
                 if values.len() > points {
@@ -996,9 +1033,9 @@ impl<M: TunableModel> AutoTuner<M> {
     /// and sampling exactly once from each stratum. This provides better coverage than
     /// pure random sampling with the same number of samples.
     fn generate_lhs_grid(&self, spread: f32, n_samples: usize) -> Vec<HashMap<String, f32>> {
+        use rand::rngs::StdRng;
         use rand::seq::SliceRandom;
         use rand::{Rng, SeedableRng};
-        use rand::rngs::StdRng;
 
         if n_samples == 0 {
             return Vec::new();
@@ -1065,8 +1102,8 @@ impl<M: TunableModel> AutoTuner<M> {
 
     /// Generate random sampling grid with proper deterministic PRNG
     fn generate_random_grid(&self, spread: f32, n_samples: usize) -> Vec<HashMap<String, f32>> {
-        use rand::{Rng, SeedableRng};
         use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
 
         if n_samples == 0 {
             return Vec::new();
@@ -1134,50 +1171,42 @@ impl<M: TunableModel> AutoTuner<M> {
                 EvalStrategy::Holdout {
                     validation_ratio,
                     folds,
-                } => {
-                    self.evaluate_holdout_with_folds(dataset, params, validation_ratio, folds)?
-                }
+                } => self.evaluate_holdout_with_folds(dataset, params, validation_ratio, folds)?,
                 EvalStrategy::Conformal {
                     calibration_ratio,
                     quantile,
                     folds,
-                } => {
-                    self.evaluate_conformal_with_folds(
-                        dataset,
-                        params,
-                        calibration_ratio,
-                        quantile,
-                        folds,
-                    )?
-                }
+                } => self.evaluate_conformal_with_folds(
+                    dataset,
+                    params,
+                    calibration_ratio,
+                    quantile,
+                    folds,
+                )?,
             },
             EvalInput::Realistic { raw_data, config } => match self.config.eval_strategy {
                 EvalStrategy::Holdout {
                     validation_ratio,
                     folds,
-                } => {
-                    self.evaluate_holdout_realistic_with_folds(
-                        raw_data,
-                        config,
-                        params,
-                        validation_ratio,
-                        folds,
-                    )?
-                }
+                } => self.evaluate_holdout_realistic_with_folds(
+                    raw_data,
+                    config,
+                    params,
+                    validation_ratio,
+                    folds,
+                )?,
                 EvalStrategy::Conformal {
                     calibration_ratio,
                     quantile,
                     folds,
-                } => {
-                    self.evaluate_conformal_realistic_with_folds(
-                        raw_data,
-                        config,
-                        params,
-                        calibration_ratio,
-                        quantile,
-                        folds,
-                    )?
-                }
+                } => self.evaluate_conformal_realistic_with_folds(
+                    raw_data,
+                    config,
+                    params,
+                    calibration_ratio,
+                    quantile,
+                    folds,
+                )?,
             },
         };
 
@@ -1196,7 +1225,7 @@ impl<M: TunableModel> AutoTuner<M> {
         Ok(TrialResult {
             trial_id,
             iteration,
-            params: full_params,  // Store full params (tuned + fixed)
+            params: full_params, // Store full params (tuned + fixed)
             val_metric,
             train_metric,
             num_trees,
@@ -1251,10 +1280,20 @@ impl<M: TunableModel> AutoTuner<M> {
 
         // Compute metrics using shared helper
         let (val_metric, train_metric, f1_score, roc_auc) = self.compute_metrics_by_indices(
-            &predictions, targets, &split.train, &split.validation, &metric,
+            &predictions,
+            targets,
+            &split.train,
+            &split.validation,
+            &metric,
         );
 
-        Ok((val_metric, train_metric, model.num_trees(), f1_score, roc_auc))
+        Ok((
+            val_metric,
+            train_metric,
+            model.num_trees(),
+            f1_score,
+            roc_auc,
+        ))
     }
 
     /// Evaluate using K-fold cross-validation
@@ -1306,12 +1345,21 @@ impl<M: TunableModel> AutoTuner<M> {
                 None
             };
             let roc_auc = if self.config.task_type.is_binary() {
-                Some(super::metrics::compute_roc_auc(&val_predictions, val_targets))
+                Some(super::metrics::compute_roc_auc(
+                    &val_predictions,
+                    val_targets,
+                ))
             } else {
                 None
             };
 
-            fold_results.push((val_metric, train_metric, model.num_trees(), f1_score, roc_auc));
+            fold_results.push((
+                val_metric,
+                train_metric,
+                model.num_trees(),
+                f1_score,
+                roc_auc,
+            ));
         }
 
         Ok(Self::aggregate_fold_results(&fold_results))
@@ -1352,7 +1400,11 @@ impl<M: TunableModel> AutoTuner<M> {
                 let model = M::train(&train_dataset, &config)?;
 
                 // Extract conformal metrics
-                fold_results.push(Self::extract_conformal_result(&model, &val_dataset, val_dataset.targets()));
+                fold_results.push(Self::extract_conformal_result(
+                    &model,
+                    &val_dataset,
+                    val_dataset.targets(),
+                ));
             }
 
             Ok(Self::aggregate_fold_results(&fold_results))
@@ -1394,7 +1446,11 @@ impl<M: TunableModel> AutoTuner<M> {
         let model = M::train(dataset, &config)?;
 
         // Extract conformal metrics (evaluate on training set)
-        Ok(Self::extract_conformal_result(&model, dataset, dataset.targets()))
+        Ok(Self::extract_conformal_result(
+            &model,
+            dataset,
+            dataset.targets(),
+        ))
     }
 
     /// Select appropriate metric based on task type
@@ -1423,11 +1479,7 @@ impl<M: TunableModel> AutoTuner<M> {
     /// alternative evaluation metric.
     ///
     /// Returns `None` for regression tasks or if predictions/targets are misaligned.
-    fn compute_f1_score(
-        &self,
-        predictions: &[f32],
-        targets: &[f32],
-    ) -> Option<f32> {
+    fn compute_f1_score(&self, predictions: &[f32], targets: &[f32]) -> Option<f32> {
         // Only compute for binary classification (use TunerConfig's task_type)
         if !self.config.task_type.is_binary() {
             return None;
@@ -1446,8 +1498,16 @@ impl<M: TunableModel> AutoTuner<M> {
         for (&pred, &target) in predictions.iter().zip(targets.iter()) {
             // Convert log-odds to probability via sigmoid
             let prob = 1.0 / (1.0 + (-pred).exp());
-            let pred_class = if prob >= BINARY_CLASSIFICATION_THRESHOLD { 1.0 } else { 0.0 };
-            let actual_class = if target >= BINARY_CLASSIFICATION_THRESHOLD { 1.0 } else { 0.0 };
+            let pred_class = if prob >= BINARY_CLASSIFICATION_THRESHOLD {
+                1.0
+            } else {
+                0.0
+            };
+            let actual_class = if target >= BINARY_CLASSIFICATION_THRESHOLD {
+                1.0
+            } else {
+                0.0
+            };
 
             match (pred_class as u8, actual_class as u8) {
                 (1, 1) => true_positives += 1,
@@ -1490,7 +1550,8 @@ impl<M: TunableModel> AutoTuner<M> {
         if !M::supports_conformal() {
             return Err(TreeBoostError::Config(
                 "Conformal evaluation is not supported for this model type. \
-                 Use EvalStrategy::Holdout for generic model tuning.".to_string()
+                 Use EvalStrategy::Holdout for generic model tuning."
+                    .to_string(),
             ));
         }
         Ok(())
@@ -1526,18 +1587,25 @@ impl<M: TunableModel> AutoTuner<M> {
         let mut config = self.build_config(params);
         M::configure_validation(&mut config, 0.0, self.config.early_stopping_rounds);
 
-        let model = M::train_with_validation(
+        let model = M::train_with_validation(train_dataset, val_dataset, val_targets, &config)?;
+
+        let metric = self.select_metric();
+        let (val_metric, train_metric, f1_score, roc_auc) = compute_eval_metrics(
+            &model,
             train_dataset,
             val_dataset,
             val_targets,
-            &config,
-        )?;
+            &metric,
+            self,
+        );
 
-        let metric = self.select_metric();
-        let (val_metric, train_metric, f1_score, roc_auc) =
-            compute_eval_metrics(&model, train_dataset, val_dataset, val_targets, &metric, self);
-
-        Ok((val_metric, train_metric, model.num_trees(), f1_score, roc_auc))
+        Ok((
+            val_metric,
+            train_metric,
+            model.num_trees(),
+            f1_score,
+            roc_auc,
+        ))
     }
 
     /// Train model with conformal config and return quantile metric
@@ -1562,15 +1630,17 @@ impl<M: TunableModel> AutoTuner<M> {
         let model = M::train(train_dataset, &config)?;
 
         // Extract conformal metrics (evaluate on validation set)
-        Ok(Self::extract_conformal_result(&model, val_dataset, val_targets))
+        Ok(Self::extract_conformal_result(
+            &model,
+            val_dataset,
+            val_targets,
+        ))
     }
 
     /// Aggregate results from multiple folds
     ///
     /// Computes average metrics across k-fold results.
-    fn aggregate_fold_results(
-        results: &[EvalMetrics],
-    ) -> EvalMetrics {
+    fn aggregate_fold_results(results: &[EvalMetrics]) -> EvalMetrics {
         let k = results.len();
         if k == 0 {
             return (f32::MAX, f32::MAX, 0, None, None);
@@ -1638,8 +1708,8 @@ impl<M: TunableModel> AutoTuner<M> {
     /// Called when stuck in a local optimum. Shifts each parameter's center
     /// to a random position within its bounds.
     fn randomize_centers(&mut self) {
-        use rand::{Rng, SeedableRng};
         use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
 
         // Use a seed derived from current iteration count for reproducibility
         let seed = self.config.seed.wrapping_add(self.history.len() as u64);
@@ -1781,14 +1851,19 @@ impl<M: TunableModel> AutoTuner<M> {
 
         // Realistic mode cannot be parallelized (encoding is stateful)
         if use_parallel {
-            eprintln!("Warning: Parallel mode not supported with realistic tuning, running sequentially");
+            eprintln!(
+                "Warning: Parallel mode not supported with realistic tuning, running sequentially"
+            );
         }
 
         // Sequential evaluation
         let mut results = Vec::with_capacity(candidates.len());
 
         for params in candidates {
-            let input = EvalInput::Realistic { raw_data, config: realistic_cfg };
+            let input = EvalInput::Realistic {
+                raw_data,
+                config: realistic_cfg,
+            };
             match self.evaluate_single(input, &params, iteration) {
                 Ok(result) => {
                     let trial_num = current_trial.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1845,7 +1920,8 @@ impl<M: TunableModel> AutoTuner<M> {
     ) -> EvalResult {
         // Split data
         let split = split_holdout(raw_data.height(), validation_ratio, 0.0, self.config.seed);
-        let (train_df, val_df) = split_dataframe_by_indices(raw_data, &split.train, &split.validation)?;
+        let (train_df, val_df) =
+            split_dataframe_by_indices(raw_data, &split.train, &split.validation)?;
 
         // Encode with per-split pipeline (no target leakage)
         let (train_dataset, val_dataset, val_targets) =
@@ -1875,7 +1951,12 @@ impl<M: TunableModel> AutoTuner<M> {
                 encode_train_val_split(train_df, val_df, realistic_cfg)?;
 
             // Train and evaluate using shared helper
-            fold_results.push(self.train_and_evaluate(&train_dataset, &val_dataset, &val_targets, params)?);
+            fold_results.push(self.train_and_evaluate(
+                &train_dataset,
+                &val_dataset,
+                &val_targets,
+                params,
+            )?);
         }
 
         Ok(Self::aggregate_fold_results(&fold_results))
@@ -1892,7 +1973,13 @@ impl<M: TunableModel> AutoTuner<M> {
         folds: usize,
     ) -> EvalResult {
         if folds == 1 {
-            self.evaluate_conformal_realistic(raw_data, realistic_cfg, params, calibration_ratio, quantile)
+            self.evaluate_conformal_realistic(
+                raw_data,
+                realistic_cfg,
+                params,
+                calibration_ratio,
+                quantile,
+            )
         } else {
             // Run conformal on each fold and average
             let kfold = split_kfold(raw_data.height(), folds, self.config.seed);
@@ -1902,13 +1989,18 @@ impl<M: TunableModel> AutoTuner<M> {
                 let (train_idx, val_idx) = kfold.get_fold(fold_idx);
 
                 // Split and encode with per-fold pipeline
-                let (train_df, val_df) = split_dataframe_by_indices(raw_data, &train_idx, &val_idx)?;
+                let (train_df, val_df) =
+                    split_dataframe_by_indices(raw_data, &train_idx, &val_idx)?;
                 let (train_dataset, cal_dataset, cal_targets) =
                     encode_train_val_split(train_df, val_df, realistic_cfg)?;
 
                 // Train and evaluate using conformal helper
                 let result = self.train_and_evaluate_conformal(
-                    &train_dataset, &cal_dataset, &cal_targets, params, quantile,
+                    &train_dataset,
+                    &cal_dataset,
+                    &cal_targets,
+                    params,
+                    quantile,
                 )?;
                 fold_results.push(result);
             }
@@ -1931,14 +2023,21 @@ impl<M: TunableModel> AutoTuner<M> {
     ) -> EvalResult {
         // Split data
         let split = split_holdout(raw_data.height(), calibration_ratio, 0.0, self.config.seed);
-        let (train_df, cal_df) = split_dataframe_by_indices(raw_data, &split.train, &split.validation)?;
+        let (train_df, cal_df) =
+            split_dataframe_by_indices(raw_data, &split.train, &split.validation)?;
 
         // Encode with per-split pipeline (no target leakage)
         let (train_dataset, cal_dataset, cal_targets) =
             encode_train_val_split(train_df, cal_df, realistic_cfg)?;
 
         // Train and evaluate using conformal helper
-        self.train_and_evaluate_conformal(&train_dataset, &cal_dataset, &cal_targets, params, quantile)
+        self.train_and_evaluate_conformal(
+            &train_dataset,
+            &cal_dataset,
+            &cal_targets,
+            params,
+            quantile,
+        )
     }
 
     /// Build a model config from parameter values using the TunableModel trait
@@ -1964,7 +2063,9 @@ impl<M: TunableModel> AutoTuner<M> {
         } else {
             // No early stopping - use validation from eval strategy for metrics only
             let validation_ratio = match self.config.eval_strategy {
-                EvalStrategy::Holdout { validation_ratio, .. } => validation_ratio,
+                EvalStrategy::Holdout {
+                    validation_ratio, ..
+                } => validation_ratio,
                 EvalStrategy::Conformal { .. } => 0.0, // Conformal uses calibration_ratio instead
             };
             M::configure_validation(&mut config, validation_ratio, 0);
@@ -1973,7 +2074,6 @@ impl<M: TunableModel> AutoTuner<M> {
         config
     }
 }
-
 
 #[cfg(test)]
 mod tests;

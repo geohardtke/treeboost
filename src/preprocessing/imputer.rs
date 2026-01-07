@@ -136,15 +136,9 @@ impl SimpleImputer {
                 0.0
             } else {
                 match self.strategy {
-                    ImputeStrategy::Mean => {
-                        values.iter().sum::<f32>() / values.len() as f32
-                    }
-                    ImputeStrategy::Median => {
-                        compute_median(&values)
-                    }
-                    ImputeStrategy::Mode => {
-                        compute_mode(&values)
-                    }
+                    ImputeStrategy::Mean => values.iter().sum::<f32>() / values.len() as f32,
+                    ImputeStrategy::Median => compute_median(&values),
+                    ImputeStrategy::Mode => compute_mode(&values),
                     ImputeStrategy::Constant(c) => c,
                 }
             };
@@ -342,7 +336,8 @@ impl IndicatorImputer {
         feature_names: &[String],
     ) -> (Vec<f32>, Vec<String>) {
         let num_rows = data.len() / num_features;
-        let (indicators, indicator_names) = self.create_indicators(data, num_features, feature_names);
+        let (indicators, indicator_names) =
+            self.create_indicators(data, num_features, feature_names);
 
         if indicator_names.is_empty() {
             // No missing values, return original
@@ -431,11 +426,7 @@ mod tests {
         let mut imputer = SimpleImputer::mean();
 
         // 3 rows × 2 features, with NaN values
-        let mut data = vec![
-            1.0, 2.0,
-            f32::NAN, 4.0,
-            3.0, f32::NAN,
-        ];
+        let mut data = vec![1.0, 2.0, f32::NAN, 4.0, 3.0, f32::NAN];
 
         imputer.fit(&data, 2).unwrap();
         assert!(imputer.is_fitted());
@@ -513,10 +504,7 @@ mod tests {
         let mut imputer = SimpleImputer::mean();
 
         // All NaN in column 0
-        let data = vec![
-            f32::NAN, 1.0,
-            f32::NAN, 2.0,
-        ];
+        let data = vec![f32::NAN, 1.0, f32::NAN, 2.0];
 
         imputer.fit(&data, 2).unwrap();
 
@@ -541,10 +529,7 @@ mod tests {
         let imputer = IndicatorImputer::new();
 
         // 2 rows × 2 features
-        let data = vec![
-            1.0, f32::NAN,
-            3.0, 4.0,
-        ];
+        let data = vec![1.0, f32::NAN, 3.0, 4.0];
         let names = vec!["age".to_string(), "income".to_string()];
 
         let (indicators, indicator_names) = imputer.create_indicators(&data, 2, &names);
@@ -588,10 +573,7 @@ mod tests {
         let imputer = IndicatorImputer::new();
 
         // 2 rows × 2 features
-        let data = vec![
-            1.0, f32::NAN,
-            3.0, 4.0,
-        ];
+        let data = vec![1.0, f32::NAN, 3.0, 4.0];
         let names = vec!["a".to_string(), "b".to_string()];
 
         let (combined, combined_names) = imputer.transform_with_indicators(&data, 2, &names);

@@ -333,7 +333,10 @@ impl SmartPreprocessor {
         if col.missing_ratio > 0.0 {
             steps_for_col.push((
                 Preprocessor::Imputer(SimpleImputer::median()),
-                format!("Median imputation ({:.1}% missing)", col.missing_ratio * 100.0),
+                format!(
+                    "Median imputation ({:.1}% missing)",
+                    col.missing_ratio * 100.0
+                ),
             ));
 
             // Add indicator if high missing ratio
@@ -353,7 +356,10 @@ impl SmartPreprocessor {
                 if skew.abs() > config.skewness_threshold && !col.has_negative {
                     steps_for_col.push((
                         Preprocessor::YeoJohnson(YeoJohnsonTransform::new()),
-                        format!("YeoJohnson (skewness={:.2} > {:.1})", skew, config.skewness_threshold),
+                        format!(
+                            "YeoJohnson (skewness={:.2} > {:.1})",
+                            skew, config.skewness_threshold
+                        ),
                     ));
                 } else if skew.abs() > config.skewness_threshold && col.has_negative {
                     plan.reasoning.push(format!(
@@ -452,7 +458,10 @@ impl SmartPreprocessor {
                     plan.add_step(
                         col.name.clone(),
                         Preprocessor::OneHot(OneHotEncoder::new()),
-                        format!("OneHotEncoder (low cardinality {} for linear model)", col.cardinality),
+                        format!(
+                            "OneHotEncoder (low cardinality {} for linear model)",
+                            col.cardinality
+                        ),
                     );
                 }
             }
@@ -471,7 +480,10 @@ impl SmartPreprocessor {
                     plan.add_step(
                         col.name.clone(),
                         Preprocessor::Frequency(FrequencyEncoder::new()),
-                        format!("FrequencyEncoder (optimal for trees, {} categories)", col.cardinality),
+                        format!(
+                            "FrequencyEncoder (optimal for trees, {} categories)",
+                            col.cardinality
+                        ),
                     );
                 }
             }
@@ -495,14 +507,24 @@ impl SmartPreprocessor {
     ) -> LttPreprocessingPlan {
         let mut ltt_plan = LttPreprocessingPlan::new();
 
-        ltt_plan.reasoning.push("=== LTT Dual-Phase Preprocessing ===".to_string());
-        ltt_plan.reasoning.push("Phase 1 (Linear): Scaled features with StandardScaler".to_string());
-        ltt_plan.reasoning.push("Phase 2 (Tree): Raw features, no scaling".to_string());
+        ltt_plan
+            .reasoning
+            .push("=== LTT Dual-Phase Preprocessing ===".to_string());
+        ltt_plan
+            .reasoning
+            .push("Phase 1 (Linear): Scaled features with StandardScaler".to_string());
+        ltt_plan
+            .reasoning
+            .push("Phase 2 (Tree): Raw features, no scaling".to_string());
 
         // Add drops from profile to both plans
         for dropped in &profile.drop_columns {
-            ltt_plan.linear_plan.drop_column(dropped.name.clone(), dropped.reason.to_string());
-            ltt_plan.tree_plan.drop_column(dropped.name.clone(), dropped.reason.to_string());
+            ltt_plan
+                .linear_plan
+                .drop_column(dropped.name.clone(), dropped.reason.to_string());
+            ltt_plan
+                .tree_plan
+                .drop_column(dropped.name.clone(), dropped.reason.to_string());
         }
 
         // Process each column
@@ -516,7 +538,10 @@ impl SmartPreprocessor {
                 ltt_plan.shared_steps.push(PreprocessingStep {
                     column: col_profile.name.clone(),
                     preprocessor: Preprocessor::Imputer(SimpleImputer::median()),
-                    reason: format!("Median imputation ({:.1}% missing) - shared", col_profile.missing_ratio * 100.0),
+                    reason: format!(
+                        "Median imputation ({:.1}% missing) - shared",
+                        col_profile.missing_ratio * 100.0
+                    ),
                 });
             }
 
@@ -552,13 +577,19 @@ impl SmartPreprocessor {
                         ltt_plan.linear_plan.add_step(
                             col_profile.name.clone(),
                             Preprocessor::Frequency(FrequencyEncoder::new()),
-                            format!("FrequencyEncoder (high cardinality {} for linear)", col_profile.cardinality),
+                            format!(
+                                "FrequencyEncoder (high cardinality {} for linear)",
+                                col_profile.cardinality
+                            ),
                         );
                     } else {
                         ltt_plan.linear_plan.add_step(
                             col_profile.name.clone(),
                             Preprocessor::OneHot(OneHotEncoder::new()),
-                            format!("OneHotEncoder ({} categories for linear phase)", col_profile.cardinality),
+                            format!(
+                                "OneHotEncoder ({} categories for linear phase)",
+                                col_profile.cardinality
+                            ),
                         );
                     }
 
@@ -566,15 +597,23 @@ impl SmartPreprocessor {
                     ltt_plan.tree_plan.add_step(
                         col_profile.name.clone(),
                         Preprocessor::Frequency(FrequencyEncoder::new()),
-                        format!("FrequencyEncoder (optimal for trees, {} categories)", col_profile.cardinality),
+                        format!(
+                            "FrequencyEncoder (optimal for trees, {} categories)",
+                            col_profile.cardinality
+                        ),
                     );
                 }
                 ColumnDataType::Boolean => {
                     // Both phases: no preprocessing needed
-                    ltt_plan.reasoning.push(format!("{}: Boolean (no preprocessing)", col_profile.name));
+                    ltt_plan
+                        .reasoning
+                        .push(format!("{}: Boolean (no preprocessing)", col_profile.name));
                 }
                 ColumnDataType::DateTime => {
-                    ltt_plan.reasoning.push(format!("{}: DateTime (defer to feature engineering)", col_profile.name));
+                    ltt_plan.reasoning.push(format!(
+                        "{}: DateTime (defer to feature engineering)",
+                        col_profile.name
+                    ));
                 }
                 ColumnDataType::Text => {
                     // Already dropped
@@ -632,8 +671,11 @@ mod tests {
         let plan = SmartPreprocessor::infer(&profile, ModelType::Linear);
 
         // Should have StandardScaler for numeric columns
-        assert!(plan.steps.iter().any(|s| s.column == "numeric_normal"
-            && matches!(s.preprocessor, Preprocessor::Standard(_))));
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| s.column == "numeric_normal"
+                && matches!(s.preprocessor, Preprocessor::Standard(_))));
 
         // Should drop constant column
         assert!(plan.drop_columns.contains(&"constant".to_string()));
@@ -645,10 +687,9 @@ mod tests {
         let plan = SmartPreprocessor::infer(&profile, ModelType::Tree);
 
         // Should NOT have StandardScaler for numeric columns (trees don't need it)
-        let has_scaler_for_normal = plan
-            .steps
-            .iter()
-            .any(|s| s.column == "numeric_normal" && matches!(s.preprocessor, Preprocessor::Standard(_)));
+        let has_scaler_for_normal = plan.steps.iter().any(|s| {
+            s.column == "numeric_normal" && matches!(s.preprocessor, Preprocessor::Standard(_))
+        });
         assert!(!has_scaler_for_normal);
 
         // Should have FrequencyEncoder for categorical
@@ -662,15 +703,17 @@ mod tests {
         let ltt_plan = SmartPreprocessor::infer_ltt(&profile);
 
         // Linear plan should have StandardScaler
-        assert!(ltt_plan.linear_plan.steps.iter().any(|s| s.column == "numeric_normal"
-            && matches!(s.preprocessor, Preprocessor::Standard(_))));
-
-        // Tree plan should NOT have StandardScaler for numeric
-        let tree_has_scaler = ltt_plan
-            .tree_plan
+        assert!(ltt_plan
+            .linear_plan
             .steps
             .iter()
-            .any(|s| s.column == "numeric_normal" && matches!(s.preprocessor, Preprocessor::Standard(_)));
+            .any(|s| s.column == "numeric_normal"
+                && matches!(s.preprocessor, Preprocessor::Standard(_))));
+
+        // Tree plan should NOT have StandardScaler for numeric
+        let tree_has_scaler = ltt_plan.tree_plan.steps.iter().any(|s| {
+            s.column == "numeric_normal" && matches!(s.preprocessor, Preprocessor::Standard(_))
+        });
         assert!(!tree_has_scaler);
     }
 
@@ -678,13 +721,18 @@ mod tests {
     fn test_force_encoding() {
         let profile = create_test_profile();
         let mut config = SmartPreprocessConfig::default();
-        config.force_encodings.insert("categorical_low".to_string(), EncodingType::Label);
+        config
+            .force_encodings
+            .insert("categorical_low".to_string(), EncodingType::Label);
 
         let plan = SmartPreprocessor::infer_with_config(&profile, ModelType::Linear, &config);
 
         // Should have LabelEncoder instead of OneHot
-        assert!(plan.steps.iter().any(|s| s.column == "categorical_low"
-            && matches!(s.preprocessor, Preprocessor::Label(_))));
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| s.column == "categorical_low"
+                && matches!(s.preprocessor, Preprocessor::Label(_))));
     }
 
     #[test]

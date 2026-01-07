@@ -538,7 +538,8 @@ mod tests {
 
     #[test]
     fn test_standard_scaler_basic() {
-        let mut data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // 2 rows × 3 features
+        let mut data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        // 2 rows × 3 features
         // Row 0: [1.0, 2.0, 3.0]
         // Row 1: [4.0, 5.0, 6.0]
         let num_features = 3;
@@ -562,7 +563,8 @@ mod tests {
 
     #[test]
     fn test_standard_scaler_zero_variance() {
-        let mut data = vec![5.0, 1.0, 2.0, 5.0, 3.0, 4.0]; // 2 rows × 3 features
+        let mut data = vec![5.0, 1.0, 2.0, 5.0, 3.0, 4.0];
+        // 2 rows × 3 features
         // Row 0: [5.0, 1.0, 2.0]
         // Row 1: [5.0, 3.0, 4.0]
         // Feature 0 is constant: [5.0, 5.0]
@@ -641,10 +643,7 @@ mod tests {
 
         let result = scaler.transform(&mut data, 1);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not fitted"));
+        assert!(result.unwrap_err().to_string().contains("not fitted"));
     }
 
     #[test]

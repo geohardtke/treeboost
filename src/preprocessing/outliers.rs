@@ -392,9 +392,7 @@ impl OutlierDetector {
 
         match self.action {
             OutlierAction::Cap => self.transform_cap(data, num_features, num_rows),
-            OutlierAction::Flag => {
-                self.transform_flag(data, num_features, num_rows, feature_names)
-            }
+            OutlierAction::Flag => self.transform_flag(data, num_features, num_rows, feature_names),
             OutlierAction::Remove => {
                 self.transform_remove(data, num_features, num_rows, feature_names)
             }
@@ -489,9 +487,7 @@ impl OutlierDetector {
         }
 
         // Collect non-outlier rows
-        let kept_indices: Vec<usize> = (0..num_rows)
-            .filter(|&row| !outlier_rows[row])
-            .collect();
+        let kept_indices: Vec<usize> = (0..num_rows).filter(|&row| !outlier_rows[row]).collect();
 
         let mut cleaned_data = Vec::with_capacity(kept_indices.len() * num_features);
 
@@ -571,9 +567,7 @@ impl TransformResult {
     pub fn outlier_count(&self) -> usize {
         match self {
             Self::Capped { outlier_count } => *outlier_count,
-            Self::Flagged { indicators, .. } => {
-                indicators.iter().filter(|&&v| v > 0.0).count()
-            }
+            Self::Flagged { indicators, .. } => indicators.iter().filter(|&&v| v > 0.0).count(),
             Self::Removed { removed_count, .. } => *removed_count,
         }
     }
@@ -619,7 +613,9 @@ mod tests {
         assert!(matches!(iqr, OutlierMethod::Iqr { k } if (k - 1.5).abs() < 1e-6));
 
         let zscore = OutlierMethod::zscore();
-        assert!(matches!(zscore, OutlierMethod::ZScore { threshold } if (threshold - 3.0).abs() < 1e-6));
+        assert!(
+            matches!(zscore, OutlierMethod::ZScore { threshold } if (threshold - 3.0).abs() < 1e-6)
+        );
     }
 
     #[test]
@@ -628,7 +624,9 @@ mod tests {
         assert!(matches!(iqr, OutlierMethod::Iqr { k } if (k - 2.0).abs() < 1e-6));
 
         let zscore = OutlierMethod::zscore_with_threshold(2.5);
-        assert!(matches!(zscore, OutlierMethod::ZScore { threshold } if (threshold - 2.5).abs() < 1e-6));
+        assert!(
+            matches!(zscore, OutlierMethod::ZScore { threshold } if (threshold - 2.5).abs() < 1e-6)
+        );
     }
 
     // ========================================
@@ -639,7 +637,7 @@ mod tests {
     fn test_iqr_detection_basic() {
         // Data with clear outlier
         let data = vec![
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, // normal values
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0,  // normal values
             100.0, // outlier
         ];
 
@@ -724,18 +722,16 @@ mod tests {
     #[test]
     fn test_cap_action() {
         let mut data = vec![
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, // normal
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,   // normal
             100.0, // outlier (high)
             -50.0, // outlier (low)
         ];
 
-        let mut detector = OutlierDetector::new(OutlierMethod::iqr())
-            .with_action(OutlierAction::Cap);
+        let mut detector =
+            OutlierDetector::new(OutlierMethod::iqr()).with_action(OutlierAction::Cap);
         detector.fit(&data, 1).unwrap();
 
-        let result = detector
-            .transform(&mut data, 1, &["f0".into()])
-            .unwrap();
+        let result = detector.transform(&mut data, 1, &["f0".into()]).unwrap();
 
         // Outliers should be capped
         assert!(data[8] < 100.0); // Was capped down
@@ -762,8 +758,8 @@ mod tests {
             100.0, 50.0, // row 4: outlier in f0
         ];
 
-        let mut detector = OutlierDetector::new(OutlierMethod::iqr())
-            .with_action(OutlierAction::Flag);
+        let mut detector =
+            OutlierDetector::new(OutlierMethod::iqr()).with_action(OutlierAction::Flag);
         detector.fit(&data, 2).unwrap();
 
         let names = vec!["f0".into(), "f1".into()];
@@ -801,8 +797,8 @@ mod tests {
             100.0, 50.0, // row 4: outlier in f0
         ];
 
-        let mut detector = OutlierDetector::new(OutlierMethod::iqr())
-            .with_action(OutlierAction::Remove);
+        let mut detector =
+            OutlierDetector::new(OutlierMethod::iqr()).with_action(OutlierAction::Remove);
         detector.fit(&data, 2).unwrap();
 
         let names = vec!["f0".into(), "f1".into()];
@@ -831,13 +827,11 @@ mod tests {
     fn test_no_outliers() {
         let mut data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
-        let mut detector = OutlierDetector::new(OutlierMethod::iqr())
-            .with_action(OutlierAction::Cap);
+        let mut detector =
+            OutlierDetector::new(OutlierMethod::iqr()).with_action(OutlierAction::Cap);
         detector.fit(&data, 1).unwrap();
 
-        let result = detector
-            .transform(&mut data, 1, &["f0".into()])
-            .unwrap();
+        let result = detector.transform(&mut data, 1, &["f0".into()]).unwrap();
 
         if let TransformResult::Capped { outlier_count } = result {
             assert_eq!(outlier_count, 0);
@@ -858,7 +852,7 @@ mod tests {
     #[test]
     fn test_detect_method() {
         let data = vec![
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, // normal
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,   // normal
             100.0, // outlier
         ];
 
@@ -941,8 +935,8 @@ mod tests {
     fn test_outlier_detector_serialization() {
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
 
-        let mut detector = OutlierDetector::new(OutlierMethod::iqr())
-            .with_action(OutlierAction::Cap);
+        let mut detector =
+            OutlierDetector::new(OutlierMethod::iqr()).with_action(OutlierAction::Cap);
         detector.fit(&data, 1).unwrap();
 
         // Serialize

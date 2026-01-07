@@ -61,27 +61,17 @@ pub enum ParamBounds {
     /// When `log_scale` is true, values are sampled uniformly in log space.
     /// This is useful for parameters like learning_rate where the difference
     /// between 0.01 and 0.1 is more significant than between 0.1 and 0.2.
-    Continuous {
-        min: f32,
-        max: f32,
-        log_scale: bool,
-    },
+    Continuous { min: f32, max: f32, log_scale: bool },
     /// Discrete integer parameter with min, max, and step size
     ///
     /// Values are sampled at intervals of `step` between min and max.
     /// For example, `Discrete { min: 2, max: 12, step: 2 }` produces [2, 4, 6, 8, 10, 12].
-    Discrete {
-        min: usize,
-        max: usize,
-        step: usize,
-    },
+    Discrete { min: usize, max: usize, step: usize },
     /// Categorical parameter with a fixed set of string values
     ///
     /// Used for parameters like boosting_mode where values are discrete choices.
     /// The center is stored as an index into the values array.
-    Categorical {
-        values: Vec<String>,
-    },
+    Categorical { values: Vec<String> },
 }
 
 impl ParamBounds {
@@ -180,7 +170,13 @@ impl ParamBounds {
 
     /// Check if this uses log scaling
     pub fn is_log_scale(&self) -> bool {
-        matches!(self, Self::Continuous { log_scale: true, .. })
+        matches!(
+            self,
+            Self::Continuous {
+                log_scale: true,
+                ..
+            }
+        )
     }
 
     /// Check if this is a categorical parameter
@@ -266,31 +262,11 @@ impl ParameterSpace {
     pub fn default_regression() -> Self {
         Self {
             params: vec![
-                ParamDef::new(
-                    "max_depth",
-                    ParamBounds::discrete(2, 12),
-                    6.0,
-                ),
-                ParamDef::new(
-                    "learning_rate",
-                    ParamBounds::log_continuous(0.01, 0.5),
-                    0.1,
-                ),
-                ParamDef::new(
-                    "subsample",
-                    ParamBounds::continuous(0.5, 1.0),
-                    0.8,
-                ),
-                ParamDef::new(
-                    "lambda",
-                    ParamBounds::continuous(0.0, 10.0),
-                    1.0,
-                ),
-                ParamDef::new(
-                    "entropy_weight",
-                    ParamBounds::continuous(0.0, 0.5),
-                    0.0,
-                ),
+                ParamDef::new("max_depth", ParamBounds::discrete(2, 12), 6.0),
+                ParamDef::new("learning_rate", ParamBounds::log_continuous(0.01, 0.5), 0.1),
+                ParamDef::new("subsample", ParamBounds::continuous(0.5, 1.0), 0.8),
+                ParamDef::new("lambda", ParamBounds::continuous(0.0, 10.0), 1.0),
+                ParamDef::new("entropy_weight", ParamBounds::continuous(0.0, 0.5), 0.0),
             ],
         }
     }
@@ -301,31 +277,11 @@ impl ParameterSpace {
     pub fn default_classification() -> Self {
         Self {
             params: vec![
-                ParamDef::new(
-                    "max_depth",
-                    ParamBounds::discrete(2, 10),
-                    5.0,
-                ),
-                ParamDef::new(
-                    "learning_rate",
-                    ParamBounds::log_continuous(0.01, 0.3),
-                    0.1,
-                ),
-                ParamDef::new(
-                    "subsample",
-                    ParamBounds::continuous(0.6, 1.0),
-                    0.8,
-                ),
-                ParamDef::new(
-                    "lambda",
-                    ParamBounds::continuous(0.0, 5.0),
-                    1.0,
-                ),
-                ParamDef::new(
-                    "entropy_weight",
-                    ParamBounds::continuous(0.0, 0.3),
-                    0.0,
-                ),
+                ParamDef::new("max_depth", ParamBounds::discrete(2, 10), 5.0),
+                ParamDef::new("learning_rate", ParamBounds::log_continuous(0.01, 0.3), 0.1),
+                ParamDef::new("subsample", ParamBounds::continuous(0.6, 1.0), 0.8),
+                ParamDef::new("lambda", ParamBounds::continuous(0.0, 5.0), 1.0),
+                ParamDef::new("entropy_weight", ParamBounds::continuous(0.0, 0.3), 0.0),
             ],
         }
     }
@@ -334,16 +290,8 @@ impl ParameterSpace {
     pub fn minimal() -> Self {
         Self {
             params: vec![
-                ParamDef::new(
-                    "max_depth",
-                    ParamBounds::discrete(3, 10),
-                    6.0,
-                ),
-                ParamDef::new(
-                    "learning_rate",
-                    ParamBounds::log_continuous(0.01, 0.3),
-                    0.1,
-                ),
+                ParamDef::new("max_depth", ParamBounds::discrete(3, 10), 6.0),
+                ParamDef::new("learning_rate", ParamBounds::log_continuous(0.01, 0.3), 0.1),
             ],
         }
     }
@@ -358,36 +306,20 @@ impl ParameterSpace {
                 // Mode selection (categorical)
                 ParamDef::new(
                     "mode",
-                    ParamBounds::categorical_from_strs(&["PureTree", "LinearThenTree", "RandomForest"]),
+                    ParamBounds::categorical_from_strs(&[
+                        "PureTree",
+                        "LinearThenTree",
+                        "RandomForest",
+                    ]),
                     0.0, // PureTree is default (index 0)
                 ),
                 // Common parameters
-                ParamDef::new(
-                    "num_rounds",
-                    ParamBounds::discrete(50, 200),
-                    100.0,
-                ),
-                ParamDef::new(
-                    "learning_rate",
-                    ParamBounds::log_continuous(0.01, 0.3),
-                    0.1,
-                ),
-                ParamDef::new(
-                    "subsample",
-                    ParamBounds::continuous(0.6, 1.0),
-                    0.8,
-                ),
+                ParamDef::new("num_rounds", ParamBounds::discrete(50, 200), 100.0),
+                ParamDef::new("learning_rate", ParamBounds::log_continuous(0.01, 0.3), 0.1),
+                ParamDef::new("subsample", ParamBounds::continuous(0.6, 1.0), 0.8),
                 // Tree parameters
-                ParamDef::new(
-                    "tree_max_depth",
-                    ParamBounds::discrete(3, 10),
-                    6.0,
-                ),
-                ParamDef::new(
-                    "tree_lambda",
-                    ParamBounds::continuous(0.0, 10.0),
-                    1.0,
-                ),
+                ParamDef::new("tree_max_depth", ParamBounds::discrete(3, 10), 6.0),
+                ParamDef::new("tree_lambda", ParamBounds::continuous(0.0, 10.0), 1.0),
             ],
         }
     }
@@ -397,13 +329,11 @@ impl ParameterSpace {
     /// Use this when you want to find the best mode without tuning other parameters.
     pub fn universal_mode_only() -> Self {
         Self {
-            params: vec![
-                ParamDef::new(
-                    "mode",
-                    ParamBounds::categorical_from_strs(&["PureTree", "LinearThenTree", "RandomForest"]),
-                    0.0,
-                ),
-            ],
+            params: vec![ParamDef::new(
+                "mode",
+                ParamBounds::categorical_from_strs(&["PureTree", "LinearThenTree", "RandomForest"]),
+                0.0,
+            )],
         }
     }
 
@@ -418,26 +348,14 @@ impl ParameterSpace {
                     ParamBounds::discrete(30, 150),
                     50.0, // Fewer rounds needed with linear component
                 ),
-                ParamDef::new(
-                    "learning_rate",
-                    ParamBounds::log_continuous(0.01, 0.3),
-                    0.1,
-                ),
-                ParamDef::new(
-                    "linear_rounds",
-                    ParamBounds::discrete(5, 30),
-                    10.0,
-                ),
+                ParamDef::new("learning_rate", ParamBounds::log_continuous(0.01, 0.3), 0.1),
+                ParamDef::new("linear_rounds", ParamBounds::discrete(5, 30), 10.0),
                 ParamDef::new(
                     "linear_lambda",
                     ParamBounds::log_continuous(0.01, 10.0),
                     1.0,
                 ),
-                ParamDef::new(
-                    "tree_max_depth",
-                    ParamBounds::discrete(3, 8),
-                    5.0,
-                ),
+                ParamDef::new("tree_max_depth", ParamBounds::discrete(3, 8), 5.0),
             ],
         }
     }
@@ -616,8 +534,8 @@ impl ParameterSpace {
                 .collect();
 
             for result in reader.records() {
-                let record =
-                    result.map_err(|e| TreeBoostError::Data(format!("Failed to read record: {}", e)))?;
+                let record = result
+                    .map_err(|e| TreeBoostError::Data(format!("Failed to read record: {}", e)))?;
                 let mut trial: HashMap<String, f32> = HashMap::new();
 
                 for (i, value) in record.iter().enumerate() {
@@ -645,9 +563,13 @@ impl ParameterSpace {
             let a_val = a.get(metric_column).copied().unwrap_or(f32::NAN);
             let b_val = b.get(metric_column).copied().unwrap_or(f32::NAN);
             if higher_is_better {
-                b_val.partial_cmp(&a_val).unwrap_or(std::cmp::Ordering::Equal)
+                b_val
+                    .partial_cmp(&a_val)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             } else {
-                a_val.partial_cmp(&b_val).unwrap_or(std::cmp::Ordering::Equal)
+                a_val
+                    .partial_cmp(&b_val)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             }
         });
 
@@ -680,11 +602,7 @@ impl ParameterSpace {
                     *min = (min_val - margin).max(*min);
                     *max = (max_val + margin).min(*max);
                 }
-                ParamBounds::Discrete {
-                    min,
-                    max,
-                    step,
-                } => {
+                ParamBounds::Discrete { min, max, step } => {
                     let new_min = (min_val as usize).max(*min);
                     let new_max = (max_val as usize).min(*max);
                     // Round to step boundaries
@@ -1084,7 +1002,10 @@ pub enum TaskType {
 impl TaskType {
     /// Check if this is a classification task
     pub fn is_classification(&self) -> bool {
-        matches!(self, Self::BinaryClassification | Self::MultiClassClassification)
+        matches!(
+            self,
+            Self::BinaryClassification | Self::MultiClassClassification
+        )
     }
 
     /// Check if this is binary classification
@@ -1206,18 +1127,18 @@ impl Default for TunerConfig {
     fn default() -> Self {
         Self {
             space: ParameterSpace::default_regression(),
-            n_iterations: 5,          // Max zoom iterations
-            initial_spread: 1.0,      // Explore full range initially (100%)
-            zoom_factor: 0.8,         // Keep 80% each iteration (remove outliers)
+            n_iterations: 5,     // Max zoom iterations
+            initial_spread: 1.0, // Explore full range initially (100%)
+            zoom_factor: 0.8,    // Keep 80% each iteration (remove outliers)
             grid_strategy: GridStrategy::Cartesian { points_per_dim: 3 },
             eval_strategy: EvalStrategy::Holdout {
                 validation_ratio: 0.2,
                 folds: 1,
             },
             tuning_mode: TuningMode::Optimistic, // Fast by default (for backwards compat)
-            parallel_trials: false,   // Conservative default (GPU contention)
-            n_parallel: 0,            // Auto-detect
-            num_rounds: 100,          // Rounds per trial (early stopping will kick in)
+            parallel_trials: false,              // Conservative default (GPU contention)
+            n_parallel: 0,                       // Auto-detect
+            num_rounds: 100,                     // Rounds per trial (early stopping will kick in)
 
             // Inner loop: Early stopping for individual models
             early_stopping_rounds: 10, // Stop if no improvement for 10 rounds
@@ -1250,7 +1171,7 @@ impl TunerConfig {
         Self {
             n_iterations: 2,
             num_rounds: 50,
-            early_stopping_rounds: 5, // Faster inner stopping
+            early_stopping_rounds: 5,    // Faster inner stopping
             improvement_threshold: 0.01, // More lenient outer stopping (1%)
             ..Default::default()
         }
@@ -1261,7 +1182,7 @@ impl TunerConfig {
         Self {
             n_iterations: 7,
             num_rounds: 200,
-            early_stopping_rounds: 20, // More patience per model
+            early_stopping_rounds: 20,     // More patience per model
             improvement_threshold: 0.0001, // Stricter outer threshold (0.01%)
             ..Default::default()
         }
@@ -1575,8 +1496,11 @@ mod tests {
 
     #[test]
     fn test_parameter_space_with_param() {
-        let space = ParameterSpace::minimal()
-            .with_param("colsample", ParamBounds::continuous(0.5, 1.0), 0.8);
+        let space = ParameterSpace::minimal().with_param(
+            "colsample",
+            ParamBounds::continuous(0.5, 1.0),
+            0.8,
+        );
 
         assert_eq!(space.len(), 3);
         assert!(space.get("colsample").is_some());
@@ -1608,8 +1532,11 @@ mod tests {
         let valid = ParameterSpace::default_regression();
         assert!(valid.validate().is_ok());
 
-        let invalid = ParameterSpace::new()
-            .with_param("invalid_param", ParamBounds::continuous(0.0, 1.0), 0.5);
+        let invalid = ParameterSpace::new().with_param(
+            "invalid_param",
+            ParamBounds::continuous(0.0, 1.0),
+            0.5,
+        );
         assert!(invalid.validate().is_err());
     }
 
@@ -1636,9 +1563,18 @@ mod tests {
 
     #[test]
     fn test_eval_strategy_auto() {
-        assert!(matches!(EvalStrategy::auto(500), EvalStrategy::Holdout { folds: 5, .. }));
-        assert!(matches!(EvalStrategy::auto(2000), EvalStrategy::Holdout { folds: 3, .. }));
-        assert!(matches!(EvalStrategy::auto(10000), EvalStrategy::Holdout { folds: 1, .. }));
+        assert!(matches!(
+            EvalStrategy::auto(500),
+            EvalStrategy::Holdout { folds: 5, .. }
+        ));
+        assert!(matches!(
+            EvalStrategy::auto(2000),
+            EvalStrategy::Holdout { folds: 3, .. }
+        ));
+        assert!(matches!(
+            EvalStrategy::auto(10000),
+            EvalStrategy::Holdout { folds: 1, .. }
+        ));
     }
 
     #[test]
@@ -1664,8 +1600,8 @@ mod tests {
     fn test_tuner_config_default() {
         let config = TunerConfig::default();
         assert_eq!(config.n_iterations, 5);
-        assert_eq!(config.initial_spread, 1.0);  // Full range initially
-        assert_eq!(config.zoom_factor, 0.8);     // Keep 80% each iteration
+        assert_eq!(config.initial_spread, 1.0); // Full range initially
+        assert_eq!(config.zoom_factor, 0.8); // Keep 80% each iteration
         assert_eq!(config.early_stopping_rounds, 10);
         assert_eq!(config.validation_ratio, 0.2);
         assert_eq!(config.improvement_threshold, 0.001);

@@ -357,9 +357,12 @@ impl SmartFeatureEngine {
         numeric_cols: &[&ColumnProfile],
         config: &SmartFeatureConfig,
     ) {
-        let top_n = config
-            .top_n_interactions
-            .min(numeric_cols.len() * (numeric_cols.len() - 1) / 2);
+        let max_pairs = if numeric_cols.len() >= 2 {
+            numeric_cols.len() * (numeric_cols.len() - 1) / 2
+        } else {
+            0
+        };
+        let top_n = config.top_n_interactions.min(max_pairs);
         let mut pair_count = 0;
 
         // Generate interaction pairs from top correlated columns

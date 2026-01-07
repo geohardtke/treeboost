@@ -229,9 +229,7 @@ impl LagGenerator {
                     result[offset + row] = match self.nan_strategy {
                         NaNStrategy::Keep => f32::NAN,
                         NaNStrategy::ForwardFill => column[0],
-                        NaNStrategy::Constant(_) => {
-                            self.nan_strategy.get_constant().unwrap_or(0.0)
-                        }
+                        NaNStrategy::Constant(_) => self.nan_strategy.get_constant().unwrap_or(0.0),
                     };
                 }
             }
@@ -455,8 +453,8 @@ impl RollingGenerator {
                     return f32::NAN;
                 }
                 let mean = values.iter().sum::<f32>() / values.len() as f32;
-                let variance =
-                    values.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / (values.len() - 1) as f32;
+                let variance = values.iter().map(|x| (x - mean).powi(2)).sum::<f32>()
+                    / (values.len() - 1) as f32;
                 variance.sqrt()
             }
             RollingStat::Var => {
@@ -734,7 +732,7 @@ impl SeasonalComponent {
             Self::WeekOfYear => 53.0,
             Self::Month => 12.0,
             Self::Quarter => 4.0,
-            Self::Year => 1.0, // Not cyclical
+            Self::Year => 1.0,      // Not cyclical
             Self::IsWeekend => 1.0, // Binary
         }
     }
@@ -921,9 +919,7 @@ fn days_to_ymd(days: i64) -> (i32, i32, i32, i32) {
     // Calculate actual day of year
     let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
     let month_days = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-    let day_of_year = month_days[m as usize - 1]
-        + d as i32
-        + if m > 2 && is_leap { 1 } else { 0 };
+    let day_of_year = month_days[m as usize - 1] + d as i32 + if m > 2 && is_leap { 1 } else { 0 };
 
     (year, m as i32, d as i32, day_of_year)
 }
@@ -1043,8 +1039,11 @@ mod tests {
 
     #[test]
     fn test_rolling_multiple_stats() {
-        let gen = RollingGenerator::new(3)
-            .with_stats(vec![RollingStat::Min, RollingStat::Max, RollingStat::Sum]);
+        let gen = RollingGenerator::new(3).with_stats(vec![
+            RollingStat::Min,
+            RollingStat::Max,
+            RollingStat::Sum,
+        ]);
 
         let data = vec![1.0, 5.0, 3.0, 7.0, 2.0];
         let result = gen.transform(&data, 1).unwrap();
@@ -1206,8 +1205,9 @@ mod tests {
 
     #[test]
     fn test_seasonal_output_names() {
-        let gen = SeasonalGenerator::new(vec![SeasonalComponent::Hour, SeasonalComponent::DayOfWeek])
-            .with_cyclical(true);
+        let gen =
+            SeasonalGenerator::new(vec![SeasonalComponent::Hour, SeasonalComponent::DayOfWeek])
+                .with_cyclical(true);
 
         let names = gen.output_names("timestamp");
         assert_eq!(names.len(), 4); // 2 components × 2 (sin/cos each)
@@ -1240,8 +1240,7 @@ mod tests {
 
     #[test]
     fn test_lag_generator_serialization() {
-        let gen = LagGenerator::new(vec![1, 7, 14])
-            .with_nan_strategy(NaNStrategy::ForwardFill);
+        let gen = LagGenerator::new(vec![1, 7, 14]).with_nan_strategy(NaNStrategy::ForwardFill);
 
         let json = serde_json::to_string(&gen).unwrap();
         let loaded: LagGenerator = serde_json::from_str(&json).unwrap();

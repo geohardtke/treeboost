@@ -121,7 +121,9 @@ impl Metric {
                     Metric::Rmse => compute_rmse(predictions, targets),
                     Metric::Mae => compute_mae(predictions, targets),
                     Metric::BinaryLogLoss => compute_binary_log_loss(predictions, targets),
-                    Metric::Accuracy { threshold } => compute_accuracy(predictions, targets, *threshold),
+                    Metric::Accuracy { threshold } => {
+                        compute_accuracy(predictions, targets, *threshold)
+                    }
                     Metric::RocAuc => compute_roc_auc(predictions, targets) as f32,
                     Metric::MultiClassLogLoss { .. } => unreachable!(),
                 }
@@ -158,7 +160,11 @@ pub fn compute_roc_auc(predictions: &[f32], targets: &[f32]) -> f64 {
 
     // Sort by descending probability
     let mut indices: Vec<usize> = (0..probs.len()).collect();
-    indices.sort_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal));
+    indices.sort_by(|&a, &b| {
+        probs[b]
+            .partial_cmp(&probs[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Count positives and negatives
     let n_pos = targets_f64.iter().filter(|&&t| t > 0.5).count();
@@ -450,7 +456,10 @@ mod tests {
         assert_eq!(Metric::Rmse.name(), "rmse");
         assert_eq!(Metric::Mae.name(), "mae");
         assert_eq!(Metric::BinaryLogLoss.name(), "binary_log_loss");
-        assert_eq!(Metric::multi_class_log_loss(3).name(), "multi_class_log_loss");
+        assert_eq!(
+            Metric::multi_class_log_loss(3).name(),
+            "multi_class_log_loss"
+        );
         assert_eq!(Metric::accuracy().name(), "accuracy");
     }
 
@@ -498,11 +507,19 @@ mod tests {
         let predictions = vec![1.0, 2.0, 3.0];
         let targets = vec![1.0, 1.0, 1.0];
         let auc = compute_roc_auc(&predictions, &targets);
-        assert!((auc - 0.5).abs() < 1e-6, "All-positive should give AUC = 0.5, got {}", auc);
+        assert!(
+            (auc - 0.5).abs() < 1e-6,
+            "All-positive should give AUC = 0.5, got {}",
+            auc
+        );
 
         let targets = vec![0.0, 0.0, 0.0];
         let auc = compute_roc_auc(&predictions, &targets);
-        assert!((auc - 0.5).abs() < 1e-6, "All-negative should give AUC = 0.5, got {}", auc);
+        assert!(
+            (auc - 0.5).abs() < 1e-6,
+            "All-negative should give AUC = 0.5, got {}",
+            auc
+        );
     }
 
     #[test]

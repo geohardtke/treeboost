@@ -242,11 +242,7 @@ pub trait TunableModel: Clone + Send + Sync + Sized {
     /// Configure conformal prediction settings in the model config
     ///
     /// Default implementation does nothing. Override for models that support conformal.
-    fn configure_conformal(
-        config: &mut Self::Config,
-        calibration_ratio: f32,
-        quantile: f32,
-    ) {
+    fn configure_conformal(config: &mut Self::Config, calibration_ratio: f32, quantile: f32) {
         let _ = (config, calibration_ratio, quantile);
     }
 }
@@ -382,8 +378,11 @@ mod tests {
         use crate::tuner::config::{ParamBounds, ParameterSpace};
 
         // Create a minimal parameter space
-        let space = ParameterSpace::new()
-            .with_param("learning_rate", ParamBounds::continuous(0.01, 0.5), 0.1);
+        let space = ParameterSpace::new().with_param(
+            "learning_rate",
+            ParamBounds::continuous(0.01, 0.5),
+            0.1,
+        );
 
         // Create params with an unknown parameter
         let mut params = HashMap::new();

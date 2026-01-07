@@ -84,7 +84,7 @@ pub enum Preprocessor {
 
     // Composition
     /// Pipeline: chain multiple preprocessors sequentially
-    Pipeline(Vec<Preprocessor>),
+    Pipeline(Box<Vec<Preprocessor>>),
 }
 
 impl Preprocessor {
@@ -131,7 +131,7 @@ impl Preprocessor {
             Preprocessor::Imputer(i) => i.transform(data, num_features),
             Preprocessor::YeoJohnson(t) => t.transform(data, num_features),
             Preprocessor::Pipeline(steps) => {
-                for step in steps {
+                for step in steps.iter() {
                     step.transform_numerical(data, num_features)?;
                 }
                 Ok(())
@@ -143,11 +143,7 @@ impl Preprocessor {
     }
 
     /// Fit and transform numerical data (convenience)
-    pub fn fit_transform_numerical(
-        &mut self,
-        data: &mut [f32],
-        num_features: usize,
-    ) -> Result<()> {
+    pub fn fit_transform_numerical(&mut self, data: &mut [f32], num_features: usize) -> Result<()> {
         self.fit_numerical(data, num_features)?;
         self.transform_numerical(data, num_features)?;
         Ok(())
@@ -303,7 +299,8 @@ impl PipelineBuilder {
 
     /// Add a StandardScaler to the pipeline
     pub fn add_standard_scaler(mut self) -> Self {
-        self.steps.push(Preprocessor::Standard(StandardScaler::new()));
+        self.steps
+            .push(Preprocessor::Standard(StandardScaler::new()));
         self
     }
 
@@ -321,13 +318,15 @@ impl PipelineBuilder {
 
     /// Add a mean imputer to the pipeline
     pub fn add_mean_imputer(mut self) -> Self {
-        self.steps.push(Preprocessor::Imputer(SimpleImputer::mean()));
+        self.steps
+            .push(Preprocessor::Imputer(SimpleImputer::mean()));
         self
     }
 
     /// Add a median imputer to the pipeline
     pub fn add_median_imputer(mut self) -> Self {
-        self.steps.push(Preprocessor::Imputer(SimpleImputer::median()));
+        self.steps
+            .push(Preprocessor::Imputer(SimpleImputer::median()));
         self
     }
 
@@ -361,7 +360,7 @@ impl PipelineBuilder {
         if self.steps.len() == 1 {
             self.steps.into_iter().next().unwrap()
         } else {
-            Preprocessor::Pipeline(self.steps)
+            Preprocessor::Pipeline(Box::new(self.steps))
         }
     }
 }
@@ -455,10 +454,10 @@ mod tests {
 
     #[test]
     fn test_preprocessor_pipeline() {
-        let mut pipeline = Preprocessor::Pipeline(vec![
+        let mut pipeline = Preprocessor::Pipeline(Box::new(vec![
             Preprocessor::Standard(StandardScaler::new()),
             Preprocessor::MinMax(MinMaxScaler::new()),
-        ]);
+        ]));
 
         let mut data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         pipeline.fit_numerical(&data, 3).unwrap();

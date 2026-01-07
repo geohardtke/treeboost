@@ -3,14 +3,26 @@
 //! This module contains all configuration structs, enums, and result types
 //! used by the AutoBuilder interface.
 
-use crate::analysis::{Confidence, DatasetAnalysis, DataFrameProfile};
+use crate::analysis::{Confidence, DataFrameProfile, DatasetAnalysis};
+use crate::dataset::feature_extractor::LinearFeatureConfig;
 use crate::features::FeaturePlan;
-use crate::model::{BoostingMode, UniversalModel};
 use crate::model::progress::{ProgressCallback, QuietProgress};
+use crate::model::{BoostingMode, UniversalModel};
 use crate::preprocessing::PreprocessingPlan;
 use crate::tuner::ltt::LttTuningResult;
 use std::sync::Arc;
 use std::time::Duration;
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Default validation split ratio for hyperparameter tuning
+pub const DEFAULT_VALIDATION_RATIO: f32 = 0.2;
+
+/// Minimum absolute correlation coefficient for detecting linear signal in data
+/// Used in mode selection to determine if LinearThenTree is appropriate
+pub const LINEAR_SIGNAL_THRESHOLD: f32 = 0.3;
 
 /// Tuning intensity level
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -67,6 +79,12 @@ pub struct AutoConfig {
 
     /// Progress callback for tracking training phases
     pub progress_callback: Arc<dyn ProgressCallback>,
+
+    /// Configuration for extracting features for linear models (LinearThenTree)
+    pub linear_feature_config: LinearFeatureConfig,
+
+    /// Custom UniversalConfig to use (bypasses tuning if provided with TuningLevel::None)
+    pub custom_config: Option<crate::model::UniversalConfig>,
 }
 
 impl Clone for AutoConfig {
@@ -83,6 +101,8 @@ impl Clone for AutoConfig {
             verbose: self.verbose,
             time_budget: self.time_budget,
             progress_callback: Arc::clone(&self.progress_callback),
+            linear_feature_config: self.linear_feature_config.clone(),
+            custom_config: self.custom_config.clone(),
         }
     }
 }
@@ -101,6 +121,7 @@ impl std::fmt::Debug for AutoConfig {
             .field("verbose", &self.verbose)
             .field("time_budget", &self.time_budget)
             .field("progress_callback", &"<callback>")
+            .field("linear_feature_config", &self.linear_feature_config)
             .finish()
     }
 }
@@ -119,6 +140,8 @@ impl Default for AutoConfig {
             verbose: false,
             time_budget: None,
             progress_callback: Arc::new(QuietProgress),
+            linear_feature_config: LinearFeatureConfig::default(),
+            custom_config: None,
         }
     }
 }
@@ -214,6 +237,35 @@ impl AutoConfig {
         self.progress_callback = callback;
         self
     }
+
+    /// Set configuration for linear model features (LinearThenTree mode)
+    ///
+    /// Use this to control which features are used for the linear component
+    /// in LinearThenTree mode. This can improve accuracy by excluding features
+    /// that are not useful for linear regression (e.g., high-cardinality categoricals).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use treeboost::dataset::feature_extractor::LinearFeatureConfig;
+    ///
+    /// let config = AutoConfig::new()
+    ///     .with_linear_feature_config(LinearFeatureConfig::default()
+    ///         .with_exclude_patterns(&vec!["id_".to_string(), "rank_".to_string()]));
+    /// ```
+    pub fn with_linear_feature_config(mut self, config: LinearFeatureConfig) -> Self {
+        self.linear_feature_config = config;
+        self
+    }
+
+    /// Set custom UniversalConfig (overrides tuning)
+    ///
+    /// Use this to bypass tuning and provide your own hyperparameters.
+    /// The custom config will be used regardless of tuning level.
+    pub fn with_custom_config(mut self, config: crate::model::UniversalConfig) -> Self {
+        self.custom_config = Some(config);
+        self
+    }
 }
 
 /// Tuning result for tree-based models (PureTree, RandomForest)
@@ -260,7 +312,7 @@ impl TreeTunerConfig {
             n_iterations: 1,
             max_rounds: 100,
             early_stopping_rounds: 10,
-            validation_ratio: 0.2,
+            validation_ratio: DEFAULT_VALIDATION_RATIO,
             improvement_threshold: 0.001,
             min_f1_score: 0.80,
         }
@@ -275,7 +327,7 @@ impl TreeTunerConfig {
             n_iterations: 3,
             max_rounds: 200,
             early_stopping_rounds: 10,
-            validation_ratio: 0.2,
+            validation_ratio: DEFAULT_VALIDATION_RATIO,
             improvement_threshold: 0.001,
             min_f1_score: 0.85,
         }
@@ -290,7 +342,7 @@ impl TreeTunerConfig {
             n_iterations: 15,
             max_rounds: 200,
             early_stopping_rounds: 10,
-            validation_ratio: 0.2,
+            validation_ratio: DEFAULT_VALIDATION_RATIO,
             improvement_threshold: 0.001,
             min_f1_score: 0.85,
         }

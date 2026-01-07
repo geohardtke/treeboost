@@ -43,7 +43,10 @@ impl RealisticModeConfig {
 /// Returns an error if any NULL values are found in the target column.
 pub(crate) fn extract_targets_from_df(df: &DataFrame, target_column: &str) -> Result<Vec<f32>> {
     let col = df.column(target_column).map_err(|e| {
-        TreeBoostError::Data(format!("Target column '{}' not found: {}", target_column, e))
+        TreeBoostError::Data(format!(
+            "Target column '{}' not found: {}",
+            target_column, e
+        ))
     })?;
 
     col.cast(&DataType::Float64)
@@ -97,7 +100,7 @@ pub(crate) fn encode_train_val_split(
     let val_targets = extract_targets_from_df(&val_df, &realistic_cfg.target_column)?;
 
     // Fit encoder on TRAIN ONLY
-    let (train_dataset, pipeline_state) = pipeline.process_for_training(
+    let (train_dataset, pipeline_state, _) = pipeline.process_for_training(
         train_df,
         &realistic_cfg.target_column,
         cat_cols.as_deref(),
@@ -123,11 +126,8 @@ pub(crate) fn encode_full_dataset(
         .as_ref()
         .map(|cols| cols.iter().map(|s| s.as_str()).collect());
 
-    let (dataset, _pipeline_state) = pipeline.process_for_training(
-        df,
-        &realistic_cfg.target_column,
-        cat_cols.as_deref(),
-    )?;
+    let (dataset, _pipeline_state, _) =
+        pipeline.process_for_training(df, &realistic_cfg.target_column, cat_cols.as_deref())?;
 
     Ok(dataset)
 }

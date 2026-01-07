@@ -120,8 +120,8 @@ fn test_autotuner_generate_param_values() {
 
 #[test]
 fn test_autotuner_generate_cartesian_grid() {
-    let tuner = AutoTuner::<GBDTModel>::new(GBDTConfig::default())
-        .with_space(ParameterSpace::minimal());
+    let tuner =
+        AutoTuner::<GBDTModel>::new(GBDTConfig::default()).with_space(ParameterSpace::minimal());
 
     let grid = tuner.generate_cartesian_grid(0.5, 3);
     // 2 parameters, 3 points each = 9 candidates
@@ -152,8 +152,7 @@ fn test_discrete_grid_dedup() {
     // Test that discrete parameters with small spread don't produce duplicates
     // If center=6 and spread is tiny, all 3 points should round to 6
     // After dedup, we should have only 1 unique value
-    let space =
-        ParameterSpace::new().with_param("max_depth", ParamBounds::discrete(2, 10), 6.0);
+    let space = ParameterSpace::new().with_param("max_depth", ParamBounds::discrete(2, 10), 6.0);
 
     let tuner = AutoTuner::<GBDTModel>::new(GBDTConfig::default()).with_space(space);
 
@@ -402,14 +401,20 @@ fn test_different_seeds_produce_different_results() {
             }
         }
     }
-    assert!(!all_same, "Different seeds should produce different results");
+    assert!(
+        !all_same,
+        "Different seeds should produce different results"
+    );
 }
 
 #[test]
 fn test_log_scale_sampling() {
     // Verify log-scale parameters are sampled uniformly in log space
-    let space = ParameterSpace::new()
-        .with_param("learning_rate", ParamBounds::log_continuous(0.001, 1.0), 0.1);
+    let space = ParameterSpace::new().with_param(
+        "learning_rate",
+        ParamBounds::log_continuous(0.001, 1.0),
+        0.1,
+    );
 
     let tuner = AutoTuner::<GBDTModel>::new(GBDTConfig::default())
         .with_space(space)
@@ -453,7 +458,8 @@ fn test_spread_affects_range() {
     assert!(
         wide_range > narrow_range,
         "Larger spread should produce wider range: wide={}, narrow={}",
-        wide_range, narrow_range
+        wide_range,
+        narrow_range
     );
 }
 

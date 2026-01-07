@@ -1,63 +1,14 @@
-//! UniversalModel: Unified boosting framework
+//! UniversalModel core implementation
 //!
-//! Supports multiple boosting modes:
-//! - **PureTree**: Standard GBDT (delegates to GBDTModel - GPU, conformal, multi-class)
-//! - **LinearThenTree**: Linear model captures trend, trees capture residuals
-//! - **RandomForest**: Parallel trees with bootstrap sampling
-//!
-//! # Design Rationale
-//!
-//! Most tabular problems are solved by Linear, Tree, or their combination.
-//! UniversalModel provides a single interface for all three patterns.
-//!
-//! ## Architecture
-//!
-//! - **PureTree** wraps `GBDTModel` directly - you get GPU acceleration, conformal
-//!   prediction, multi-class, and all mature GBDTModel features.
-//! - **LinearThenTree** and **RandomForest** are specialized modes that don't
-//!   fit the standard GBDT pattern.
-//!
-//! ## When to Use Each Mode
-//!
-//! - **PureTree**: Most tabular problems, categorical-heavy data
-//! - **LinearThenTree**: Time-series with trends, extrapolation beyond training range
-//! - **RandomForest**: When robustness and variance reduction are priorities
-//!
-//! # Automatic Mode Selection
-//!
-//! TreeBoost can automatically analyze your dataset and pick the best mode:
-//!
-//! ```ignore
-//! use treeboost::{UniversalModel, MseLoss};
-//!
-//! // Let TreeBoost analyze the data and pick the best mode
-//! let model = UniversalModel::auto(&dataset, &MseLoss)?;
-//!
-//! // See why it picked this mode
-//! println!("{}", model.analysis_report().unwrap());
-//! ```
-//!
-//! The analysis runs lightweight "probes" (quick linear and tree models on subsamples)
-//! to measure signal strength WITHOUT the cost of full training. A 5-second analysis
-//! beats a 4-hour search.
-//!
-//! # Example
-//!
-//! ```ignore
-//! use treeboost::model::{UniversalModel, BoostingMode, UniversalConfig};
-//!
-//! let config = UniversalConfig::default()
-//!     .with_mode(BoostingMode::LinearThenTree)
-//!     .with_num_rounds(100);
-//!
-//! let model = UniversalModel::train(&dataset, config)?;
-//! let predictions = model.predict(&dataset);
-//! ```
+//! This module contains the UniversalModel struct and all its implementations.
+//! Types like BoostingMode, ModeSelection, and UniversalConfig are defined in
+//! separate submodules (mode.rs, config.rs) for better organization.
 
+use super::{BoostingMode, ModeSelection, UniversalConfig};
 use crate::analysis::{AnalysisConfig, Confidence, DatasetAnalysis};
 use crate::booster::{GBDTConfig, GBDTModel};
 use crate::dataset::BinnedDataset;
-use crate::learner::{LinearBooster, LinearConfig, TreeBooster, TreeConfig, WeakLearner};
+use crate::learner::{LinearBooster, TreeBooster, WeakLearner};
 use crate::loss::LossFunction;
 use crate::tree::Tree;
 use crate::Result;
@@ -65,280 +16,16 @@ use rand::SeedableRng;
 use rayon::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
 
-// =============================================================================
-// BoostingMode
-// =============================================================================
-
-/// Boosting mode for UniversalModel
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
-pub enum BoostingMode {
-    /// Pure GBDT: Standard histogram-based tree boosting
-    ///
-    /// Best for: Most tabular problems, categorical-heavy data
-    #[default]
-    PureTree,
-
-    /// Linear + Tree: Linear model first, then trees on residuals
-    ///
-    /// Best for: Time-series with trends, extrapolation beyond training range
-    ///
-    /// How it works:
-    /// 1. Train LinearBooster to capture global trend
-    /// 2. Compute residuals: r = y - linear_pred
-    /// 3. Train TreeBoosters on residuals (non-linear nuances)
-    /// 4. Final: linear_pred + tree_pred
-    LinearThenTree,
-
-    /// Random Forest: Parallel trees with bootstrap sampling
-    ///
-    /// Best for: Robustness, variance reduction, when overfitting is a concern
-    ///
-    /// How it works:
-    /// - learning_rate = 1.0 (full contribution per tree)
-    /// - Each tree trained on bootstrap sample
-    /// - Trees trained in parallel (independent)
-    /// - Average predictions
-    RandomForest,
-}
-
-// =============================================================================
-// ModeSelection - How to choose the boosting mode
-// =============================================================================
-
-/// How to select the boosting mode
-///
-/// TreeBoost provides three ways to select the boosting mode:
-///
-/// 1. **Auto** (recommended): Let TreeBoost analyze the data and pick the best mode
-/// 2. **AutoWithConfig**: Auto with custom analysis configuration
-/// 3. **Fixed**: You explicitly specify the mode
-///
-/// # Example: Auto Selection
-///
-/// ```ignore
-/// use treeboost::{UniversalModel, UniversalConfig, ModeSelection, MseLoss};
-///
-/// let config = UniversalConfig::new()
-///     .with_mode_selection(ModeSelection::Auto)
-///     .with_num_rounds(100);
-///
-/// let model = UniversalModel::train_smart(&dataset, config, &MseLoss)?;
-/// println!("Selected mode: {:?}", model.mode());
-/// println!("Confidence: {:?}", model.selection_confidence());
-/// ```
-///
-/// # Example: Fixed Mode
-///
-/// ```ignore
-/// use treeboost::{UniversalModel, UniversalConfig, ModeSelection, BoostingMode};
-///
-/// let config = UniversalConfig::new()
-///     .with_mode_selection(ModeSelection::Fixed(BoostingMode::LinearThenTree))
-///     .with_num_rounds(100);
-/// ```
-#[derive(Debug, Clone)]
-pub enum ModeSelection {
-    /// Automatically analyze the dataset and pick the best mode
-    ///
-    /// This runs lightweight "probes" (quick models on subsamples) to measure:
-    /// - Linear signal strength (R²)
-    /// - Non-linear structure (tree gain on residuals)
-    /// - Categorical feature ratio
-    /// - Noise floor
-    /// - Monotonicity of relationships
-    ///
-    /// Based on these metrics, TreeBoost picks the mode with the highest score
-    /// and provides confidence level and full explanation.
-    Auto,
-
-    /// Auto mode selection with custom analysis configuration
-    ///
-    /// Use this to control:
-    /// - Sample size for analysis
-    /// - Probe depth and iterations
-    /// - Number of features to analyze
-    AutoWithConfig(AnalysisConfig),
-
-    /// Explicitly specify the boosting mode
-    ///
-    /// Use this when you know what mode works best for your data,
-    /// or when you want to override the automatic selection.
-    Fixed(BoostingMode),
-}
-
-impl Default for ModeSelection {
-    fn default() -> Self {
-        // Default is Fixed(PureTree) for backwards compatibility
-        // Users who want auto should explicitly opt in
-        ModeSelection::Fixed(BoostingMode::PureTree)
-    }
-}
-
-// =============================================================================
-// UniversalConfig
-// =============================================================================
-
-/// Configuration for UniversalModel
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct UniversalConfig {
-    /// Boosting mode
-    pub mode: BoostingMode,
-
-    /// Number of boosting rounds (trees for PureTree/LinearThenTree, or total trees for RF)
-    pub num_rounds: usize,
-
-    /// Tree configuration
-    pub tree_config: TreeConfig,
-
-    /// Linear configuration (for LinearThenTree mode)
-    pub linear_config: LinearConfig,
-
-    /// Learning rate for gradient boosting (not used in RandomForest mode)
-    pub learning_rate: f32,
-
-    /// Row subsampling ratio (0.0-1.0)
-    pub subsample: f32,
-
-    /// Validation ratio for early stopping (0.0 to disable)
-    pub validation_ratio: f32,
-
-    /// Early stopping rounds (0 to disable)
-    pub early_stopping_rounds: usize,
-
-    /// Random seed
-    pub seed: u64,
-
-    /// Number of linear boosting rounds before trees (LinearThenTree mode)
-    pub linear_rounds: usize,
-
-    /// Maximum memory (MB) for LinearThenTree raw feature extraction
-    ///
-    /// LinearThenTree mode unpacks binned u8 data to f32 (4x expansion).
-    /// Set this to limit memory usage. If exceeded:
-    /// - `0` = No limit (default, may cause OOM on large datasets)
-    /// - `> 0` = Error if estimated memory exceeds this limit
-    ///
-    /// **Rule of thumb**: 100M rows × 100 features = ~40GB memory
-    pub max_linear_memory_mb: usize,
-}
-
-impl Default for UniversalConfig {
-    fn default() -> Self {
-        Self {
-            mode: BoostingMode::PureTree,
-            num_rounds: 100,
-            tree_config: TreeConfig::default(),
-            linear_config: LinearConfig::default(),
-            learning_rate: 0.1,
-            subsample: 1.0,
-            validation_ratio: 0.0,
-            early_stopping_rounds: 0,
-            seed: 42,
-            linear_rounds: 1,  // Single round with many CD iterations (fit once)
-            max_linear_memory_mb: 0, // No limit by default
-        }
-    }
-}
-
-impl UniversalConfig {
-    /// Create new config with defaults
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_mode(mut self, mode: BoostingMode) -> Self {
-        self.mode = mode;
-        self
-    }
-
-    pub fn with_num_rounds(mut self, rounds: usize) -> Self {
-        self.num_rounds = rounds;
-        self
-    }
-
-    pub fn with_tree_config(mut self, config: TreeConfig) -> Self {
-        self.tree_config = config;
-        self
-    }
-
-    pub fn with_linear_config(mut self, config: LinearConfig) -> Self {
-        self.linear_config = config;
-        self
-    }
-
-    pub fn with_learning_rate(mut self, lr: f32) -> Self {
-        self.learning_rate = lr.clamp(0.0, 1.0);
-        self
-    }
-
-    pub fn with_subsample(mut self, ratio: f32) -> Self {
-        self.subsample = ratio.clamp(0.0, 1.0);
-        self
-    }
-
-    pub fn with_validation_ratio(mut self, ratio: f32) -> Self {
-        self.validation_ratio = ratio.clamp(0.0, 0.5);
-        self
-    }
-
-    pub fn with_early_stopping_rounds(mut self, rounds: usize) -> Self {
-        self.early_stopping_rounds = rounds;
-        self
-    }
-
-    pub fn with_seed(mut self, seed: u64) -> Self {
-        self.seed = seed;
-        self
-    }
-
-    pub fn with_linear_rounds(mut self, rounds: usize) -> Self {
-        self.linear_rounds = rounds;
-        self
-    }
-
-    /// Set maximum memory (MB) for LinearThenTree raw feature extraction
-    ///
-    /// # Arguments
-    /// - `mb`: Maximum memory in megabytes (0 = no limit)
-    ///
-    /// # Example
-    /// ```ignore
-    /// let config = UniversalConfig::new()
-    ///     .with_mode(BoostingMode::LinearThenTree)
-    ///     .with_max_linear_memory_mb(4096); // 4GB limit
-    /// ```
-    pub fn with_max_linear_memory_mb(mut self, mb: usize) -> Self {
-        self.max_linear_memory_mb = mb;
-        self
-    }
-
-    /// Estimate memory usage (bytes) for LinearThenTree raw feature extraction
-    pub fn estimate_linear_memory(&self, num_rows: usize, num_features: usize) -> usize {
-        // f32 = 4 bytes per element
-        num_rows * num_features * 4
-    }
-}
+// Note: BoostingMode, ModeSelection, and UniversalConfig are now defined in
+// separate modules (mode.rs and config.rs) and imported via super::.
 
 // =============================================================================
 // UniversalModel
 // =============================================================================
 
-/// Unified boosting model supporting multiple modes
-///
-/// # Modes
-///
-/// - **PureTree**: Wraps `GBDTModel` - full GPU, conformal, multi-class support
-/// - **LinearThenTree**: Linear model captures trend, trees capture residuals
-/// - **RandomForest**: Parallel trees with bootstrap sampling
-///
-/// # Automatic Mode Selection
-///
 /// Use [`UniversalModel::auto()`] to let TreeBoost analyze your data and pick the best mode.
 /// The analysis result is stored and can be retrieved with [`UniversalModel::analysis()`].
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
 pub struct UniversalModel {
     /// Training configuration
     config: UniversalConfig,
@@ -387,19 +74,61 @@ pub struct UniversalModel {
     #[rkyv(with = rkyv::with::Skip)]
     #[serde(skip)]
     num_linear_features: Option<usize>,
+
+    /// Feature extractor for LinearThenTree inference (optional)
+    ///
+    /// Stores feature extraction configuration (which columns to exclude,
+    /// auto-exclusion settings) used during training. This ensures consistent
+    /// feature extraction during inference for linear component.
+    #[rkyv(with = rkyv::with::Skip)]
+    #[serde(skip)]
+    feature_extractor: Option<crate::dataset::feature_extractor::FeatureExtractor>,
 }
 
 impl UniversalModel {
+    /// Set feature extractor for LinearThenTree inference
+    ///
+    /// This is called after training to store the feature extraction configuration
+    /// (which columns to exclude, auto-exclusion settings). This ensures consistent
+    /// feature extraction during inference for the linear component.
+    pub fn with_feature_extractor(
+        mut self,
+        extractor: crate::dataset::feature_extractor::FeatureExtractor,
+    ) -> Self {
+        self.feature_extractor = Some(extractor);
+        self
+    }
+
+    /// Get the feature extractor (if set)
+    pub fn feature_extractor(
+        &self,
+    ) -> Option<&crate::dataset::feature_extractor::FeatureExtractor> {
+        self.feature_extractor.as_ref()
+    }
+
     /// Train a UniversalModel on binned data
     pub fn train(
         dataset: &BinnedDataset,
         config: UniversalConfig,
         loss_fn: &dyn LossFunction,
+        feature_extractor: Option<crate::dataset::feature_extractor::FeatureExtractor>,
     ) -> Result<Self> {
         match config.mode {
-            BoostingMode::PureTree => Self::train_pure_tree(dataset, config, loss_fn, None),
-            BoostingMode::LinearThenTree => Self::train_linear_then_tree(dataset, None, None, config, loss_fn, None),
-            BoostingMode::RandomForest => Self::train_random_forest(dataset, config, loss_fn, None),
+            BoostingMode::PureTree => {
+                Self::train_pure_tree(dataset, config, loss_fn, None, feature_extractor)
+            }
+            BoostingMode::LinearThenTree => Self::train_linear_then_tree(
+                dataset,
+                None,
+                None,
+                config,
+                loss_fn,
+                None,
+                feature_extractor,
+            ),
+            BoostingMode::RandomForest => {
+                Self::train_random_forest(dataset, config, loss_fn, None, feature_extractor)
+            }
         }
     }
 
@@ -429,13 +158,24 @@ impl UniversalModel {
         raw_features: &[f32],
         config: UniversalConfig,
         loss_fn: &dyn LossFunction,
+        feature_extractor: Option<crate::dataset::feature_extractor::FeatureExtractor>,
     ) -> Result<Self> {
         match config.mode {
-            BoostingMode::PureTree => Self::train_pure_tree(dataset, config, loss_fn, None),
-            BoostingMode::LinearThenTree => {
-                Self::train_linear_then_tree(dataset, Some(raw_features), None, config, loss_fn, None)
+            BoostingMode::PureTree => {
+                Self::train_pure_tree(dataset, config, loss_fn, None, feature_extractor)
             }
-            BoostingMode::RandomForest => Self::train_random_forest(dataset, config, loss_fn, None),
+            BoostingMode::LinearThenTree => Self::train_linear_then_tree(
+                dataset,
+                Some(raw_features),
+                None,
+                config,
+                loss_fn,
+                None,
+                feature_extractor,
+            ),
+            BoostingMode::RandomForest => {
+                Self::train_random_forest(dataset, config, loss_fn, None, feature_extractor)
+            }
         }
     }
 
@@ -457,20 +197,24 @@ impl UniversalModel {
         linear_feature_indices: &[usize],
         config: UniversalConfig,
         loss_fn: &dyn LossFunction,
+        feature_extractor: Option<crate::dataset::feature_extractor::FeatureExtractor>,
     ) -> Result<Self> {
         match config.mode {
-            BoostingMode::PureTree => Self::train_pure_tree(dataset, config, loss_fn, None),
-            BoostingMode::LinearThenTree => {
-                Self::train_linear_then_tree(
-                    dataset,
-                    Some(raw_features),
-                    Some(linear_feature_indices),
-                    config,
-                    loss_fn,
-                    None,
-                )
+            BoostingMode::PureTree => {
+                Self::train_pure_tree(dataset, config, loss_fn, None, feature_extractor)
             }
-            BoostingMode::RandomForest => Self::train_random_forest(dataset, config, loss_fn, None),
+            BoostingMode::LinearThenTree => Self::train_linear_then_tree(
+                dataset,
+                Some(raw_features),
+                Some(linear_feature_indices),
+                config,
+                loss_fn,
+                None,
+                feature_extractor,
+            ),
+            BoostingMode::RandomForest => {
+                Self::train_random_forest(dataset, config, loss_fn, None, feature_extractor)
+            }
         }
     }
 
@@ -567,9 +311,21 @@ impl UniversalModel {
 
         // Step 4: Train with the recommended mode
         let model = match config.mode {
-            BoostingMode::PureTree => Self::train_pure_tree(dataset, config, loss_fn, Some(analysis)),
-            BoostingMode::LinearThenTree => Self::train_linear_then_tree(dataset, None, None, config, loss_fn, Some(analysis)),
-            BoostingMode::RandomForest => Self::train_random_forest(dataset, config, loss_fn, Some(analysis)),
+            BoostingMode::PureTree => {
+                Self::train_pure_tree(dataset, config, loss_fn, Some(analysis), None)
+            }
+            BoostingMode::LinearThenTree => Self::train_linear_then_tree(
+                dataset,
+                None,
+                None,
+                config,
+                loss_fn,
+                Some(analysis),
+                None,
+            ),
+            BoostingMode::RandomForest => {
+                Self::train_random_forest(dataset, config, loss_fn, Some(analysis), None)
+            }
         }?;
 
         Ok(model)
@@ -608,7 +364,7 @@ impl UniversalModel {
             }
             ModeSelection::Fixed(mode) => {
                 config.mode = mode;
-                Self::train(dataset, config, loss_fn)
+                Self::train(dataset, config, loss_fn, None)
             }
         }
     }
@@ -625,16 +381,14 @@ impl UniversalModel {
             .with_max_depth(config.tree_config.max_depth)
             .with_max_leaves(config.tree_config.max_leaves)
             .with_lambda(config.tree_config.lambda)
-            .with_entropy_weight(config.tree_config.entropy_weight)  // Pass entropy regularization
+            .with_entropy_weight(config.tree_config.entropy_weight) // Pass entropy regularization
             .with_subsample(config.subsample)
             .with_seed(config.seed);
 
         // Early stopping
         if config.early_stopping_rounds > 0 && config.validation_ratio > 0.0 {
-            gbdt_config = gbdt_config.with_early_stopping(
-                config.early_stopping_rounds,
-                config.validation_ratio,
-            );
+            gbdt_config = gbdt_config
+                .with_early_stopping(config.early_stopping_rounds, config.validation_ratio);
         }
 
         // Set loss type based on loss_fn type name (best effort)
@@ -658,6 +412,7 @@ impl UniversalModel {
         config: UniversalConfig,
         loss_fn: &dyn LossFunction,
         analysis: Option<DatasetAnalysis>,
+        feature_extractor: Option<crate::dataset::feature_extractor::FeatureExtractor>,
     ) -> Result<Self> {
         let num_features = dataset.num_features();
 
@@ -676,6 +431,7 @@ impl UniversalModel {
             raw_features_for_linear: None,
             linear_feature_indices: None,
             num_linear_features: None,
+            feature_extractor,
         })
     }
 
@@ -693,6 +449,7 @@ impl UniversalModel {
         config: UniversalConfig,
         loss_fn: &dyn LossFunction,
         analysis: Option<DatasetAnalysis>,
+        feature_extractor: Option<crate::dataset::feature_extractor::FeatureExtractor>,
     ) -> Result<Self> {
         let targets = dataset.targets();
         let num_rows = dataset.num_rows();
@@ -700,17 +457,9 @@ impl UniversalModel {
 
         // Determine which features to use for linear model
         let linear_indices: Option<Vec<usize>> = linear_feature_indices_opt.map(|v| v.to_vec());
-        let num_linear_features = linear_indices.as_ref().map(|v| v.len()).unwrap_or(num_features);
 
         // Get raw features: use provided ones or extract from bins (lossy fallback)
         let raw_features: Vec<f32> = if let Some(provided) = raw_features_opt {
-            // Validate size
-            if provided.len() != num_rows * num_features {
-                return Err(crate::TreeBoostError::Data(format!(
-                    "Raw features size mismatch: expected {} ({}×{}), got {}",
-                    num_rows * num_features, num_rows, num_features, provided.len()
-                )));
-            }
             provided.to_vec()
         } else {
             // Memory safety check for bin-center extraction fallback
@@ -740,6 +489,20 @@ impl UniversalModel {
             Self::extract_raw_features(dataset)
         };
 
+        // Calculate actual number of features in raw_features
+        // (may differ from num_features if FeatureExtractor was used)
+        let num_raw_features = if num_rows > 0 {
+            raw_features.len() / num_rows
+        } else {
+            num_features
+        };
+
+        // Determine number of features for linear model
+        let num_linear_features = linear_indices
+            .as_ref()
+            .map(|v| v.len())
+            .unwrap_or(num_raw_features);
+
         // Base prediction (mean target)
         let base_prediction = loss_fn.initial_prediction(targets);
 
@@ -756,7 +519,7 @@ impl UniversalModel {
             let mut selected = Vec::with_capacity(num_rows * indices.len());
             for row in 0..num_rows {
                 for &feat_idx in indices {
-                    selected.push(raw_features[row * num_features + feat_idx]);
+                    selected.push(raw_features[row * num_raw_features + feat_idx]);
                 }
             }
             selected
@@ -764,7 +527,8 @@ impl UniversalModel {
             raw_features.clone()
         };
 
-        let mut linear_booster = LinearBooster::new(num_linear_features, config.linear_config.clone());
+        let mut linear_booster =
+            LinearBooster::new(num_linear_features, config.linear_config.clone());
 
         // Current predictions start from base
         let mut predictions = vec![base_prediction; num_rows];
@@ -782,12 +546,18 @@ impl UniversalModel {
             }
 
             // Fit linear model on gradients (Newton step)
-            linear_booster.fit_on_gradients(&linear_features, num_linear_features, &gradients, &hessians)?;
+            linear_booster.fit_on_gradients(
+                &linear_features,
+                num_linear_features,
+                &gradients,
+                &hessians,
+            )?;
 
             // Update predictions with learning rate
             let lr = config.linear_config.learning_rate;
             for (i, pred) in predictions.iter_mut().enumerate().take(num_rows) {
-                let linear_pred = linear_booster.predict_row(&linear_features, num_linear_features, i);
+                let linear_pred =
+                    linear_booster.predict_row(&linear_features, num_linear_features, i);
                 *pred += lr * linear_pred;
             }
         }
@@ -817,9 +587,10 @@ impl UniversalModel {
             base_prediction,
             num_features,
             analysis,
-            raw_features_for_linear: None, // Training features not needed for prediction (model is fitted)
-            linear_feature_indices: linear_indices,
+            raw_features_for_linear: Some(raw_features),
+            linear_feature_indices: linear_indices.map(|v| v.to_vec()),
             num_linear_features: Some(num_linear_features),
+            feature_extractor,
         })
     }
 
@@ -832,6 +603,7 @@ impl UniversalModel {
         config: UniversalConfig,
         loss_fn: &dyn LossFunction,
         analysis: Option<DatasetAnalysis>,
+        feature_extractor: Option<crate::dataset::feature_extractor::FeatureExtractor>,
     ) -> Result<Self> {
         let targets = dataset.targets();
         let num_rows = dataset.num_rows();
@@ -891,6 +663,7 @@ impl UniversalModel {
             raw_features_for_linear: None,
             linear_feature_indices: None,
             num_linear_features: None,
+            feature_extractor,
         })
     }
 
@@ -898,10 +671,31 @@ impl UniversalModel {
     // Helper Methods
     // =========================================================================
 
-    /// Extract raw feature values from BinnedDataset
+    /// Extract raw feature values from BinnedDataset using bin-center approximation
+    ///
+    /// **⚠️ Note**: This is a fallback method with accuracy limitations. For best results,
+    /// use `FeatureExtractor` with the original DataFrame instead. See the
+    /// `feature_extractor` module documentation for a detailed comparison.
+    ///
+    /// This method approximates raw values by using the midpoint of bin boundaries.
+    /// While functional, this loses precision compared to extracting from the original
+    /// DataFrame with `FeatureExtractor`.
     ///
     /// Returns row-major f32 array for linear model training.
-    /// Uses bin-center approximation (midpoint of bin boundaries).
+    ///
+    /// # When to Use
+    /// - Only when you have a BinnedDataset but not the original DataFrame
+    /// - When using UniversalModel directly (advanced usage)
+    /// - When slight accuracy loss is acceptable
+    ///
+    /// # Alternative (Recommended)
+    /// ```rust,ignore
+    /// use treeboost::dataset::feature_extractor::FeatureExtractor;
+    ///
+    /// let extractor = FeatureExtractor::new();
+    /// let (raw_features, num_features) = extractor.extract(&df, "target")?;
+    /// // Use raw_features with train_with_raw_features()
+    /// ```
     pub fn extract_raw_features(dataset: &BinnedDataset) -> Vec<f32> {
         let num_rows = dataset.num_rows();
         let num_features = dataset.num_features();
@@ -1038,7 +832,11 @@ impl UniversalModel {
     ///
     /// # Note
     /// For PureTree and RandomForest, `raw_features` is ignored (trees use binned data).
-    pub fn predict_with_raw_features(&self, dataset: &BinnedDataset, raw_features: &[f32]) -> Vec<f32> {
+    pub fn predict_with_raw_features(
+        &self,
+        dataset: &BinnedDataset,
+        raw_features: &[f32],
+    ) -> Vec<f32> {
         match self.config.mode {
             BoostingMode::PureTree => {
                 // Delegate entirely to GBDTModel (raw features not used for trees)
@@ -1054,22 +852,32 @@ impl UniversalModel {
 
                 // Add linear contribution using raw features (possibly selected subset)
                 if let Some(ref linear) = self.linear_booster {
-                    let num_lin_feats = self.num_linear_features.unwrap_or(self.num_features);
-
-                    // Extract selected features if indices are specified
-                    let linear_features: Vec<f32> = if let Some(ref indices) = self.linear_feature_indices {
-                        let mut selected = Vec::with_capacity(num_rows * indices.len());
-                        for row in 0..num_rows {
-                            for &feat_idx in indices {
-                                selected.push(raw_features[row * self.num_features + feat_idx]);
-                            }
-                        }
-                        selected
+                    // Calculate actual number of features in raw_features array
+                    // (may differ from self.num_features if FeatureExtractor was used)
+                    let num_raw_features = if num_rows > 0 {
+                        raw_features.len() / num_rows
                     } else {
-                        raw_features.to_vec()
+                        self.num_features
                     };
 
+                    let num_lin_feats = self.num_linear_features.unwrap_or(num_raw_features);
+
+                    // Extract selected features if indices are specified
+                    let linear_features: Vec<f32> =
+                        if let Some(ref indices) = self.linear_feature_indices {
+                            let mut selected = Vec::with_capacity(num_rows * indices.len());
+                            for row in 0..num_rows {
+                                for &feat_idx in indices {
+                                    selected.push(raw_features[row * num_raw_features + feat_idx]);
+                                }
+                            }
+                            selected
+                        } else {
+                            raw_features.to_vec()
+                        };
+
                     let linear_preds = linear.predict_batch(&linear_features, num_lin_feats);
+
                     for i in 0..num_rows {
                         predictions[i] += linear_preds[i];
                     }
@@ -1125,7 +933,11 @@ impl UniversalModel {
                 let mut pred = self.base_prediction;
 
                 if !self.trees.is_empty() {
-                    let tree_sum: f32 = self.trees.iter().map(|t| t.predict_row(dataset, row_idx)).sum();
+                    let tree_sum: f32 = self
+                        .trees
+                        .iter()
+                        .map(|t| t.predict_row(dataset, row_idx))
+                        .sum();
                     pred += tree_sum / self.trees.len() as f32;
                 }
 
@@ -1166,12 +978,11 @@ impl UniversalModel {
     /// For RandomForest, returns the stored base prediction.
     pub fn base_prediction(&self) -> f32 {
         match self.config.mode {
-            BoostingMode::PureTree => {
-                self.gbdt_model
-                    .as_ref()
-                    .map(|m| m.base_prediction())
-                    .unwrap_or(self.base_prediction)
-            }
+            BoostingMode::PureTree => self
+                .gbdt_model
+                .as_ref()
+                .map(|m| m.base_prediction())
+                .unwrap_or(self.base_prediction),
             // LinearThenTree and RandomForest: use stored base_prediction
             // (GBDTModel in LinearThenTree was trained on residuals, so its base is ~0)
             BoostingMode::LinearThenTree | BoostingMode::RandomForest => self.base_prediction,
@@ -1303,7 +1114,9 @@ impl UniversalModel {
                 .as_ref()
                 .map(|m| Ok(m.predict_with_intervals(dataset)))
                 .unwrap_or_else(|| {
-                    Err(crate::TreeBoostError::Config("No model trained".to_string()))
+                    Err(crate::TreeBoostError::Config(
+                        "No model trained".to_string(),
+                    ))
                 }),
             BoostingMode::LinearThenTree | BoostingMode::RandomForest => {
                 Err(crate::TreeBoostError::Config(
@@ -1315,7 +1128,9 @@ impl UniversalModel {
 
     /// Get the calibrated conformal quantile (if available)
     pub fn conformal_quantile(&self) -> Option<f32> {
-        self.gbdt_model.as_ref().and_then(|m| m.conformal_quantile())
+        self.gbdt_model
+            .as_ref()
+            .and_then(|m| m.conformal_quantile())
     }
 
     // =========================================================================
@@ -1333,7 +1148,9 @@ impl UniversalModel {
                 .as_ref()
                 .map(|m| Ok(m.predict_proba(dataset)))
                 .unwrap_or_else(|| {
-                    Err(crate::TreeBoostError::Config("No model trained".to_string()))
+                    Err(crate::TreeBoostError::Config(
+                        "No model trained".to_string(),
+                    ))
                 }),
             _ => Err(crate::TreeBoostError::Config(
                 "Classification only supported in PureTree mode".to_string(),
@@ -1351,7 +1168,9 @@ impl UniversalModel {
                 .as_ref()
                 .map(|m| Ok(m.predict_class(dataset, threshold)))
                 .unwrap_or_else(|| {
-                    Err(crate::TreeBoostError::Config("No model trained".to_string()))
+                    Err(crate::TreeBoostError::Config(
+                        "No model trained".to_string(),
+                    ))
                 }),
             _ => Err(crate::TreeBoostError::Config(
                 "Classification only supported in PureTree mode".to_string(),
@@ -1382,7 +1201,9 @@ impl UniversalModel {
                 .as_ref()
                 .map(|m| Ok(m.predict_proba_multiclass(dataset)))
                 .unwrap_or_else(|| {
-                    Err(crate::TreeBoostError::Config("No model trained".to_string()))
+                    Err(crate::TreeBoostError::Config(
+                        "No model trained".to_string(),
+                    ))
                 }),
             _ => Err(crate::TreeBoostError::Config(
                 "Multi-class only supported in PureTree mode".to_string(),
@@ -1398,7 +1219,9 @@ impl UniversalModel {
                 .as_ref()
                 .map(|m| Ok(m.predict_class_multiclass(dataset)))
                 .unwrap_or_else(|| {
-                    Err(crate::TreeBoostError::Config("No model trained".to_string()))
+                    Err(crate::TreeBoostError::Config(
+                        "No model trained".to_string(),
+                    ))
                 }),
             _ => Err(crate::TreeBoostError::Config(
                 "Multi-class only supported in PureTree mode".to_string(),
@@ -1414,7 +1237,9 @@ impl UniversalModel {
                 .as_ref()
                 .map(|m| Ok(m.predict_raw_multiclass(dataset)))
                 .unwrap_or_else(|| {
-                    Err(crate::TreeBoostError::Config("No model trained".to_string()))
+                    Err(crate::TreeBoostError::Config(
+                        "No model trained".to_string(),
+                    ))
                 }),
             _ => Err(crate::TreeBoostError::Config(
                 "Multi-class only supported in PureTree mode".to_string(),
@@ -1480,7 +1305,9 @@ impl UniversalModel {
                 .as_ref()
                 .map(|m| Ok(m.predict_raw(features)))
                 .unwrap_or_else(|| {
-                    Err(crate::TreeBoostError::Config("No model trained".to_string()))
+                    Err(crate::TreeBoostError::Config(
+                        "No model trained".to_string(),
+                    ))
                 }),
             _ => Err(crate::TreeBoostError::Config(
                 "Raw prediction only supported in PureTree mode".to_string(),
@@ -1499,7 +1326,9 @@ impl UniversalModel {
                 .as_ref()
                 .map(|m| Ok(m.predict_raw_with_intervals(features)))
                 .unwrap_or_else(|| {
-                    Err(crate::TreeBoostError::Config("No model trained".to_string()))
+                    Err(crate::TreeBoostError::Config(
+                        "No model trained".to_string(),
+                    ))
                 }),
             _ => Err(crate::TreeBoostError::Config(
                 "Raw prediction only supported in PureTree mode".to_string(),
@@ -1515,7 +1344,9 @@ impl UniversalModel {
                 .as_ref()
                 .map(|m| Ok(m.predict_proba_raw(features)))
                 .unwrap_or_else(|| {
-                    Err(crate::TreeBoostError::Config("No model trained".to_string()))
+                    Err(crate::TreeBoostError::Config(
+                        "No model trained".to_string(),
+                    ))
                 }),
             _ => Err(crate::TreeBoostError::Config(
                 "Raw prediction only supported in PureTree mode".to_string(),
@@ -1531,7 +1362,9 @@ impl UniversalModel {
                 .as_ref()
                 .map(|m| Ok(m.predict_class_raw(features, threshold)))
                 .unwrap_or_else(|| {
-                    Err(crate::TreeBoostError::Config("No model trained".to_string()))
+                    Err(crate::TreeBoostError::Config(
+                        "No model trained".to_string(),
+                    ))
                 }),
             _ => Err(crate::TreeBoostError::Config(
                 "Raw prediction only supported in PureTree mode".to_string(),
@@ -1547,7 +1380,9 @@ impl UniversalModel {
                 .as_ref()
                 .map(|m| Ok(m.predict_proba_multiclass_raw(features)))
                 .unwrap_or_else(|| {
-                    Err(crate::TreeBoostError::Config("No model trained".to_string()))
+                    Err(crate::TreeBoostError::Config(
+                        "No model trained".to_string(),
+                    ))
                 }),
             _ => Err(crate::TreeBoostError::Config(
                 "Raw prediction only supported in PureTree mode".to_string(),
@@ -1563,7 +1398,9 @@ impl UniversalModel {
                 .as_ref()
                 .map(|m| Ok(m.predict_class_multiclass_raw(features)))
                 .unwrap_or_else(|| {
-                    Err(crate::TreeBoostError::Config("No model trained".to_string()))
+                    Err(crate::TreeBoostError::Config(
+                        "No model trained".to_string(),
+                    ))
                 }),
             _ => Err(crate::TreeBoostError::Config(
                 "Raw prediction only supported in PureTree mode".to_string(),
@@ -1579,7 +1416,9 @@ impl UniversalModel {
                 .as_ref()
                 .map(|m| Ok(m.predict_raw_multiclass_raw(features)))
                 .unwrap_or_else(|| {
-                    Err(crate::TreeBoostError::Config("No model trained".to_string()))
+                    Err(crate::TreeBoostError::Config(
+                        "No model trained".to_string(),
+                    ))
                 }),
             _ => Err(crate::TreeBoostError::Config(
                 "Raw prediction only supported in PureTree mode".to_string(),
@@ -1601,7 +1440,7 @@ impl TunableModel for UniversalModel {
     fn train(dataset: &BinnedDataset, config: &Self::Config) -> crate::Result<Self> {
         // Create a default MSE loss for tuning (loss type could be parameterized later)
         let loss_fn = crate::loss::MseLoss::new();
-        Self::train(dataset, config.clone(), &loss_fn)
+        Self::train(dataset, config.clone(), &loss_fn, None)
     }
 
     fn predict(&self, dataset: &BinnedDataset) -> Vec<f32> {
@@ -1786,7 +1625,7 @@ mod tests {
             .with_num_rounds(num_rounds)
             .with_linear_rounds(1);
 
-        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
+        let model = UniversalModel::train(&dataset, config, &loss, None).unwrap();
         (model, dataset)
     }
 
@@ -1821,7 +1660,7 @@ mod tests {
             .with_mode(BoostingMode::PureTree)
             .with_num_rounds(5);
 
-        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
+        let model = UniversalModel::train(&dataset, config, &loss, None).unwrap();
 
         assert_eq!(model.mode(), BoostingMode::PureTree);
         assert_eq!(model.num_trees(), 5);
@@ -1837,7 +1676,7 @@ mod tests {
             .with_mode(BoostingMode::PureTree)
             .with_num_rounds(5);
 
-        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
+        let model = UniversalModel::train(&dataset, config, &loss, None).unwrap();
         let predictions = model.predict(&dataset);
 
         assert_eq!(predictions.len(), 100);
@@ -1854,7 +1693,7 @@ mod tests {
             .with_num_rounds(5)
             .with_linear_rounds(3);
 
-        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
+        let model = UniversalModel::train(&dataset, config, &loss, None).unwrap();
 
         assert_eq!(model.mode(), BoostingMode::LinearThenTree);
         assert_eq!(model.num_trees(), 5);
@@ -1871,7 +1710,7 @@ mod tests {
             .with_num_rounds(5)
             .with_linear_rounds(3);
 
-        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
+        let model = UniversalModel::train(&dataset, config, &loss, None).unwrap();
         let predictions = model.predict(&dataset);
 
         assert_eq!(predictions.len(), 100);
@@ -1887,7 +1726,7 @@ mod tests {
             .with_mode(BoostingMode::RandomForest)
             .with_num_rounds(10);
 
-        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
+        let model = UniversalModel::train(&dataset, config, &loss, None).unwrap();
 
         assert_eq!(model.mode(), BoostingMode::RandomForest);
         assert!(model.num_trees() <= 10); // Some trees might fail to grow
@@ -1903,7 +1742,7 @@ mod tests {
             .with_mode(BoostingMode::RandomForest)
             .with_num_rounds(10);
 
-        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
+        let model = UniversalModel::train(&dataset, config, &loss, None).unwrap();
         let predictions = model.predict(&dataset);
 
         assert_eq!(predictions.len(), 100);
@@ -1919,7 +1758,7 @@ mod tests {
             .with_mode(BoostingMode::PureTree)
             .with_num_rounds(5);
 
-        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
+        let model = UniversalModel::train(&dataset, config, &loss, None).unwrap();
 
         let batch_preds = model.predict(&dataset);
         for i in 0..50 {
@@ -2036,13 +1875,9 @@ mod tests {
 
         let config = UniversalConfig::new().with_num_rounds(10);
 
-        let model = UniversalModel::train_with_selection(
-            &dataset,
-            config,
-            ModeSelection::Auto,
-            &loss,
-        )
-        .unwrap();
+        let model =
+            UniversalModel::train_with_selection(&dataset, config, ModeSelection::Auto, &loss)
+                .unwrap();
 
         // Auto selection should have analysis
         assert!(model.was_auto_selected());
@@ -2053,7 +1888,10 @@ mod tests {
     fn test_mode_selection_default() {
         // Default should be Fixed(PureTree) for backwards compatibility
         let selection = ModeSelection::default();
-        assert!(matches!(selection, ModeSelection::Fixed(BoostingMode::PureTree)));
+        assert!(matches!(
+            selection,
+            ModeSelection::Fixed(BoostingMode::PureTree)
+        ));
     }
 
     #[test]

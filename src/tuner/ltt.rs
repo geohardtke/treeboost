@@ -435,12 +435,8 @@ impl LttTuner {
         }
 
         // Compute final RMSE
-        let final_rmse = self.compute_final_rmse(
-            &final_linear,
-            &val_features,
-            &val_targets,
-            num_features,
-        )?;
+        let final_rmse =
+            self.compute_final_rmse(&final_linear, &val_features, &val_targets, num_features)?;
 
         Ok(LttTuningResult {
             linear_params: final_linear,
@@ -496,7 +492,8 @@ impl LttTuner {
                 let mut booster = LinearBooster::new(num_features, config);
 
                 // Use fit_direct for direct regression (not gradient boosting)
-                let train_preds = booster.fit_direct(train_features, num_features, train_targets)?;
+                let train_preds =
+                    booster.fit_direct(train_features, num_features, train_targets)?;
 
                 // Compute validation metrics
                 let val_preds = booster.predict_batch(val_features, num_features);
@@ -547,13 +544,11 @@ impl LttTuner {
                     // Higher residual variance suggests need for more complex trees
                     let complexity_score = if residual_std > 1.0 {
                         // High variance residuals: prefer deeper trees, more rounds
-                        (max_depth as f32 * 0.15)
-                            + (num_rounds as f32 * 0.001)
+                        (max_depth as f32 * 0.15) + (num_rounds as f32 * 0.001)
                             - (learning_rate * 0.5) // Lower LR for stability
                     } else {
                         // Low variance residuals: simpler trees suffice
-                        (max_depth as f32 * 0.1)
-                            + (learning_rate * 1.0)
+                        (max_depth as f32 * 0.1) + (learning_rate * 1.0)
                             - (num_rounds as f32 * 0.0005) // Fewer rounds needed
                     };
 
@@ -678,7 +673,6 @@ impl LttTuner {
 
         (r2, rmse)
     }
-
 }
 
 impl Default for LttTuner {

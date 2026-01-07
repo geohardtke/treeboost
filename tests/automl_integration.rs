@@ -127,8 +127,8 @@ fn test_auto_train_linear_data() {
 
     // Verify summary works
     let summary = model.summary();
-    assert!(summary.contains("AutoModel Training Summary"));
-    assert!(summary.contains("Mode:"));
+    assert!(summary.contains("TreeBoost Pipeline Report"));
+    assert!(summary.contains("MODE SELECTION"));
 }
 
 #[test]
@@ -289,10 +289,10 @@ fn test_summary_contains_key_info() {
     let summary = model.summary();
 
     // Verify summary contains expected sections
-    assert!(summary.contains("AutoModel Training Summary"));
-    assert!(summary.contains("Mode:"));
-    assert!(summary.contains("Total Build Time:"));
-    assert!(summary.contains("Phase Times:"));
+    assert!(summary.contains("TreeBoost Pipeline Report"));
+    assert!(summary.contains("MODE SELECTION"));
+    assert!(summary.contains("Total Time:"));
+    assert!(summary.contains("Phase Breakdown:"));
 
     println!("=== AutoModel Summary ===\n{}", summary);
 }

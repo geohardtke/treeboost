@@ -130,7 +130,10 @@ pub fn series_to_strings(series: &Series) -> Result<Vec<String>, TreeBoostError>
 ///
 /// # Errors
 /// Returns error if columns don't exist or cannot be converted to f32
-pub fn df_to_features(df: &DataFrame, columns: &[&str]) -> Result<(Vec<f32>, usize), TreeBoostError> {
+pub fn df_to_features(
+    df: &DataFrame,
+    columns: &[&str],
+) -> Result<(Vec<f32>, usize), TreeBoostError> {
     if columns.is_empty() {
         return Ok((Vec::new(), 0));
     }
@@ -202,9 +205,7 @@ pub fn features_to_df(
     // Extract each column and convert Series to Column
     let columns: Vec<Column> = (0..num_features)
         .map(|f| {
-            let col_data: Vec<f32> = (0..num_rows)
-                .map(|r| data[r * num_features + f])
-                .collect();
+            let col_data: Vec<f32> = (0..num_rows).map(|r| data[r * num_features + f]).collect();
             let series = Series::new(column_names[f].into(), col_data);
             series.into()
         })
@@ -225,9 +226,9 @@ pub fn features_to_df(
 /// # Returns
 /// Vec<f32> with target values
 pub fn df_to_target(df: &DataFrame, target_col: &str) -> Result<Vec<f32>, TreeBoostError> {
-    let column = df
-        .column(target_col)
-        .map_err(|e| TreeBoostError::Data(format!("Target column '{}' not found: {}", target_col, e)))?;
+    let column = df.column(target_col).map_err(|e| {
+        TreeBoostError::Data(format!("Target column '{}' not found: {}", target_col, e))
+    })?;
     column_to_f32(column)
 }
 

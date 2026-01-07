@@ -9,10 +9,13 @@ use crate::analysis::{DataFrameProfile, TaskType};
 use crate::booster::GBDTModel;
 use crate::dataset::BinnedDataset;
 use crate::learner::TreeConfig;
-use crate::model::{BoostingMode, UniversalConfig};
 use crate::model::config::{AutoConfig, TreeTunerConfig, TreeTuningResult, TuningLevel};
+use crate::model::{BoostingMode, UniversalConfig};
 use crate::tuner::ltt::{LttTuner, LttTunerConfig, LttTuningResult};
-use crate::tuner::{AutoTuner, EvalStrategy, GridStrategy, ParamBounds, ParameterSpace, SearchHistory, TunerConfig, TuningMode};
+use crate::tuner::{
+    AutoTuner, EvalStrategy, GridStrategy, ParamBounds, ParameterSpace, SearchHistory, TunerConfig,
+    TuningMode,
+};
 use crate::{Result, TreeBoostError};
 use polars::prelude::*;
 
@@ -24,12 +27,38 @@ pub(super) fn tune_hyperparameters(
     df: &DataFrame,
     target_col: &str,
     profile: &DataFrameProfile,
-) -> Result<(UniversalConfig, Option<LttTuningResult>, Option<TreeTuningResult>)> {
+) -> Result<(
+    UniversalConfig,
+    Option<LttTuningResult>,
+    Option<TreeTuningResult>,
+)> {
+    // If custom config provided, use it directly (overrides all tuning)
+    if let Some(ref custom) = config.custom_config {
+        return Ok((custom.clone(), None, None));
+    }
+
     match config.tuning_level {
         TuningLevel::None => {
             // No tuning - use defaults
-            let univ_config = UniversalConfig::default().with_mode(mode);
-            Ok((univ_config, None, None))
+            // For LTT mode, still need to configure linear component with good defaults
+            if matches!(mode, BoostingMode::LinearThenTree) {
+                use crate::learner::{LinearConfig, TreeConfig};
+                // Use stronger regularization for stability
+                let linear_config = LinearConfig::ridge(1.0)
+                    .with_learning_rate(0.5)
+                    .with_max_iter(200);
+                let tree_config = TreeConfig::default().with_max_depth(3);
+                let univ_config = UniversalConfig::default()
+                    .with_mode(mode)
+                    .with_linear_config(linear_config)
+                    .with_tree_config(tree_config)
+                    .with_num_rounds(50)
+                    .with_learning_rate(0.3);
+                Ok((univ_config, None, None))
+            } else {
+                let univ_config = UniversalConfig::default().with_mode(mode);
+                Ok((univ_config, None, None))
+            }
         }
         _ => {
             // Tune based on mode
@@ -40,7 +69,8 @@ pub(super) fn tune_hyperparameters(
                 }
                 BoostingMode::PureTree | BoostingMode::RandomForest => {
                     // Run proper AutoTuner for tree-based models
-                    let (univ_config, tree_result) = tune_tree_model(config, dataset, mode, profile)?;
+                    let (univ_config, tree_result) =
+                        tune_tree_model(config, dataset, mode, profile)?;
                     Ok((univ_config, None, tree_result))
                 }
             }
@@ -76,7 +106,10 @@ fn tune_tree_model(
         )
         .with_param(
             "learning_rate",
-            ParamBounds::log_continuous(tuner_cfg.learning_rate_range.0, tuner_cfg.learning_rate_range.1),
+            ParamBounds::log_continuous(
+                tuner_cfg.learning_rate_range.0,
+                tuner_cfg.learning_rate_range.1,
+            ),
             0.1,
         )
         .with_param("subsample", ParamBounds::continuous(0.6, 1.0), 0.8)
@@ -86,24 +119,18 @@ fn tune_tree_model(
     // Base config for tuning - select loss function based on task type
     use crate::booster::GBDTConfig;
     let base_config = match &profile.task_type {
-        TaskType::Regression => {
-            GBDTConfig::new()
-                .with_mse_loss()
-                .with_min_samples_leaf(5)
-                .with_seed(42)
-        }
-        TaskType::BinaryClassification => {
-            GBDTConfig::new()
-                .with_binary_logloss()
-                .with_min_samples_leaf(5)
-                .with_seed(42)
-        }
-        TaskType::MultiClassification { num_classes } => {
-            GBDTConfig::new()
-                .with_multiclass_logloss(*num_classes)
-                .with_min_samples_leaf(5)
-                .with_seed(42)
-        }
+        TaskType::Regression => GBDTConfig::new()
+            .with_mse_loss()
+            .with_min_samples_leaf(5)
+            .with_seed(42),
+        TaskType::BinaryClassification => GBDTConfig::new()
+            .with_binary_logloss()
+            .with_min_samples_leaf(5)
+            .with_seed(42),
+        TaskType::MultiClassification { num_classes } => GBDTConfig::new()
+            .with_multiclass_logloss(*num_classes)
+            .with_min_samples_leaf(5)
+            .with_seed(42),
     };
 
     // Configure tuner using TreeTunerConfig
@@ -150,7 +177,10 @@ fn tune_tree_model(
 
     if config.verbose {
         if let Some(ref result) = tuning_result {
-            println!("  [Tuning] Best validation metric: {:.6}", result.best_metric);
+            println!(
+                "  [Tuning] Best validation metric: {:.6}",
+                result.best_metric
+            );
             println!("  [Tuning] Best params: {:?}", result.best_params);
         }
     }
@@ -180,8 +210,7 @@ fn tune_ltt(
     let result = tuner.tune(&features, num_features, &targets)?;
 
     // Build UniversalConfig from tuning result
-    let tree_config = TreeConfig::default()
-        .with_max_depth(result.tree_params.max_depth as usize);
+    let tree_config = TreeConfig::default().with_max_depth(result.tree_params.max_depth as usize);
 
     let univ_config = UniversalConfig::default()
         .with_mode(BoostingMode::LinearThenTree)
@@ -202,92 +231,37 @@ fn tune_ltt(
 fn extract_raw_features(
     df: &DataFrame,
     target_col: &str,
-    profile: &DataFrameProfile,
+    _profile: &DataFrameProfile,
 ) -> Result<(Vec<f32>, Vec<f32>, usize)> {
     let num_rows = df.height();
 
-    // Build set of columns to drop based on profile
-    let drop_cols: std::collections::HashSet<String> = profile
-        .drop_columns
-        .iter()
-        .map(|d| d.name.clone())
-        .collect();
+    // Use FeatureExtractor to intelligently select numeric features for linear models
+    // This properly handles ID-like columns, categoricals, booleans, etc.
+    use crate::dataset::feature_extractor::FeatureExtractor;
+    let extractor = FeatureExtractor::new();
+    let (features, num_features) = extractor.extract(df, target_col)?;
 
-    // Get numeric columns only, excluding dropped columns
-    let numeric_cols: Vec<String> = df
-        .get_column_names()
-        .iter()
-        .filter(|&name| {
-            let name_str = name.as_str();
-
-            // Skip target column
-            if name_str == target_col {
-                return false;
-            }
-
-            // Skip columns marked for dropping
-            if drop_cols.contains(name_str) {
-                return false;
-            }
-
-            // Keep only numeric types
-            match df.column(name_str) {
-                Ok(col) => matches!(
-                    col.dtype(),
-                    DataType::Float32 | DataType::Float64 | DataType::Int32 | DataType::Int64
-                ),
-                Err(_) => false,
-            }
-        })
-        .map(|s| s.to_string())
-        .collect();
-
-    let num_features = numeric_cols.len();
     if num_features == 0 {
-        return Err(TreeBoostError::Data(
-            format!(
-                "No numeric features found for linear model tuning. \
-                 Dataset has {} columns, {} dropped (constant/ID/text), {} remaining. \
+        return Err(TreeBoostError::Data(format!(
+            "No numeric features found for linear model tuning. \
+                 Dataset has {} columns. \
                  Categorical features need encoding first - consider using DataPipeline.",
-                df.width(),
-                drop_cols.len(),
-                df.width() - drop_cols.len() - 1 // -1 for target
-            )
-        ));
-    }
-
-    // Extract features (row-major)
-    let mut features = Vec::with_capacity(num_rows * num_features);
-    for row_idx in 0..num_rows {
-        for col_name in &numeric_cols {
-            let col = df.column(col_name)?;
-            let val = col.get(row_idx).map_err(|e| TreeBoostError::Data(e.to_string()))?;
-            let f_val = match val {
-                AnyValue::Float32(v) => v,
-                AnyValue::Float64(v) => v as f32,
-                AnyValue::Int32(v) => v as f32,
-                AnyValue::Int64(v) => v as f32,
-                AnyValue::Null => 0.0, // Simple imputation
-                _ => 0.0,
-            };
-            features.push(f_val);
-        }
+            df.width(),
+        )));
     }
 
     // Extract targets
     let target_col_series = df.column(target_col)?;
     let targets: Vec<f32> = (0..num_rows)
-        .map(|i| {
-            match target_col_series.get(i) {
-                Ok(val) => match val {
-                    AnyValue::Float32(v) => v,
-                    AnyValue::Float64(v) => v as f32,
-                    AnyValue::Int32(v) => v as f32,
-                    AnyValue::Int64(v) => v as f32,
-                    _ => 0.0,
-                },
-                Err(_) => 0.0,
-            }
+        .map(|i| match target_col_series.get(i) {
+            Ok(val) => match val {
+                AnyValue::Float32(v) => v,
+                AnyValue::Float64(v) => v as f32,
+                AnyValue::Int32(v) => v as f32,
+                AnyValue::Int64(v) => v as f32,
+                _ => 0.0,
+            },
+            Err(_) => 0.0,
         })
         .collect();
 
@@ -295,7 +269,10 @@ fn extract_raw_features(
 }
 
 /// Create default config for non-LTT modes (fallback when tuning is disabled)
-pub(super) fn create_config_for_mode(mode: BoostingMode, tuning_level: TuningLevel) -> UniversalConfig {
+pub(super) fn create_config_for_mode(
+    mode: BoostingMode,
+    tuning_level: TuningLevel,
+) -> UniversalConfig {
     let (num_rounds, learning_rate, max_depth) = match tuning_level {
         TuningLevel::Quick => (100, 0.1, 4),
         TuningLevel::Standard => (500, 0.1, 6),
@@ -303,8 +280,7 @@ pub(super) fn create_config_for_mode(mode: BoostingMode, tuning_level: TuningLev
         TuningLevel::None => (100, 0.1, 6),
     };
 
-    let tree_config = TreeConfig::default()
-        .with_max_depth(max_depth);
+    let tree_config = TreeConfig::default().with_max_depth(max_depth);
 
     UniversalConfig::default()
         .with_mode(mode)
