@@ -39,7 +39,7 @@
 use crate::{Result, TreeBoostError};
 
 /// Strategy for handling NaN values at series boundaries
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum NaNStrategy {
     /// Keep NaN values (default, trees handle this well)
     #[default]
@@ -81,7 +81,7 @@ impl NaNStrategy {
 /// // Result has original features + lag features
 /// // For 3 features with lags [1, 7]: output has 3 + 3*2 = 9 features
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LagGenerator {
     /// Lag periods to generate (e.g., [1, 2, 7] for t-1, t-2, t-7)
     lags: Vec<usize>,
@@ -246,7 +246,7 @@ impl LagGenerator {
 // ============================================================================
 
 /// Statistics to compute over rolling windows
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RollingStat {
     /// Rolling mean (average)
     Mean,
@@ -293,7 +293,7 @@ impl RollingStat {
 ///     .with_stats(vec![RollingStat::Mean, RollingStat::Std]);
 /// let rolled = gen.transform(&data, num_features)?;
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RollingGenerator {
     /// Window size for rolling calculations
     window: usize,
@@ -533,7 +533,7 @@ impl RollingGenerator {
 /// let ewma = EwmaGenerator::new(0.3); // alpha = 0.3
 /// let smoothed = ewma.transform(&data, num_features)?;
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EwmaGenerator {
     /// Smoothing factor (0 < alpha ≤ 1)
     alpha: f32,
@@ -686,7 +686,7 @@ impl EwmaGenerator {
 // ============================================================================
 
 /// Components to extract from timestamps
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SeasonalComponent {
     /// Hour of day (0-23)
     Hour,
@@ -761,7 +761,7 @@ impl SeasonalComponent {
 ///
 /// let features = gen.transform_timestamps(&timestamps)?;
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SeasonalGenerator {
     /// Components to extract
     components: Vec<SeasonalComponent>,
@@ -1232,5 +1232,62 @@ mod tests {
         assert_eq!(month, 1);
         assert_eq!(day, 1);
         assert_eq!(doy, 1);
+    }
+
+    // ========================================
+    // Serialization Tests
+    // ========================================
+
+    #[test]
+    fn test_lag_generator_serialization() {
+        let gen = LagGenerator::new(vec![1, 7, 14])
+            .with_nan_strategy(NaNStrategy::ForwardFill);
+
+        let json = serde_json::to_string(&gen).unwrap();
+        let loaded: LagGenerator = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.lags, vec![1, 7, 14]);
+        assert_eq!(loaded.nan_strategy, NaNStrategy::ForwardFill);
+    }
+
+    #[test]
+    fn test_rolling_generator_serialization() {
+        let gen = RollingGenerator::new(7)
+            .with_stats(vec![RollingStat::Mean, RollingStat::Std])
+            .with_min_periods(3);
+
+        let json = serde_json::to_string(&gen).unwrap();
+        let loaded: RollingGenerator = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.window, 7);
+        assert_eq!(loaded.stats.len(), 2);
+        assert_eq!(loaded.min_periods, 3);
+    }
+
+    #[test]
+    fn test_ewma_generator_serialization() {
+        let gen = EwmaGenerator::new(0.3).without_adjust();
+
+        let json = serde_json::to_string(&gen).unwrap();
+        let loaded: EwmaGenerator = serde_json::from_str(&json).unwrap();
+
+        assert!((loaded.alpha - 0.3).abs() < 1e-6);
+        assert!(!loaded.adjust);
+    }
+
+    #[test]
+    fn test_seasonal_generator_serialization() {
+        let gen = SeasonalGenerator::new(vec![
+            SeasonalComponent::Hour,
+            SeasonalComponent::DayOfWeek,
+            SeasonalComponent::Month,
+        ])
+        .with_cyclical(true);
+
+        let json = serde_json::to_string(&gen).unwrap();
+        let loaded: SeasonalGenerator = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.components.len(), 3);
+        assert!(loaded.cyclical);
     }
 }

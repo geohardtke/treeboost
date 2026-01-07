@@ -38,7 +38,7 @@
 use crate::{Result, TreeBoostError};
 
 /// Outlier detection method
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum OutlierMethod {
     /// IQR-based detection: outlier if x < Q1 - k×IQR or x > Q3 + k×IQR
     /// Default k = 1.5 (standard Tukey fence)
@@ -83,7 +83,7 @@ impl Default for OutlierMethod {
 }
 
 /// Action to take when outliers are detected
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum OutlierAction {
     /// Cap outliers to the boundary values (winsorization)
     /// Data shape unchanged, extreme values clipped
@@ -98,7 +98,7 @@ pub enum OutlierAction {
 }
 
 /// Per-feature outlier bounds learned during fit
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FeatureBounds {
     /// Lower bound (values below are outliers)
     pub lower: f32,
@@ -131,7 +131,7 @@ pub struct FeatureBounds {
 /// let result = detector.transform(&mut data, 2, &["f0".into(), "f1".into()])?;
 /// # Ok::<(), treeboost::TreeBoostError>(())
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OutlierDetector {
     /// Detection method
     method: OutlierMethod,
@@ -541,7 +541,7 @@ impl Default for OutlierDetector {
 }
 
 /// Result of outlier transformation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TransformResult {
     /// Values were capped to boundaries
     Capped {
@@ -931,5 +931,88 @@ mod tests {
         // Q3 = 75th percentile
         let q3 = percentile(&data, 0.75);
         assert!((q3 - 3.25).abs() < 1e-6);
+    }
+
+    // ========================================
+    // Serialization Tests
+    // ========================================
+
+    #[test]
+    fn test_outlier_detector_serialization() {
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+
+        let mut detector = OutlierDetector::new(OutlierMethod::iqr())
+            .with_action(OutlierAction::Cap);
+        detector.fit(&data, 1).unwrap();
+
+        // Serialize
+        let json = serde_json::to_string(&detector).unwrap();
+        assert!(!json.is_empty());
+
+        // Deserialize
+        let loaded: OutlierDetector = serde_json::from_str(&json).unwrap();
+        assert!(loaded.is_fitted());
+        assert_eq!(loaded.bounds.len(), 1);
+        assert_eq!(loaded.method(), OutlierMethod::iqr());
+        assert_eq!(loaded.action(), OutlierAction::Cap);
+    }
+
+    #[test]
+    fn test_outlier_method_serialization() {
+        let methods = vec![
+            OutlierMethod::iqr(),
+            OutlierMethod::iqr_with_k(2.0),
+            OutlierMethod::zscore(),
+            OutlierMethod::zscore_with_threshold(2.5),
+        ];
+
+        for method in methods {
+            let json = serde_json::to_string(&method).unwrap();
+            let loaded: OutlierMethod = serde_json::from_str(&json).unwrap();
+            assert_eq!(loaded, method);
+        }
+    }
+
+    #[test]
+    fn test_outlier_action_serialization() {
+        let actions = vec![
+            OutlierAction::Cap,
+            OutlierAction::Flag,
+            OutlierAction::Remove,
+        ];
+
+        for action in actions {
+            let json = serde_json::to_string(&action).unwrap();
+            let loaded: OutlierAction = serde_json::from_str(&json).unwrap();
+            assert_eq!(loaded, action);
+        }
+    }
+
+    #[test]
+    fn test_transform_result_serialization() {
+        // Test Capped variant
+        let result1 = TransformResult::Capped { outlier_count: 5 };
+        let json1 = serde_json::to_string(&result1).unwrap();
+        let loaded1: TransformResult = serde_json::from_str(&json1).unwrap();
+        assert_eq!(loaded1.outlier_count(), 5);
+
+        // Test Flagged variant
+        let result2 = TransformResult::Flagged {
+            indicators: vec![0.0, 1.0, 0.0],
+            indicator_names: vec!["f0_outlier".into(), "f1_outlier".into()],
+        };
+        let json2 = serde_json::to_string(&result2).unwrap();
+        let loaded2: TransformResult = serde_json::from_str(&json2).unwrap();
+        assert_eq!(loaded2.outlier_count(), 1);
+
+        // Test Removed variant
+        let result3 = TransformResult::Removed {
+            cleaned_data: vec![1.0, 2.0, 3.0],
+            kept_indices: vec![0, 1, 2],
+            removed_count: 2,
+        };
+        let json3 = serde_json::to_string(&result3).unwrap();
+        let loaded3: TransformResult = serde_json::from_str(&json3).unwrap();
+        assert_eq!(loaded3.outlier_count(), 2);
     }
 }

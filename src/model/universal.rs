@@ -1708,6 +1708,7 @@ mod tests {
     use super::*;
     use crate::dataset::{FeatureInfo, FeatureType};
     use crate::loss::MseLoss;
+    use rkyv::rancor::Error as RkyvError;
 
     fn create_test_dataset(num_rows: usize, num_features: usize) -> BinnedDataset {
         let mut features = Vec::with_capacity(num_rows * num_features);
@@ -1732,6 +1733,61 @@ mod tests {
             .collect();
 
         BinnedDataset::new(num_rows, features, targets, feature_info)
+    }
+
+    // ========================================
+    // Test Helper Functions
+    // ========================================
+
+    /// Test helper: Verify serde serialization roundtrip for BoostingMode
+    fn assert_serde_roundtrip_mode(mode: &BoostingMode) {
+        let json = serde_json::to_string(mode).expect("Failed to serialize");
+        assert!(!json.is_empty(), "Serialized JSON should not be empty");
+
+        let loaded: BoostingMode = serde_json::from_str(&json).expect("Failed to deserialize");
+        assert_eq!(loaded, *mode, "Deserialized value should match original");
+    }
+
+    /// Test helper: Verify model predictions match after serialization
+    fn assert_model_predictions_match(
+        original: &UniversalModel,
+        loaded: &UniversalModel,
+        dataset: &BinnedDataset,
+        tolerance: f32,
+    ) {
+        let original_preds = original.predict(dataset);
+        let loaded_preds = loaded.predict(dataset);
+
+        assert_eq!(
+            original_preds.len(),
+            loaded_preds.len(),
+            "Prediction count mismatch"
+        );
+
+        for (i, (&orig, &load)) in original_preds.iter().zip(loaded_preds.iter()).enumerate() {
+            assert!(
+                (orig - load).abs() < tolerance,
+                "Prediction mismatch at index {}: {} vs {} (diff: {})",
+                i,
+                orig,
+                load,
+                (orig - load).abs()
+            );
+        }
+    }
+
+    /// Test helper: Train a model with specified mode
+    fn train_test_model(mode: BoostingMode, num_rounds: usize) -> (UniversalModel, BinnedDataset) {
+        let dataset = create_test_dataset(100, 3);
+        let loss = MseLoss;
+
+        let config = UniversalConfig::new()
+            .with_mode(mode)
+            .with_num_rounds(num_rounds)
+            .with_linear_rounds(1);
+
+        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
+        (model, dataset)
     }
 
     #[test]
@@ -2015,5 +2071,132 @@ mod tests {
         assert!(analysis.noise_floor >= 0.0 && analysis.noise_floor <= 1.0);
         assert_eq!(analysis.num_rows, 200);
         assert_eq!(analysis.num_features, 5);
+    }
+
+    // ========================================
+    // Serialization Tests (serde)
+    // ========================================
+
+    #[test]
+    fn test_universal_config_serde_serialization() {
+        let config = UniversalConfig::new()
+            .with_mode(BoostingMode::LinearThenTree)
+            .with_num_rounds(150)
+            .with_learning_rate(0.05);
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.is_empty());
+
+        let loaded: UniversalConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.mode, config.mode);
+        assert_eq!(loaded.num_rounds, config.num_rounds);
+        assert!((loaded.learning_rate - config.learning_rate).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_boosting_mode_serde_serialization() {
+        assert_serde_roundtrip_mode(&BoostingMode::PureTree);
+        assert_serde_roundtrip_mode(&BoostingMode::LinearThenTree);
+        assert_serde_roundtrip_mode(&BoostingMode::RandomForest);
+    }
+
+    #[test]
+    fn test_puretree_model_serde_serialization() {
+        let (model, dataset) = train_test_model(BoostingMode::PureTree, 10);
+
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.is_empty());
+
+        let loaded: UniversalModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.mode(), BoostingMode::PureTree);
+        assert_eq!(loaded.num_features(), 3);
+
+        assert_model_predictions_match(&model, &loaded, &dataset, 1e-4);
+    }
+
+    #[test]
+    fn test_linear_then_tree_model_serde_serialization() {
+        let (model, dataset) = train_test_model(BoostingMode::LinearThenTree, 10);
+
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.is_empty());
+
+        let loaded: UniversalModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.mode(), BoostingMode::LinearThenTree);
+
+        assert_model_predictions_match(&model, &loaded, &dataset, 1e-4);
+    }
+
+    #[test]
+    fn test_random_forest_model_serde_serialization() {
+        let (model, dataset) = train_test_model(BoostingMode::RandomForest, 5);
+
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.is_empty());
+
+        let loaded: UniversalModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.mode(), BoostingMode::RandomForest);
+
+        assert_model_predictions_match(&model, &loaded, &dataset, 1e-4);
+    }
+
+    // ========================================
+    // Serialization Tests (rkyv)
+    // ========================================
+
+    #[test]
+    fn test_universal_config_rkyv_serialization() {
+        let config = UniversalConfig::new()
+            .with_mode(BoostingMode::LinearThenTree)
+            .with_num_rounds(150)
+            .with_learning_rate(0.05);
+
+        let bytes = rkyv::to_bytes::<RkyvError>(&config).unwrap();
+        assert!(!bytes.is_empty());
+
+        let loaded: UniversalConfig = rkyv::from_bytes::<_, RkyvError>(&bytes).unwrap();
+        assert_eq!(loaded.mode, config.mode);
+        assert_eq!(loaded.num_rounds, config.num_rounds);
+        assert!((loaded.learning_rate - config.learning_rate).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_puretree_model_rkyv_serialization() {
+        let (model, dataset) = train_test_model(BoostingMode::PureTree, 10);
+
+        let bytes = rkyv::to_bytes::<RkyvError>(&model).unwrap();
+        assert!(!bytes.is_empty());
+
+        let loaded: UniversalModel = rkyv::from_bytes::<_, RkyvError>(&bytes).unwrap();
+        assert_eq!(loaded.mode(), BoostingMode::PureTree);
+        assert_eq!(loaded.num_features(), 3);
+
+        assert_model_predictions_match(&model, &loaded, &dataset, 1e-4);
+    }
+
+    #[test]
+    fn test_linear_then_tree_model_rkyv_serialization() {
+        let (model, dataset) = train_test_model(BoostingMode::LinearThenTree, 10);
+
+        let bytes = rkyv::to_bytes::<RkyvError>(&model).unwrap();
+        assert!(!bytes.is_empty());
+
+        let loaded: UniversalModel = rkyv::from_bytes::<_, RkyvError>(&bytes).unwrap();
+        assert_eq!(loaded.mode(), BoostingMode::LinearThenTree);
+
+        assert_model_predictions_match(&model, &loaded, &dataset, 1e-4);
+    }
+
+    #[test]
+    fn test_random_forest_model_rkyv_serialization() {
+        let (model, dataset) = train_test_model(BoostingMode::RandomForest, 5);
+
+        let bytes = rkyv::to_bytes::<RkyvError>(&model).unwrap();
+        assert!(!bytes.is_empty());
+
+        let loaded: UniversalModel = rkyv::from_bytes::<_, RkyvError>(&bytes).unwrap();
+        assert_eq!(loaded.mode(), BoostingMode::RandomForest);
+
+        assert_model_predictions_match(&model, &loaded, &dataset, 1e-4);
     }
 }
