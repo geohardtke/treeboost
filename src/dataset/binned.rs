@@ -524,6 +524,47 @@ impl BinnedDataset {
         }
     }
 
+    /// Extract raw feature values from bins (lossy approximation)
+    ///
+    /// Reconstructs continuous feature values from quantized bins using bin-center
+    /// approximation. This is a LOSSY operation that should only be used when:
+    /// 1. Raw features are unavailable (e.g., model loaded from disk)
+    /// 2. The downstream algorithm can tolerate approximate values
+    ///
+    /// # Accuracy Trade-offs
+    ///
+    /// - **Numeric features**: Uses bin split values as approximations. Precision
+    ///   loss depends on binning resolution (typically 256 bins).
+    /// - **Categorical features**: Returns bin indices cast to f32 (not actual categories).
+    ///
+    /// For LinearThenTree mode, passing actual raw features to training is **strongly
+    /// recommended** for optimal linear model accuracy.
+    ///
+    /// # Layout
+    ///
+    /// Returns row-major layout: `features[row * num_features + feature]`
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let raw = dataset.extract_raw_features_from_bins();
+    /// // raw[row * num_features + feature] is the approximate value
+    /// ```
+    pub fn extract_raw_features_from_bins(&self) -> Vec<f32> {
+        let num_rows = self.num_rows();
+        let num_features = self.num_features();
+        let mut raw = vec![0.0f32; num_rows * num_features];
+
+        for row in 0..num_rows {
+            for feat in 0..num_features {
+                let bin = self.get_bin(row, feat);
+                raw[row * num_features + feat] = self.get_split_value(feat, bin) as f32;
+            }
+        }
+
+        raw
+    }
+
     /// Get row-major layout for GPU backends (lazy conversion).
     ///
     /// Converts column-major `bins[feature][row]` to row-major `bins[row][feature]`.
