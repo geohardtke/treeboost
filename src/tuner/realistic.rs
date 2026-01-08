@@ -108,7 +108,8 @@ pub(crate) fn encode_train_val_split(
 
     // Apply encoder to validation data (using train's encoding)
     // No clone needed since we extracted targets first
-    let (_val_preprocessed_df, val_dataset) = pipeline.process_for_inference(val_df, &pipeline_state)?;
+    let (_val_preprocessed_df, val_dataset) =
+        pipeline.process_for_inference(val_df, &pipeline_state)?;
 
     Ok((train_dataset, val_dataset, val_targets))
 }

@@ -118,8 +118,7 @@ fn main() {
         .with_seed(42);
 
     let start = std::time::Instant::now();
-    let model =
-        UniversalModel::train(&train_data, config, &loss_fn).expect("Training failed");
+    let model = UniversalModel::train(&train_data, config, &loss_fn).expect("Training failed");
     let elapsed = start.elapsed();
 
     let test_preds = model.predict(&test_data);
@@ -152,8 +151,7 @@ fn main() {
         .with_seed(42);
 
     let start = std::time::Instant::now();
-    let model =
-        UniversalModel::train(&train_data, config, &loss_fn).expect("Training failed");
+    let model = UniversalModel::train(&train_data, config, &loss_fn).expect("Training failed");
     let elapsed = start.elapsed();
 
     let test_preds = model.predict(&test_data);
@@ -187,8 +185,7 @@ fn main() {
         .with_seed(42);
 
     let start = std::time::Instant::now();
-    let model =
-        UniversalModel::train(&train_data, config, &loss_fn).expect("Training failed");
+    let model = UniversalModel::train(&train_data, config, &loss_fn).expect("Training failed");
     let elapsed = start.elapsed();
 
     let test_preds = model.predict(&test_data);

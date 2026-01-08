@@ -169,7 +169,8 @@ impl AutoModel {
             if let Some(ref extractor) = self.model.feature_extractor() {
                 // CRITICAL: Extract from preprocessed_df (with encoded categoricals),
                 // NOT from original df (with String categoricals)
-                let (raw_features, _num_features) = extractor.extract(&preprocessed_df, &self.target_column)?;
+                let (raw_features, _num_features) =
+                    extractor.extract(&preprocessed_df, &self.target_column)?;
 
                 return Ok(self
                     .model
@@ -200,7 +201,8 @@ impl AutoModel {
 
         // Extract features using FeatureExtractor
         if let Some(ref extractor) = self.model.feature_extractor() {
-            let (raw_features, _num_features) = extractor.extract(&preprocessed_df, &self.target_column)?;
+            let (raw_features, _num_features) =
+                extractor.extract(&preprocessed_df, &self.target_column)?;
 
             // Get linear-only predictions from the model
             return Ok(self.model.predict_linear_only(&dataset, &raw_features)?);
@@ -503,7 +505,8 @@ impl AutoModel {
 
         // process_for_inference() applies the learned encodings/scalers/binners
         // Returns (preprocessed_df, dataset) where preprocessed_df has encoded categoricals
-        let (preprocessed_df, dataset) = pipeline.process_for_inference(df.clone(), pipeline_state)?;
+        let (preprocessed_df, dataset) =
+            pipeline.process_for_inference(df.clone(), pipeline_state)?;
 
         Ok((preprocessed_df, dataset))
     }

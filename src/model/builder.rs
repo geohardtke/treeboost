@@ -346,16 +346,22 @@ impl AutoBuilder {
         });
 
         let phase_start = Instant::now();
-        let (universal_config, ltt_tuning, tree_tuning) = if adapted_config.tuning_level
-            == TuningLevel::None
-        {
-            // Skip tuning, use defaults
-            let config = tuning::create_config_for_mode(mode, self.config.tuning_level);
-            (config, None, None)
-        } else {
-            // CRITICAL: Pass filtered_df (preprocessed) to tuning for LTT raw feature extraction
-            tuning::tune_hyperparameters(&self.config, &dataset, mode, &filtered_df, target_col, &profile)?
-        };
+        let (universal_config, ltt_tuning, tree_tuning) =
+            if adapted_config.tuning_level == TuningLevel::None {
+                // Skip tuning, use defaults
+                let config = tuning::create_config_for_mode(mode, self.config.tuning_level);
+                (config, None, None)
+            } else {
+                // CRITICAL: Pass filtered_df (preprocessed) to tuning for LTT raw feature extraction
+                tuning::tune_hyperparameters(
+                    &self.config,
+                    &dataset,
+                    mode,
+                    &filtered_df,
+                    target_col,
+                    &profile,
+                )?
+            };
         phase_times.tuning = phase_start.elapsed();
 
         if self.config.verbose {
@@ -400,50 +406,65 @@ impl AutoBuilder {
         // - Trees use full feature space (no information loss)
         // - Linear model uses only appropriate features (better generalization)
         //
-        let (feature_extractor, raw_features, linear_indices) = if matches!(mode, BoostingMode::LinearThenTree) {
-            // Step 1: Extract ALL features (no filtering) to match BinnedDataset
-            let all_config = LinearFeatureConfig {
-                exclude_columns: std::collections::HashSet::new(),
-                exclude_categorical: false,
-                exclude_id: false,
-                exclude_constant: false,
-                exclude_boolean: false,
-                exclude_datetime: false,
-                exclude_text: false,
+        let (feature_extractor, raw_features, linear_indices) =
+            if matches!(mode, BoostingMode::LinearThenTree) {
+                // Step 1: Extract ALL features (no filtering) to match BinnedDataset
+                let all_config = LinearFeatureConfig {
+                    exclude_columns: std::collections::HashSet::new(),
+                    exclude_categorical: false,
+                    exclude_id: false,
+                    exclude_constant: false,
+                    exclude_boolean: false,
+                    exclude_datetime: false,
+                    exclude_text: false,
+                };
+                let all_extractor =
+                    crate::dataset::feature_extractor::FeatureExtractor::with_config(all_config);
+                let (all_features, _num_all_features) =
+                    all_extractor.extract(&filtered_df, target_col)?;
+
+                // Step 2: Build linear_feature_indices based on filter config
+                let filter_config = &self.config.linear_feature_config;
+                let filter_extractor =
+                    crate::dataset::feature_extractor::FeatureExtractor::with_config(
+                        filter_config.clone(),
+                    );
+                let mut linear_feature_indices = Vec::new();
+
+                let col_names: Vec<String> = filtered_df
+                    .get_column_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+
+                // Build indices relative to EXTRACTED features (target excluded)
+                let mut feature_idx = 0;
+                for col_name in &col_names {
+                    if col_name == target_col {
+                        continue; // Skip target
+                    }
+                    // Check if this column should be used by linear (based on filter config)
+                    if !filter_extractor.should_exclude_column(&filtered_df, col_name, target_col) {
+                        linear_feature_indices.push(feature_idx);
+                    }
+                    feature_idx += 1; // Increment for each non-target feature
+                }
+
+                (
+                    Some(all_extractor),
+                    Some(all_features),
+                    Some(linear_feature_indices),
+                )
+            } else {
+                (None, None, None)
             };
-            let all_extractor = crate::dataset::feature_extractor::FeatureExtractor::with_config(all_config);
-            let (all_features, _num_all_features) = all_extractor.extract(&filtered_df, target_col)?;
-
-            // Step 2: Build linear_feature_indices based on filter config
-            let filter_config = &self.config.linear_feature_config;
-            let filter_extractor = crate::dataset::feature_extractor::FeatureExtractor::with_config(
-                filter_config.clone()
-            );
-            let mut linear_feature_indices = Vec::new();
-
-            let col_names: Vec<String> = filtered_df.get_column_names().iter()
-                .map(|s| s.to_string())
-                .collect();
-
-            // Build indices relative to EXTRACTED features (target excluded)
-            let mut feature_idx = 0;
-            for col_name in &col_names {
-                if col_name == target_col {
-                    continue; // Skip target
-                }
-                // Check if this column should be used by linear (based on filter config)
-                if !filter_extractor.should_exclude_column(&filtered_df, col_name, target_col) {
-                    linear_feature_indices.push(feature_idx);
-                }
-                feature_idx += 1;  // Increment for each non-target feature
-            }
-
-            (Some(all_extractor), Some(all_features), Some(linear_feature_indices))
-        } else {
-            (None, None, None)
-        };
-        let model =
-            self.train_model(&dataset, universal_config, feature_extractor, raw_features, linear_indices)?;
+        let model = self.train_model(
+            &dataset,
+            universal_config,
+            feature_extractor,
+            raw_features,
+            linear_indices,
+        )?;
         phase_times.training = phase_start.elapsed();
 
         if self.config.verbose {

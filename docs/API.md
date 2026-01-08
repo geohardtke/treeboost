@@ -34,11 +34,11 @@ BoostingMode::LinearThenTree  // Linear model + GBDTModel on residuals
 BoostingMode::RandomForest    // Parallel independent trees with averaging
 ```
 
-| Mode | Best For | How It Works |
-|------|----------|--------------|
-| `PureTree` | General tabular, categoricals | Delegates to `GBDTModel` (full GPU/conformal support) |
-| `LinearThenTree` | Time-series, trending data, extrapolation | Linear phase → `GBDTModel` on residuals |
-| `RandomForest` | Noisy data, variance reduction | Bootstrap sampling, parallel trees, averaging |
+| Mode             | Best For                                  | How It Works                                          |
+| ---------------- | ----------------------------------------- | ----------------------------------------------------- |
+| `PureTree`       | General tabular, categoricals             | Delegates to `GBDTModel` (full GPU/conformal support) |
+| `LinearThenTree` | Time-series, trending data, extrapolation | Linear phase → `GBDTModel` on residuals               |
+| `RandomForest`   | Noisy data, variance reduction            | Bootstrap sampling, parallel trees, averaging         |
 
 ### UniversalConfig
 
@@ -73,6 +73,7 @@ let config = config.with_linear_config(
 ```
 
 **Python:**
+
 ```python
 from treeboost import UniversalConfig, BoostingMode
 
@@ -187,11 +188,11 @@ println!("{}", model.analysis_summary().unwrap());
 
 **Decision Logic:**
 
-| Data Pattern | Recommended Mode | Why |
-|--------------|-----------------|-----|
-| High linear R² (>0.3) + tree gain (>0.1) | LinearThenTree | Linear captures trend, trees capture residuals |
-| Weak linear signal + categorical-heavy | PureTree | Trees handle categoricals natively |
-| High noise floor (>0.4) | RandomForest | Bagging reduces variance |
+| Data Pattern                             | Recommended Mode | Why                                            |
+| ---------------------------------------- | ---------------- | ---------------------------------------------- |
+| High linear R² (>0.3) + tree gain (>0.1) | LinearThenTree   | Linear captures trend, trees capture residuals |
+| Weak linear signal + categorical-heavy   | PureTree         | Trees handle categoricals natively             |
+| High noise floor (>0.4)                  | RandomForest     | Bagging reduces variance                       |
 
 **When to Use:**
 
@@ -269,39 +270,39 @@ let classes = model.predict_class_raw(features, 0.5)?;
 
 **Training Methods:**
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `train(&dataset, config, &loss)` | Result<Self> | Train with explicit config |
-| `auto(&dataset, &loss)` | Result<Self> | Auto-select mode (NEW) |
-| `auto_with_config(&dataset, config, &loss)` | Result<Self> | Auto-select with custom config |
+| Method                                                     | Returns      | Description                    |
+| ---------------------------------------------------------- | ------------ | ------------------------------ |
+| `train(&dataset, config, &loss)`                           | Result<Self> | Train with explicit config     |
+| `auto(&dataset, &loss)`                                    | Result<Self> | Auto-select mode (NEW)         |
+| `auto_with_config(&dataset, config, &loss)`                | Result<Self> | Auto-select with custom config |
 | `train_with_selection(&dataset, config, selection, &loss)` | Result<Self> | Full control via ModeSelection |
 
 **Prediction Methods:**
 
-| Method | Returns | Modes | Description |
-|--------|---------|-------|-------------|
-| `predict(&dataset)` | Vec<f32> | All | Point predictions |
-| `predict_row(&dataset, idx)` | f32 | All | Single row prediction |
-| `predict_with_intervals(&dataset)` | Result<(Vec, Vec, Vec)> | PureTree | Conformal intervals |
-| `predict_proba(&dataset)` | Result<Vec<f32>> | PureTree | Binary probabilities |
-| `predict_class(&dataset, threshold)` | Result<Vec<u32>> | PureTree | Binary classes |
-| `predict_proba_multiclass(&dataset)` | Result<Vec<Vec<f32>>> | PureTree | Multi-class probabilities |
-| `predict_class_multiclass(&dataset)` | Result<Vec<u32>> | PureTree | Multi-class predictions |
-| `feature_importance()` | Vec<f32> | All | Normalized importance scores |
-| `predict_raw(features)` | Result<Vec<f32>> | PureTree | From unbinned features |
-| `conformal_quantile()` | Option<f32> | PureTree | Calibrated quantile |
-| `is_multiclass()` | bool | All | Check if multi-class model |
-| `get_num_classes()` | usize | All | Number of classes |
+| Method                               | Returns                 | Modes    | Description                  |
+| ------------------------------------ | ----------------------- | -------- | ---------------------------- |
+| `predict(&dataset)`                  | Vec<f32>                | All      | Point predictions            |
+| `predict_row(&dataset, idx)`         | f32                     | All      | Single row prediction        |
+| `predict_with_intervals(&dataset)`   | Result<(Vec, Vec, Vec)> | PureTree | Conformal intervals          |
+| `predict_proba(&dataset)`            | Result<Vec<f32>>        | PureTree | Binary probabilities         |
+| `predict_class(&dataset, threshold)` | Result<Vec<u32>>        | PureTree | Binary classes               |
+| `predict_proba_multiclass(&dataset)` | Result<Vec<Vec<f32>>>   | PureTree | Multi-class probabilities    |
+| `predict_class_multiclass(&dataset)` | Result<Vec<u32>>        | PureTree | Multi-class predictions      |
+| `feature_importance()`               | Vec<f32>                | All      | Normalized importance scores |
+| `predict_raw(features)`              | Result<Vec<f32>>        | PureTree | From unbinned features       |
+| `conformal_quantile()`               | Option<f32>             | PureTree | Calibrated quantile          |
+| `is_multiclass()`                    | bool                    | All      | Check if multi-class model   |
+| `get_num_classes()`                  | usize                   | All      | Number of classes            |
 
 **Analysis Methods (for auto-selected models):**
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `was_auto_selected()` | bool | True if auto mode was used |
-| `analysis()` | Option<&DatasetAnalysis> | Full analysis results |
-| `selection_confidence()` | Option<Confidence> | High/Medium/Low confidence |
-| `analysis_report()` | Option<AnalysisReport> | Formatted diagnostic report |
-| `analysis_summary()` | Option<String> | One-line summary for logging |
+| Method                   | Returns                  | Description                  |
+| ------------------------ | ------------------------ | ---------------------------- |
+| `was_auto_selected()`    | bool                     | True if auto mode was used   |
+| `analysis()`             | Option<&DatasetAnalysis> | Full analysis results        |
+| `selection_confidence()` | Option<Confidence>       | High/Medium/Low confidence   |
+| `analysis_report()`      | Option<AnalysisReport>   | Formatted diagnostic report  |
+| `analysis_summary()`     | Option<String>           | One-line summary for logging |
 
 ---
 
@@ -369,6 +370,7 @@ let predictions = booster.predict_batch(&dataset, &raw_features, num_features);
 ```
 
 **When to use:**
+
 - Data has piecewise linear structure (tax brackets, physical systems)
 - Want smoother predictions than standard trees
 - Need 10-100x fewer trees for same accuracy
@@ -442,12 +444,12 @@ encoder.fit(&categories)?;
 let (encoded, num_new_cols) = encoder.transform(&data, num_features, cat_col_idx)?;
 ```
 
-| Encoder | Best For | Cardinality |
-|---------|----------|-------------|
-| `FrequencyEncoder` | Trees (GBDT) | Any |
-| `LabelEncoder` | Trees (GBDT) | Any |
-| `OneHotEncoder` | Linear models only | Low (<100 categories) |
-| `OrderedTargetEncoder` | High-cardinality + leakage prevention | Any |
+| Encoder                | Best For                              | Cardinality           |
+| ---------------------- | ------------------------------------- | --------------------- |
+| `FrequencyEncoder`     | Trees (GBDT)                          | Any                   |
+| `LabelEncoder`         | Trees (GBDT)                          | Any                   |
+| `OneHotEncoder`        | Linear models only                    | Low (<100 categories) |
+| `OrderedTargetEncoder` | High-cardinality + leakage prevention | Any                   |
 
 ### Imputers
 
@@ -512,6 +514,7 @@ The original GBDT-only API. Still fully supported—use it if you don't need hyb
 Configuration object for gradient boosted decision tree training. Uses a builder pattern for chaining configurations.
 
 **Rust Creation:**
+
 ```rust
 use treeboost::GBDTConfig;
 
@@ -527,6 +530,7 @@ let config = GBDTConfig::new()
 ```
 
 **Python Creation:**
+
 ```python
 from treeboost import GBDTConfig
 
@@ -543,25 +547,25 @@ config.seed = 42
 
 **Core Hyperparameters:**
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `num_rounds` | int | 100 | Number of boosting iterations (trees) |
-| `max_depth` | int | 6 | Maximum tree depth |
-| `learning_rate` | float | 0.1 | Shrinkage per boosting round (0.0-1.0) |
-| `max_leaves` | int | 31 | Maximum leaves per tree |
-| `lambda` | float | 1.0 | L2 leaf regularization |
-| `min_split_gain` | float | 0.0 | Minimum gain to split a node |
-| `min_leaf_weight` | float | 0.0 | Minimum sum of weights in leaf |
+| Parameter         | Type  | Default | Description                            |
+| ----------------- | ----- | ------- | -------------------------------------- |
+| `num_rounds`      | int   | 100     | Number of boosting iterations (trees)  |
+| `max_depth`       | int   | 6       | Maximum tree depth                     |
+| `learning_rate`   | float | 0.1     | Shrinkage per boosting round (0.0-1.0) |
+| `max_leaves`      | int   | 31      | Maximum leaves per tree                |
+| `lambda`          | float | 1.0     | L2 leaf regularization                 |
+| `min_split_gain`  | float | 0.0     | Minimum gain to split a node           |
+| `min_leaf_weight` | float | 0.0     | Minimum sum of weights in leaf         |
 
 **Advanced Hyperparameters:**
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `entropy_weight` | float | 0.0 | Shannon entropy penalty (0.0-1.0) for drift prevention |
-| `subsample` | float | 1.0 | Row sampling ratio per round (0.0-1.0) |
-| `colsample` | float | 1.0 | Feature sampling ratio per tree (0.0-1.0) |
-| `colsample_bylevel` | float | 1.0 | Feature sampling ratio per level (0.0-1.0) |
-| `seed` | Option<u64> | None | Random seed for reproducibility |
+| Parameter           | Type        | Default | Description                                            |
+| ------------------- | ----------- | ------- | ------------------------------------------------------ |
+| `entropy_weight`    | float       | 0.0     | Shannon entropy penalty (0.0-1.0) for drift prevention |
+| `subsample`         | float       | 1.0     | Row sampling ratio per round (0.0-1.0)                 |
+| `colsample`         | float       | 1.0     | Feature sampling ratio per tree (0.0-1.0)              |
+| `colsample_bylevel` | float       | 1.0     | Feature sampling ratio per level (0.0-1.0)             |
+| `seed`              | Option<u64> | None    | Random seed for reproducibility                        |
 
 **Loss Function Selection:**
 
@@ -633,6 +637,7 @@ Trained gradient boosted decision tree model. All predictions use the CPU (no GP
 **Training from BinnedDataset (Recommended):**
 
 **Rust:**
+
 ```rust
 use treeboost::{GBDTModel, GBDTConfig};
 use treeboost::dataset::DatasetLoader;
@@ -643,6 +648,7 @@ let model = GBDTModel::train_binned(&dataset, config)?;
 ```
 
 **Python:**
+
 ```python
 from treeboost import GBDTModel, DatasetLoader
 
@@ -654,6 +660,7 @@ model = GBDTModel.train_binned(dataset, config)
 **Training from Raw Arrays:**
 
 **Rust:**
+
 ```rust
 let model = GBDTModel::train(
     &features,     // &[f32] in column-major layout
@@ -665,6 +672,7 @@ let model = GBDTModel::train(
 ```
 
 **Python:**
+
 ```python
 import numpy as np
 
@@ -677,6 +685,7 @@ model = GBDTModel.train(X, y, config)
 **Train and Save in One Step:**
 
 **Rust:**
+
 ```rust
 use treeboost::ModelFormat;
 
@@ -690,6 +699,7 @@ let model = GBDTModel::train_with_output(
 ```
 
 **Python:**
+
 ```python
 model = GBDTModel.train(X, y, config, output_dir="models/my_model")
 # Saves to: models/my_model/model.rkyv and models/my_model/config.json
@@ -698,6 +708,7 @@ model = GBDTModel.train(X, y, config, output_dir="models/my_model")
 **Making Predictions:**
 
 **Rust:**
+
 ```rust
 // Point predictions only
 let predictions: Vec<f32> = model.predict(&dataset);
@@ -713,6 +724,7 @@ let num_trees = model.num_trees();
 ```
 
 **Python:**
+
 ```python
 # Point predictions
 predictions = model.predict(X)
@@ -730,6 +742,7 @@ num_trees = model.num_trees()
 **Serialization:**
 
 **Rust:**
+
 ```rust
 use treeboost::serialize::{save_model, load_model, save_model_bincode, load_model_bincode};
 use treeboost::ModelFormat;
@@ -752,6 +765,7 @@ model.save_to_directory(
 ```
 
 **Python:**
+
 ```python
 # Save single format
 model.save("model.rkyv", format="rkyv")
@@ -766,13 +780,13 @@ model.save_to_directory("output_dir", config, formats=["rkyv", "bincode"])
 
 **Methods:**
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `num_trees()` | usize | Number of trees in ensemble |
-| `predict(dataset)` | Vec<f32> | Point predictions |
-| `predict_with_intervals(dataset)` | (Vec<f32>, Vec<f32>, Vec<f32>) | Predictions with lower/upper bounds |
-| `feature_importance()` | Vec<f32> | Feature importance scores (gain-based) |
-| `save_to_directory(dir, config, formats)` | Result<()> | Save model + config.json |
+| Method                                    | Returns                        | Description                            |
+| ----------------------------------------- | ------------------------------ | -------------------------------------- |
+| `num_trees()`                             | usize                          | Number of trees in ensemble            |
+| `predict(dataset)`                        | Vec<f32>                       | Point predictions                      |
+| `predict_with_intervals(dataset)`         | (Vec<f32>, Vec<f32>, Vec<f32>) | Predictions with lower/upper bounds    |
+| `feature_importance()`                    | Vec<f32>                       | Feature importance scores (gain-based) |
+| `save_to_directory(dir, config, formats)` | Result<()>                     | Save model + config.json               |
 
 ---
 
@@ -785,6 +799,7 @@ Automatic hyperparameter optimization using efficient search strategies.
 Configuration for the AutoTuner.
 
 **Rust:**
+
 ```rust
 use treeboost::tuner::{TunerConfig, GridStrategy, EvalStrategy};
 
@@ -798,6 +813,7 @@ let config = TunerConfig::new()
 ```
 
 **Python:**
+
 ```python
 from treeboost import TunerConfig, GridStrategy, EvalStrategy
 
@@ -831,6 +847,7 @@ GridStrategy::Random { n_samples: 50 }
 ```
 
 **Python:**
+
 ```python
 from treeboost import GridStrategy
 
@@ -855,6 +872,7 @@ EvalStrategy::conformal(0.1, 0.9)         // 10% calibration, 90% coverage
 ```
 
 **Python:**
+
 ```python
 from treeboost import EvalStrategy
 
@@ -868,6 +886,7 @@ EvalStrategy.conformal(0.1, 0.9)          # Conformal intervals
 Defines the hyperparameter search space.
 
 **Rust:**
+
 ```rust
 use treeboost::tuner::{ParameterSpace, ParamBounds};
 
@@ -883,6 +902,7 @@ let space = ParameterSpace::minimal();               // Quick tuning: depth + LR
 ```
 
 **Python:**
+
 ```python
 from treeboost import ParameterSpace, ParamBounds
 
@@ -899,6 +919,7 @@ space = ParameterSpace.default_classification()
 ### AutoTuner Usage
 
 **Rust:**
+
 ```rust
 use treeboost::{AutoTuner, GBDTConfig};
 
@@ -924,6 +945,7 @@ let final_model = GBDTModel::train_binned(&dataset, best_config)?;
 ```
 
 **Python:**
+
 ```python
 from treeboost import AutoTuner
 
@@ -949,12 +971,12 @@ Results from hyperparameter search.
 
 **Methods:**
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `len()` | int | Total number of trials |
-| `best()` | TrialResult | Best trial by validation metric |
-| `top_n(n)` | Vec<TrialResult> | Top n trials |
-| `trials()` | Vec<TrialResult> | All trials |
+| Method     | Returns          | Description                     |
+| ---------- | ---------------- | ------------------------------- |
+| `len()`    | int              | Total number of trials          |
+| `best()`   | TrialResult      | Best trial by validation metric |
+| `top_n(n)` | Vec<TrialResult> | Top n trials                    |
+| `trials()` | Vec<TrialResult> | All trials                      |
 
 ### TrialResult
 
@@ -962,16 +984,16 @@ Result of a single hyperparameter trial.
 
 **Fields:**
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `trial_id` | int | Unique trial identifier |
-| `iteration` | int | Which iteration (1-3 typically) |
-| `val_metric` | float | Validation loss/metric |
-| `train_metric` | float | Training loss |
-| `f1_score` | Option<float> | F1 score (if classification) |
-| `roc_auc` | Option<float> | ROC-AUC score (if classification) |
-| `num_trees` | int | Number of trees in this trial |
-| `params` | Dict[str, float] | Hyperparameters used |
+| Field          | Type             | Description                       |
+| -------------- | ---------------- | --------------------------------- |
+| `trial_id`     | int              | Unique trial identifier           |
+| `iteration`    | int              | Which iteration (1-3 typically)   |
+| `val_metric`   | float            | Validation loss/metric            |
+| `train_metric` | float            | Training loss                     |
+| `f1_score`     | Option<float>    | F1 score (if classification)      |
+| `roc_auc`      | Option<float>    | ROC-AUC score (if classification) |
+| `num_trees`    | int              | Number of trees in this trial     |
+| `params`       | Dict[str, float] | Hyperparameters used              |
 
 ---
 
@@ -984,6 +1006,7 @@ Data loading and preparation utilities.
 Loads data from various formats and performs binning.
 
 **Rust:**
+
 ```rust
 use treeboost::dataset::DatasetLoader;
 
@@ -1008,6 +1031,7 @@ let dataset = loader.from_arrays(
 ```
 
 **Python:**
+
 ```python
 from treeboost import DatasetLoader
 
@@ -1043,6 +1067,7 @@ dataset.feature_names()               // Vec<&str>
 Training objectives for regression and classification.
 
 **Rust:**
+
 ```rust
 use treeboost::loss::{MseLoss, PseudoHuberLoss, BinaryLogLoss};
 
@@ -1076,6 +1101,7 @@ Prediction and uncertainty quantification.
 ### Prediction with Intervals
 
 **Rust:**
+
 ```rust
 use treeboost::inference::Prediction;
 
@@ -1096,6 +1122,7 @@ assert_eq!(pred.interval_width, 0.4);
 Uncertainty quantification using split conformal prediction.
 
 **Rust:**
+
 ```rust
 use treeboost::inference::ConformalPredictor;
 
@@ -1126,6 +1153,7 @@ High-cardinality categorical feature handling.
 Stateful encoding of categorical features without target leakage.
 
 **Rust:**
+
 ```rust
 use treeboost::encoding::OrderedTargetEncoder;
 
@@ -1149,6 +1177,7 @@ let encoded_batch = mapping.encode_batch(&categories);
 Rare category filtering using Count-Min Sketch.
 
 **Rust:**
+
 ```rust
 use treeboost::encoding::CategoryFilter;
 
@@ -1182,6 +1211,7 @@ ModelFormat::Bincode   // Compact binary format
 ### Save/Load Functions
 
 **Rust:**
+
 ```rust
 use treeboost::serialize::{save_model, load_model, save_model_bincode, load_model_bincode};
 
@@ -1195,6 +1225,7 @@ let model = load_model_bincode("model.bin")?;
 ```
 
 **Python:**
+
 ```python
 from treeboost import GBDTModel
 
@@ -1225,13 +1256,13 @@ BackendType::Scalar    // Scalar fallback (any CPU, safest)
 
 ### Backend Performance
 
-| Backend | Hardware | Training Speed | Inference | Best For |
-|---------|----------|---|---|---|
-| CUDA | NVIDIA GPU | 10-50x faster | CPU | Large datasets on NVIDIA |
-| WGPU | Any GPU | 5-20x faster | CPU | Portability, any GPU |
-| AVX-512 | x86-64 CPU | 3-5x faster | CPU | CPU-only with modern CPUs |
-| SVE2 | ARM CPU | 2-3x faster | CPU | ARM servers/clusters |
-| Scalar | Any CPU | 1x (baseline) | CPU | Maximum compatibility |
+| Backend | Hardware   | Training Speed | Inference | Best For                  |
+| ------- | ---------- | -------------- | --------- | ------------------------- |
+| CUDA    | NVIDIA GPU | 10-50x faster  | CPU       | Large datasets on NVIDIA  |
+| WGPU    | Any GPU    | 5-20x faster   | CPU       | Portability, any GPU      |
+| AVX-512 | x86-64 CPU | 3-5x faster    | CPU       | CPU-only with modern CPUs |
+| SVE2    | ARM CPU    | 2-3x faster    | CPU       | ARM servers/clusters      |
+| Scalar  | Any CPU    | 1x (baseline)  | CPU       | Maximum compatibility     |
 
 **Inference Note:** All backends use optimized CPU inference (Rayon parallelism). GPU acceleration is for training only, so deployment doesn't require expensive GPU VMs.
 
@@ -1240,6 +1271,7 @@ BackendType::Scalar    // Scalar fallback (any CPU, safest)
 ## Complete Example
 
 **Rust:**
+
 ```rust
 use treeboost::{GBDTConfig, GBDTModel, AutoTuner, TunerConfig, GridStrategy, EvalStrategy, ParameterSpace, ModelFormat};
 use treeboost::dataset::DatasetLoader;
@@ -1288,6 +1320,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 **Python:**
+
 ```python
 from treeboost import GBDTConfig, GBDTModel, AutoTuner, DatasetLoader
 from treeboost import TunerConfig, GridStrategy, EvalStrategy, ParameterSpace

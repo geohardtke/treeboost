@@ -268,12 +268,12 @@ impl Default for LinearFeatureConfig {
         // Exclude problematic column types that hurt linear model performance
         Self {
             exclude_columns: HashSet::new(),
-            exclude_categorical: true,  // Categoricals already encoded by DataPipeline
-            exclude_id: true,           // ID columns have no predictive value
-            exclude_constant: true,     // Zero variance columns are useless
-            exclude_boolean: false,     // Booleans can be useful (0/1)
-            exclude_datetime: true,     // DateTime needs feature engineering first
-            exclude_text: true,         // High-cardinality text needs encoding
+            exclude_categorical: true, // Categoricals already encoded by DataPipeline
+            exclude_id: true,          // ID columns have no predictive value
+            exclude_constant: true,    // Zero variance columns are useless
+            exclude_boolean: false,    // Booleans can be useful (0/1)
+            exclude_datetime: true,    // DateTime needs feature engineering first
+            exclude_text: true,        // High-cardinality text needs encoding
         }
     }
 }
