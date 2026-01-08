@@ -3,6 +3,7 @@
 //! Provides zero-copy model loading via memory mapping.
 
 use crate::booster::GBDTModel;
+use crate::model::UniversalModel;
 use crate::{Result, TreeBoostError};
 use rkyv::rancor::Error as RkyvError;
 use std::fs::File;
@@ -31,6 +32,33 @@ pub fn load_model(path: impl AsRef<Path>) -> Result<GBDTModel> {
         .map_err(|e| TreeBoostError::Serialization(format!("Failed to access archive: {}", e)))?;
 
     let model: GBDTModel = rkyv::deserialize::<GBDTModel, RkyvError>(archived)
+        .map_err(|e| TreeBoostError::Serialization(format!("Failed to deserialize: {}", e)))?;
+
+    Ok(model)
+}
+
+/// Save a UniversalModel to a file
+pub fn save_universal_model(model: &UniversalModel, path: impl AsRef<Path>) -> Result<()> {
+    let bytes = rkyv::to_bytes::<RkyvError>(model)
+        .map_err(|e| TreeBoostError::Serialization(format!("Failed to serialize: {}", e)))?;
+
+    let mut file = File::create(path)?;
+    file.write_all(&bytes)?;
+
+    Ok(())
+}
+
+/// Load a UniversalModel from a file
+pub fn load_universal_model(path: impl AsRef<Path>) -> Result<UniversalModel> {
+    let mut file = File::open(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+
+    // Safe deserialization with validation
+    let archived = rkyv::access::<rkyv::Archived<UniversalModel>, RkyvError>(&bytes)
+        .map_err(|e| TreeBoostError::Serialization(format!("Failed to access archive: {}", e)))?;
+
+    let model: UniversalModel = rkyv::deserialize::<UniversalModel, RkyvError>(archived)
         .map_err(|e| TreeBoostError::Serialization(format!("Failed to deserialize: {}", e)))?;
 
     Ok(model)

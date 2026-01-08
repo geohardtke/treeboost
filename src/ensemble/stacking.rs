@@ -95,6 +95,27 @@ impl RidgeStacker {
     pub fn is_fitted(&self) -> bool {
         self.fitted
     }
+
+    /// Get the fitted intercept term
+    ///
+    /// Returns the intercept from the Ridge regression model trained on out-of-fold
+    /// predictions from ensemble members.
+    ///
+    /// # Returns
+    ///
+    /// - If `fit_intercept` was true during fitting: the computed intercept value
+    /// - If `fit_intercept` was false during fitting: 0.0
+    /// - If the stacker has never been fitted: 0.0
+    ///
+    /// # Ensemble Prediction Formula
+    ///
+    /// When using this intercept with weights from [`weights()`], the prediction is:
+    /// ```text
+    /// prediction = sum(weights[i] * member_predictions[i]) + intercept()
+    /// ```
+    pub fn intercept(&self) -> f32 {
+        self.intercept
+    }
 }
 
 impl Stacker for RidgeStacker {

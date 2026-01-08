@@ -47,16 +47,13 @@ use crate::analysis::{Confidence, DataFrameProfile, DatasetAnalysis};
 use crate::dataset::feature_extractor::LinearFeatureConfig;
 use crate::dataset::{BinnedDataset, DataPipeline};
 use crate::defaults::auto as auto_defaults;
-use crate::ensemble::{EnsembleBuilder, LttEnsemble};
 use crate::features::{FeaturePlan, SmartFeatureEngine};
 use crate::model::config::{
-    AutoConfig, AutoEnsembleConfig, AutoEnsembleMethod, AutoTrainedModel, BuildPhaseTimes,
-    BuildResult, TuningLevel,
+    AutoConfig, AutoEnsembleConfig, AutoEnsembleMethod, BuildPhaseTimes, BuildResult, TuningLevel,
 };
 use crate::model::progress::{ProgressCallback, ProgressUpdate, TrainingPhase};
 use crate::model::{BoostingMode, UniversalConfig, UniversalModel};
 use crate::preprocessing::{ModelType, PreprocessingPlan, SmartPreprocessor};
-use crate::utils::features::extract_selected_features;
 use crate::Result;
 use polars::prelude::*;
 use std::sync::Arc;
@@ -485,48 +482,52 @@ impl AutoBuilder {
             } else {
                 (None, None, None)
             };
-        let model = if let Some(ref ensemble_config) = adapted_config.ensemble {
-            match mode {
-                BoostingMode::PureTree => {
-                    let ensemble = self.train_ensemble(&dataset, &universal_config, ensemble_config)?;
-                    AutoTrainedModel::Ensemble(ensemble)
+        // Handle ensemble configuration by setting ensemble_seeds in UniversalConfig
+        let final_config = if let Some(ref ensemble_config) = adapted_config.ensemble {
+            // Only PureTree and LinearThenTree support ensembles
+            if matches!(mode, BoostingMode::PureTree | BoostingMode::LinearThenTree) {
+                // Generate ensemble seeds from multi_seed config
+                let seeds: Vec<u64> = (0..ensemble_config.multi_seed.n_seeds)
+                    .map(|i| ensemble_config.multi_seed.base_seed + i as u64)
+                    .collect();
+
+                if self.config.verbose {
+                    println!("  [Ensemble] Training with {} seeds", seeds.len());
                 }
-                BoostingMode::LinearThenTree => {
-                    let ltt_ensemble = self.train_ltt_ensemble(
-                        &dataset,
-                        &universal_config,
-                        ensemble_config,
-                        feature_extractor,
-                        raw_features,
-                        linear_indices,
-                    )?;
-                    AutoTrainedModel::LttEnsemble(ltt_ensemble)
+
+                // Convert StackingConfig to StackingStrategy
+                let stacking_strategy = crate::model::universal::config::StackingStrategy::Ridge {
+                    alpha: ensemble_config.stacking.alpha,
+                    rank_transform: ensemble_config.stacking.rank_transform,
+                    fit_intercept: ensemble_config.stacking.fit_intercept,
+                    min_weight: ensemble_config.stacking.min_weight,
+                };
+
+                // Set ensemble_seeds and stacking_strategy in UniversalConfig
+                universal_config
+                    .with_ensemble_seeds(seeds)
+                    .with_stacking_strategy(stacking_strategy)
+            } else {
+                if self.config.verbose {
+                    println!(
+                        "  [Ensemble] Skipped (mode {:?} does not support ensembles)",
+                        mode
+                    );
                 }
-                _ => {
-                    if self.config.verbose {
-                        println!(
-                            "  [Ensemble] Skipped (mode {:?} does not support ensembles)",
-                            mode
-                        );
-                    }
-                    AutoTrainedModel::Universal(self.train_model(
-                        &dataset,
-                        universal_config,
-                        feature_extractor,
-                        raw_features,
-                        linear_indices,
-                    )?)
-                }
+                universal_config
             }
         } else {
-            AutoTrainedModel::Universal(self.train_model(
-                &dataset,
-                universal_config,
-                feature_extractor,
-                raw_features,
-                linear_indices,
-            )?)
+            universal_config
         };
+
+        // Train UniversalModel (handles both single and ensemble internally)
+        let model = self.train_model(
+            &dataset,
+            final_config,
+            feature_extractor,
+            raw_features,
+            linear_indices,
+        )?;
         phase_times.training = phase_start.elapsed();
 
         if self.config.verbose {
@@ -664,185 +665,6 @@ impl AutoBuilder {
             }
             _ => UniversalModel::train(dataset, config, &loss),
         }
-    }
-
-    fn train_ensemble(
-        &self,
-        dataset: &BinnedDataset,
-        config: &UniversalConfig,
-        ensemble_config: &crate::model::config::AutoEnsembleConfig,
-    ) -> Result<crate::ensemble::StackedEnsemble> {
-        let loss = crate::loss::MseLoss;
-        let base_config = UniversalModel::to_gbdt_config(config, &loss);
-        let mut builder = EnsembleBuilder::new(base_config)
-            .with_multi_seed_config(ensemble_config.multi_seed.clone())
-            .with_selection_config(ensemble_config.selection.clone())
-            .with_stacking_config(ensemble_config.stacking.clone());
-
-        if matches!(
-            ensemble_config.method,
-            crate::model::config::AutoEnsembleMethod::SimpleAverage
-        ) {
-            builder = builder.with_simple_average();
-        }
-
-        builder.build(dataset)
-    }
-
-    /// Train LTT ensemble: Linear model + multi-seed GBDT ensemble on residuals
-    ///
-    /// This method orchestrates LTT ensemble training at the AutoBuilder level.
-    /// It combines a single linear model with a stacked ensemble of GBDTs trained
-    /// on residuals, providing both variance reduction (via ensemble) and trend
-    /// capture (via linear model).
-    ///
-    /// # Architecture
-    ///
-    /// 1. Train LinearBooster once on gradients (deterministic)
-    /// 2. Compute residuals: `residual = target - linear_prediction`
-    /// 3. Train GBDT ensemble on residuals via `EnsembleBuilder`
-    /// 4. Final prediction: `base + shrinkage*linear_pred + gbdt_ensemble_pred`
-    ///
-    /// # Note on Code Duplication
-    ///
-    /// The linear training loop in Phase 1 is intentionally duplicated from
-    /// `UniversalModel::train_linear_then_tree()`. This duplication is acceptable
-    /// because:
-    /// - This method lives in AutoBuilder (high-level AutoML orchestration)
-    /// - UniversalModel::train_linear_then_tree lives in core training API
-    /// - Extracting shared logic would require complex trait/closure architectures
-    /// - The duplication is ~25 lines and unlikely to change frequently
-    /// - Architectural separation of concerns outweighs DRY principle here
-    ///
-    /// See also: `UniversalModel::train_linear_then_tree()` in src/model/universal/core.rs
-    fn train_ltt_ensemble(
-        &self,
-        dataset: &BinnedDataset,
-        config: &UniversalConfig,
-        ensemble_config: &crate::model::config::AutoEnsembleConfig,
-        feature_extractor: Option<crate::dataset::feature_extractor::FeatureExtractor>,
-        raw_features: Option<Vec<f32>>,
-        linear_indices: Option<Vec<usize>>,
-    ) -> Result<LttEnsemble> {
-        use crate::learner::{LinearBooster, WeakLearner};
-        use crate::loss::LossFunction;
-
-        let loss = crate::loss::MseLoss;
-        let targets = dataset.targets();
-        let num_rows = dataset.num_rows();
-        let num_features = dataset.num_features();
-
-        // Get raw features (required for accurate linear model)
-        let raw_feats = raw_features.unwrap_or_else(|| {
-            // Fallback: extract from bins (lossy approximation)
-            // For best accuracy, pass raw features directly instead of using this fallback
-            dataset.extract_raw_features_from_bins()
-        });
-
-        let num_raw_features = if num_rows > 0 {
-            raw_feats.len() / num_rows
-        } else {
-            num_features
-        };
-
-        // Determine features for linear model
-        let num_linear_features = linear_indices
-            .as_ref()
-            .map(|v| v.len())
-            .unwrap_or(num_raw_features);
-
-        let linear_features = extract_selected_features(
-            &raw_feats,
-            num_rows,
-            num_raw_features,
-            linear_indices.as_deref(),
-        );
-
-        // Base prediction
-        let base_prediction = loss.initial_prediction(targets);
-
-        // =========================================================================
-        // Phase 1: Train Linear Model
-        // =========================================================================
-        let mut linear_booster = LinearBooster::new(num_linear_features, config.linear_config.clone());
-        let mut predictions = vec![base_prediction; num_rows];
-
-        for _round in 0..config.linear_rounds {
-            let mut gradients = vec![0.0f32; num_rows];
-            let mut hessians = vec![0.0f32; num_rows];
-
-            for i in 0..num_rows {
-                let (g, h) = loss.gradient_hessian(targets[i], predictions[i]);
-                gradients[i] = g;
-                hessians[i] = h;
-            }
-
-            linear_booster.fit_on_gradients(
-                &linear_features,
-                num_linear_features,
-                &gradients,
-                &hessians,
-            )?;
-
-            let shrinkage = config.linear_config.shrinkage_factor;
-            for i in 0..num_rows {
-                let linear_pred = linear_booster.predict_row(&linear_features, num_linear_features, i);
-                predictions[i] += shrinkage * linear_pred;
-            }
-        }
-
-        if self.config.verbose {
-            println!("  [LTT Ensemble] Linear phase complete");
-        }
-
-        // =========================================================================
-        // Phase 2: Train GBDT Ensemble on Residuals
-        // =========================================================================
-        let mut residual_dataset = dataset.clone();
-        {
-            let residual_targets = residual_dataset.targets_mut();
-            for i in 0..num_rows {
-                residual_targets[i] = targets[i] - predictions[i];
-            }
-        }
-
-        if self.config.verbose {
-            println!("  [LTT Ensemble] Training GBDT ensemble on residuals...");
-        }
-
-        // Use existing ensemble infrastructure on residuals
-        let gbdt_config = UniversalModel::to_gbdt_config(config, &loss);
-        let mut builder = EnsembleBuilder::new(gbdt_config)
-            .with_multi_seed_config(ensemble_config.multi_seed.clone())
-            .with_selection_config(ensemble_config.selection.clone())
-            .with_stacking_config(ensemble_config.stacking.clone());
-
-        if matches!(
-            ensemble_config.method,
-            crate::model::config::AutoEnsembleMethod::SimpleAverage
-        ) {
-            builder = builder.with_simple_average();
-        }
-
-        let gbdt_ensemble = builder.build(&residual_dataset)?;
-
-        if self.config.verbose {
-            let stats = gbdt_ensemble.stats();
-            println!(
-                "  [LTT Ensemble] GBDT ensemble: {} members, OOF metric: {:.4}",
-                stats.n_members, stats.oof_metric
-            );
-        }
-
-        Ok(LttEnsemble::new(
-            linear_booster,
-            gbdt_ensemble,
-            base_prediction,
-            config.linear_config.clone(),
-            num_linear_features,
-            linear_indices,
-            feature_extractor,
-        ))
     }
 }
 

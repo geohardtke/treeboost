@@ -28,14 +28,12 @@
 //! let predictions = ensemble.predict(&test_data);
 //! ```
 
-mod ltt;
 mod model;
 mod multi_seed;
 mod selection;
 mod stacking;
 mod traits;
 
-pub use ltt::{LttEnsemble, LttEnsembleStats};
 pub use model::{EnsembleBuilder, EnsembleStats, StackedEnsemble};
 pub use multi_seed::TrainedMember;
 pub use multi_seed::{MultiSeedConfig, MultiSeedTrainer};

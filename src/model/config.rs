@@ -6,7 +6,7 @@
 use crate::analysis::{Confidence, DataFrameProfile, DatasetAnalysis};
 use crate::dataset::feature_extractor::LinearFeatureConfig;
 use crate::defaults::{auto as auto_defaults, seeds as seeds_defaults};
-use crate::ensemble::{MultiSeedConfig, SelectionConfig, StackingConfig, StackedEnsemble};
+use crate::ensemble::{MultiSeedConfig, SelectionConfig, StackingConfig};
 use crate::features::FeaturePlan;
 use crate::model::progress::{ProgressCallback, QuietProgress};
 use crate::model::{BoostingMode, UniversalModel};
@@ -439,8 +439,8 @@ impl TreeTunerConfig {
 /// Build result containing the trained model and metadata
 #[derive(Debug)]
 pub struct BuildResult {
-    /// The trained model
-    pub model: AutoTrainedModel,
+    /// The trained model (UniversalModel handles all modes and ensembles)
+    pub model: UniversalModel,
 
     /// The boosting mode used
     pub mode: BoostingMode,
@@ -477,23 +477,6 @@ pub struct BuildResult {
 
     /// Time breakdown by phase
     pub phase_times: BuildPhaseTimes,
-}
-
-/// Trained model produced by AutoBuilder
-pub enum AutoTrainedModel {
-    Universal(UniversalModel),
-    Ensemble(StackedEnsemble),
-    LttEnsemble(crate::ensemble::LttEnsemble),
-}
-
-impl std::fmt::Debug for AutoTrainedModel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AutoTrainedModel::Universal(_) => f.debug_tuple("Universal").finish(),
-            AutoTrainedModel::Ensemble(_) => f.debug_tuple("Ensemble").finish(),
-            AutoTrainedModel::LttEnsemble(_) => f.debug_tuple("LttEnsemble").finish(),
-        }
-    }
 }
 
 /// Time breakdown for build phases

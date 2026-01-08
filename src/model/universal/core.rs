@@ -32,12 +32,28 @@ pub struct UniversalModel {
     config: UniversalConfig,
 
     /// GBDTModel for PureTree mode (wraps the mature implementation)
+    /// Used when ensemble_seeds is None
     gbdt_model: Option<GBDTModel>,
+
+    /// Multi-seed GBDT ensemble (when ensemble_seeds is Some)
+    /// - For PureTree mode: Multiple GBDTs trained directly
+    /// - For LinearThenTree mode: Multiple GBDTs trained on linear residuals
+    /// - For RandomForest mode: Not used (RF already uses multiple trees)
+    gbdt_ensemble: Option<Vec<GBDTModel>>,
+
+    /// Stacker weights for ensemble combination
+    /// Only populated when gbdt_ensemble.is_some()
+    stacker_weights: Option<Vec<f32>>,
+
+    /// Stacker intercept for Ridge stacking
+    /// Only populated when using Ridge stacking strategy
+    stacker_intercept: Option<f32>,
 
     /// Linear booster (for LinearThenTree mode)
     linear_booster: Option<LinearBooster>,
 
     /// Ensemble of trained trees (for LinearThenTree and RandomForest modes)
+    /// Used when NOT using gbdt_model or gbdt_ensemble
     trees: Vec<Tree>,
 
     /// Base prediction (for LinearThenTree and RandomForest modes)
@@ -147,6 +163,35 @@ impl UniversalModel {
     }
 
     /// Train a UniversalModel on binned data
+    ///
+    /// # Arguments
+    /// * `dataset` - Binned training data
+    /// * `config` - Training configuration (fully serializable and persisted)
+    /// * `loss_fn` - Loss function for computing gradients during training
+    ///
+    /// # Important Notes
+    ///
+    /// - The **loss function is NOT persisted** in the saved model. It is used only
+    ///   during training to compute gradients. The trained model is loss-function-agnostic
+    ///   and will work correctly with any data processed with the same preprocessing.
+    /// - The **config is fully persisted** and can be exported via [`config()`] or
+    ///   saved to JSON for inspection and reuse.
+    /// - For reproducibility, store your loss function choice separately if needed.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Train with MSE loss
+    /// let model = UniversalModel::train(&dataset, config, &MseLoss)?;
+    ///
+    /// // Save config and model
+    /// let config_json = serde_json::to_string_pretty(model.config())?;
+    /// std::fs::write("config.json", config_json)?;
+    /// model.save("model.rkyv")?;
+    ///
+    /// // Later: Load and use (loss function is already baked into the model)
+    /// let loaded = UniversalModel::load("model.rkyv")?;
+    /// let preds = loaded.predict(&test_dataset)?;  // No need to specify loss again
+    /// ```
     pub fn train(
         dataset: &BinnedDataset,
         config: UniversalConfig,
@@ -465,13 +510,24 @@ impl UniversalModel {
     ) -> Result<Self> {
         let num_features = dataset.num_features();
 
-        // Convert config and delegate to GBDTModel
-        let gbdt_config = Self::to_gbdt_config(&config, loss_fn);
-        let gbdt_model = GBDTModel::train_binned(dataset, gbdt_config)?;
+        // Check if ensemble training is requested
+        let (gbdt_model, gbdt_ensemble, stacker_weights, stacker_intercept) =
+            if let Some(ref seeds) = config.ensemble_seeds {
+                // Multi-seed ensemble training
+                Self::train_gbdt_ensemble(dataset, &config, loss_fn, seeds)?
+            } else {
+                // Single GBDT training (standard path)
+                let gbdt_config = Self::to_gbdt_config(&config, loss_fn);
+                let gbdt_model = GBDTModel::train_binned(dataset, gbdt_config)?;
+                (Some(gbdt_model), None, None, None)
+            };
 
         Ok(Self {
             config,
-            gbdt_model: Some(gbdt_model),
+            gbdt_model,
+            gbdt_ensemble,
+            stacker_weights,
+            stacker_intercept,
             linear_booster: None,
             trees: Vec::new(),
             base_prediction: 0.0, // Not used - GBDTModel handles this
@@ -630,13 +686,24 @@ impl UniversalModel {
             }
         }
 
-        // Train GBDTModel on residuals (gets GPU, early stopping, etc.)
-        let gbdt_config = Self::to_gbdt_config(&config, loss_fn);
-        let gbdt_model = GBDTModel::train_binned(&residual_dataset, gbdt_config)?;
+        // Check if ensemble training is requested
+        let (gbdt_model, gbdt_ensemble, stacker_weights, stacker_intercept) =
+            if let Some(ref seeds) = config.ensemble_seeds {
+                // Multi-seed ensemble training
+                Self::train_gbdt_ensemble(&residual_dataset, &config, loss_fn, seeds)?
+            } else {
+                // Single GBDT training (standard path)
+                let gbdt_config = Self::to_gbdt_config(&config, loss_fn);
+                let gbdt_model = GBDTModel::train_binned(&residual_dataset, gbdt_config)?;
+                (Some(gbdt_model), None, None, None)
+            };
 
         Ok(Self {
             config,
-            gbdt_model: Some(gbdt_model),
+            gbdt_model,
+            gbdt_ensemble,
+            stacker_weights,
+            stacker_intercept,
             linear_booster: Some(linear_booster),
             trees: Vec::new(), // Not used - GBDTModel stores trees
             base_prediction,
@@ -710,6 +777,9 @@ impl UniversalModel {
         Ok(Self {
             config,
             gbdt_model: None, // RandomForest uses self.trees, not GBDTModel
+            gbdt_ensemble: None,
+            stacker_weights: None,
+            stacker_intercept: None,
             linear_booster: None,
             trees,
             base_prediction,
@@ -725,6 +795,120 @@ impl UniversalModel {
     // =========================================================================
     // Helper Methods
     // =========================================================================
+
+    /// Predict using GBDT ensemble with stacker weights
+    fn predict_ensemble(&self, dataset: &BinnedDataset, ensemble: &[GBDTModel]) -> Vec<f32> {
+        let num_rows = dataset.num_rows();
+
+        // Get predictions from all ensemble members
+        let member_predictions: Vec<Vec<f32>> = ensemble
+            .iter()
+            .map(|model| model.predict(dataset))
+            .collect();
+
+        // Combine using stacker weights
+        if let Some(ref weights) = self.stacker_weights {
+            let mut combined = vec![0.0; num_rows];
+
+            // Weighted sum of member predictions
+            for (pred, &weight) in member_predictions.iter().zip(weights.iter()) {
+                for i in 0..num_rows {
+                    combined[i] += pred[i] * weight;
+                }
+            }
+
+            // Add intercept if present (Ridge stacking)
+            if let Some(intercept) = self.stacker_intercept {
+                for i in 0..num_rows {
+                    combined[i] += intercept;
+                }
+            }
+
+            combined
+        } else {
+            // Fallback to equal-weight averaging if weights not available
+            let mut combined = vec![0.0; num_rows];
+            let scale = 1.0 / ensemble.len() as f32;
+
+            for pred in &member_predictions {
+                for i in 0..num_rows {
+                    combined[i] += pred[i] * scale;
+                }
+            }
+
+            combined
+        }
+    }
+
+    /// Train multi-seed GBDT ensemble and fit stacker
+    ///
+    /// Returns (None, Some(ensemble), Some(weights), Some(intercept))
+    fn train_gbdt_ensemble(
+        dataset: &BinnedDataset,
+        config: &UniversalConfig,
+        loss_fn: &dyn LossFunction,
+        seeds: &[u64],
+    ) -> Result<(
+        Option<GBDTModel>,
+        Option<Vec<GBDTModel>>,
+        Option<Vec<f32>>,
+        Option<f32>,
+    )> {
+        use crate::ensemble::{RidgeStacker, Stacker, StackingConfig};
+
+        // Train multiple GBDTs with different seeds
+        let mut models = Vec::with_capacity(seeds.len());
+        let mut oof_predictions = Vec::with_capacity(seeds.len());
+
+        for &seed in seeds {
+            let mut gbdt_config = Self::to_gbdt_config(config, loss_fn);
+            gbdt_config.seed = seed;
+
+            let model = GBDTModel::train_binned(dataset, gbdt_config)?;
+
+            // Get OOF predictions for stacking
+            let preds = model.predict(dataset);
+            oof_predictions.push(preds);
+
+            models.push(model);
+        }
+
+        // Fit stacker on OOF predictions
+        let (weights, intercept) = match &config.stacking_strategy {
+            super::config::StackingStrategy::Ridge {
+                alpha,
+                rank_transform,
+                fit_intercept,
+                min_weight,
+            } => {
+                let stacking_config = StackingConfig {
+                    alpha: *alpha,
+                    rank_transform: *rank_transform,
+                    fit_intercept: *fit_intercept,
+                    min_weight: *min_weight,
+                };
+
+                let mut stacker = RidgeStacker::new(stacking_config);
+                stacker.fit(&oof_predictions, dataset.targets());
+
+                let weights = stacker.weights().map(|w| w.to_vec());
+                let intercept = if *fit_intercept {
+                    Some(stacker.intercept())
+                } else {
+                    None
+                };
+
+                (weights, intercept)
+            }
+            super::config::StackingStrategy::Average => {
+                // Equal weights for all models
+                let weights = vec![1.0 / seeds.len() as f32; seeds.len()];
+                (Some(weights), None)
+            }
+        };
+
+        Ok((None, Some(models), weights, intercept))
+    }
 
     /// Extract raw feature values from BinnedDataset using bin-center approximation
     ///
@@ -805,11 +989,16 @@ impl UniversalModel {
     pub fn predict(&self, dataset: &BinnedDataset) -> Vec<f32> {
         match self.config.mode {
             BoostingMode::PureTree => {
-                // Delegate entirely to GBDTModel
-                self.gbdt_model
-                    .as_ref()
-                    .map(|m| m.predict(dataset))
-                    .unwrap_or_else(|| vec![0.0; dataset.num_rows()])
+                // Check for ensemble first, then single model
+                if let Some(ref ensemble) = self.gbdt_ensemble {
+                    self.predict_ensemble(dataset, ensemble)
+                } else {
+                    // Delegate to single GBDTModel
+                    self.gbdt_model
+                        .as_ref()
+                        .map(|m| m.predict(dataset))
+                        .unwrap_or_else(|| vec![0.0; dataset.num_rows()])
+                }
             }
             BoostingMode::LinearThenTree => {
                 // Linear contribution + GBDTModel (trained on residuals)
@@ -823,10 +1012,16 @@ impl UniversalModel {
                     self.apply_linear_shrinkage(&mut predictions, &linear_preds);
                 }
 
-                // Add tree contribution (GBDTModel was trained on residuals)
+                // Add tree contribution (either ensemble or single GBDT, trained on residuals)
                 // IMPORTANT: Subtract gbdt's base_prediction to avoid double-counting
                 // gbdt.predict() returns (gbdt_base + tree_sum), but we already have ltt_base
-                if let Some(ref gbdt) = self.gbdt_model {
+                if let Some(ref ensemble) = self.gbdt_ensemble {
+                    let tree_preds = self.predict_ensemble(dataset, ensemble);
+                    // Ensemble already accounts for base predictions internally
+                    for i in 0..num_rows {
+                        predictions[i] += tree_preds[i];
+                    }
+                } else if let Some(ref gbdt) = self.gbdt_model {
                     let tree_preds = gbdt.predict(dataset);
                     let gbdt_base = gbdt.base_prediction();
                     for i in 0..num_rows {
@@ -875,11 +1070,15 @@ impl UniversalModel {
     ) -> Vec<f32> {
         match self.config.mode {
             BoostingMode::PureTree => {
-                // Delegate entirely to GBDTModel (raw features not used for trees)
-                self.gbdt_model
-                    .as_ref()
-                    .map(|m| m.predict(dataset))
-                    .unwrap_or_else(|| vec![0.0; dataset.num_rows()])
+                // Check for ensemble first, then single model (raw features not used for trees)
+                if let Some(ref ensemble) = self.gbdt_ensemble {
+                    self.predict_ensemble(dataset, ensemble)
+                } else {
+                    self.gbdt_model
+                        .as_ref()
+                        .map(|m| m.predict(dataset))
+                        .unwrap_or_else(|| vec![0.0; dataset.num_rows()])
+                }
             }
             BoostingMode::LinearThenTree => {
                 // Linear contribution uses raw features + GBDTModel uses binned
@@ -912,9 +1111,14 @@ impl UniversalModel {
                     self.apply_linear_shrinkage(&mut predictions, &linear_preds);
                 }
 
-                // Add tree contribution (trees use binned data)
+                // Add tree contribution (either ensemble or single GBDT, trees use binned data)
                 // IMPORTANT: Subtract gbdt's base_prediction to avoid double-counting
-                if let Some(ref gbdt) = self.gbdt_model {
+                if let Some(ref ensemble) = self.gbdt_ensemble {
+                    let tree_preds = self.predict_ensemble(dataset, ensemble);
+                    for i in 0..num_rows {
+                        predictions[i] += tree_preds[i];
+                    }
+                } else if let Some(ref gbdt) = self.gbdt_model {
                     let tree_preds = gbdt.predict(dataset);
                     let gbdt_base = gbdt.base_prediction();
                     for i in 0..num_rows {
@@ -1037,6 +1241,28 @@ impl UniversalModel {
     /// Get training configuration
     pub fn config(&self) -> &UniversalConfig {
         &self.config
+    }
+
+    /// Save the model to a file using zero-copy rkyv serialization
+    ///
+    /// # Example
+    /// ```ignore
+    /// model.save("model.rkyv")?;
+    /// let loaded = UniversalModel::load("model.rkyv")?;
+    /// ```
+    pub fn save(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        crate::serialize::save_universal_model(self, path)
+    }
+
+    /// Load a model from a file using zero-copy rkyv deserialization
+    ///
+    /// # Example
+    /// ```ignore
+    /// let model = UniversalModel::load("model.rkyv")?;
+    /// let predictions = model.predict(&dataset);
+    /// ```
+    pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        crate::serialize::load_universal_model(path)
     }
 
     /// Get number of trees

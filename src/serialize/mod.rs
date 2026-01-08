@@ -8,4 +8,4 @@ mod bincode_io;
 mod rkyv_io;
 
 pub use bincode_io::{load_model_bincode, save_model_bincode};
-pub use rkyv_io::{load_model, save_model};
+pub use rkyv_io::{load_model, load_universal_model, save_model, save_universal_model};

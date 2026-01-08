@@ -2,12 +2,77 @@
 
 use crate::dataset::feature_extractor::FeatureExtractor;
 use crate::defaults::{
-    gbdt as gbdt_defaults, seeds as seeds_defaults, tree as tree_defaults,
-    universal as universal_defaults,
+    ensemble as ensemble_defaults, gbdt as gbdt_defaults, seeds as seeds_defaults,
+    tree as tree_defaults, universal as universal_defaults,
 };
 use crate::learner::{LinearConfig, LinearPreset, TreeConfig, TreePreset};
 use crate::model::universal::mode::BoostingMode;
 use rkyv::{Archive, Deserialize, Serialize};
+
+// =============================================================================
+// StackingStrategy - Serializable stacking config
+// =============================================================================
+
+/// Stacking strategy for ensemble combination
+///
+/// Specifies how to combine predictions from multiple ensemble members.
+///
+/// This is a serializable alternative to the `Box<dyn Stacker>` trait object,
+/// enabling full persistence of ensemble configurations. UniversalModel stores
+/// this enum and constructs the appropriate stacker at runtime.
+///
+/// # Variants
+///
+/// - **Ridge**: Uses Ridge regression to learn optimal weights for each ensemble member.
+///   Recommended when ensemble members have different prediction scales or accuracies.
+///
+/// - **Average**: Simple equal-weight averaging across all members.
+///   Recommended for homogeneous ensembles where all members have similar quality.
+///
+/// # Note on Extensibility
+///
+/// Only Ridge and Average strategies are currently exposed because they are the most
+/// commonly used and both are fully serializable. If you need custom stacking logic,
+/// train multiple independent models and combine them manually, or use the TrainedMember
+/// API directly with EnsembleBuilder.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
+pub enum StackingStrategy {
+    /// Ridge regression stacking with regularization
+    ///
+    /// Learns optimal weights via Ridge regression on out-of-fold predictions.
+    /// Ridge regularization prevents overfitting when stacking.
+    Ridge {
+        /// Ridge regularization parameter (alpha). Higher values = stronger regularization.
+        /// Typical range: 0.001 to 0.1. Default: 0.01
+        alpha: f32,
+        /// Whether to apply rank transformation to member predictions before stacking.
+        /// Useful when members have different prediction scales (e.g., one predicts [0, 100],
+        /// another [0, 1]). Rank transformation makes them comparable. Default: false
+        rank_transform: bool,
+        /// Whether to fit an intercept term. Set to false if you want zero-centered predictions.
+        /// Default: true
+        fit_intercept: bool,
+        /// Minimum weight magnitude threshold. Weights smaller than this are set to zero,
+        /// creating sparse stacking weights. Typical range: 0.0 to 0.1. Default: 0.01
+        min_weight: f32,
+    },
+    /// Simple averaging (equal weights)
+    ///
+    /// Combines members by simple arithmetic mean: `(pred_1 + pred_2 + ... + pred_n) / n`
+    /// No learning required. Fast and effective for balanced, diverse ensembles.
+    Average,
+}
+
+impl Default for StackingStrategy {
+    fn default() -> Self {
+        Self::Ridge {
+            alpha: ensemble_defaults::DEFAULT_STACKING_ALPHA,
+            rank_transform: ensemble_defaults::DEFAULT_RANK_TRANSFORM,
+            fit_intercept: ensemble_defaults::DEFAULT_FIT_INTERCEPT,
+            min_weight: ensemble_defaults::DEFAULT_MIN_WEIGHT,
+        }
+    }
+}
 
 // =============================================================================
 // UniversalConfig
@@ -69,6 +134,29 @@ pub struct UniversalConfig {
     #[rkyv(with = rkyv::with::Skip)]
     #[serde(skip)]
     pub feature_extractor: Option<FeatureExtractor>,
+
+    /// Multi-seed ensemble configuration
+    ///
+    /// If Some, trains multiple GBDTs with different random seeds and stacks them.
+    /// - For PureTree mode: Trains N GBDTs directly
+    /// - For LinearThenTree mode: Trains N GBDTs on linear residuals
+    /// - For RandomForest mode: Ignored (RF already uses multiple trees)
+    ///
+    /// If None, trains a single GBDT (standard behavior).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = UniversalConfig::new()
+    ///     .with_mode(BoostingMode::LinearThenTree)
+    ///     .with_ensemble_seeds(vec![42, 43, 44, 45, 46]); // 5-model ensemble
+    /// ```
+    pub ensemble_seeds: Option<Vec<u64>>,
+
+    /// Stacking strategy for ensemble combination
+    ///
+    /// Only used if `ensemble_seeds.is_some()`.
+    /// Determines how predictions from multiple GBDTs are combined.
+    pub stacking_strategy: StackingStrategy,
 }
 
 impl Default for UniversalConfig {
@@ -88,6 +176,8 @@ impl Default for UniversalConfig {
             linear_rounds: universal_defaults::DEFAULT_LINEAR_ROUNDS, // Single round with many CD iterations (fit once)
             max_linear_memory_mb: universal_defaults::DEFAULT_MAX_LINEAR_MEMORY_MB, // No limit by default
             feature_extractor: None,
+            ensemble_seeds: None, // No ensemble by default
+            stacking_strategy: StackingStrategy::default(),
         }
     }
 }
@@ -239,5 +329,45 @@ impl UniversalConfig {
     pub fn estimate_linear_memory(&self, num_rows: usize, num_features: usize) -> usize {
         // f32 = 4 bytes per element
         num_rows * num_features * 4
+    }
+
+    /// Set ensemble seeds for multi-model training
+    ///
+    /// Trains multiple GBDTs with different random seeds and stacks their predictions.
+    /// - For PureTree mode: Trains N GBDTs directly
+    /// - For LinearThenTree mode: Trains N GBDTs on linear residuals
+    /// - For RandomForest mode: Ignored (RF already uses multiple trees)
+    ///
+    /// # Arguments
+    /// - `seeds`: Vector of random seeds (typically 3-10 seeds)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = UniversalConfig::new()
+    ///     .with_ensemble_seeds(vec![42, 43, 44, 45, 46]);
+    /// ```
+    pub fn with_ensemble_seeds(mut self, seeds: Vec<u64>) -> Self {
+        self.ensemble_seeds = Some(seeds);
+        self
+    }
+
+    /// Set stacking strategy for ensemble combination
+    ///
+    /// Only used if `ensemble_seeds.is_some()`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = UniversalConfig::new()
+    ///     .with_ensemble_seeds(vec![42, 43, 44])
+    ///     .with_stacking_strategy(StackingStrategy::Ridge {
+    ///         alpha: 1.0,
+    ///         rank_transform: true,
+    ///         fit_intercept: true,
+    ///         min_weight: 0.0,
+    ///     });
+    /// ```
+    pub fn with_stacking_strategy(mut self, strategy: StackingStrategy) -> Self {
+        self.stacking_strategy = strategy;
+        self
     }
 }

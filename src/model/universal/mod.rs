@@ -66,7 +66,7 @@ mod core;
 pub use core::UniversalModel;
 
 // Re-export key types
-pub use config::{UniversalConfig, UniversalPreset};
+pub use config::{StackingStrategy, UniversalConfig, UniversalPreset};
 pub use mode::{BoostingMode, ModeSelection};
 
 // Implementation Note:

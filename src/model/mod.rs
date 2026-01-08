@@ -15,12 +15,12 @@ mod universal;
 pub use auto::AutoModel;
 pub use builder::AutoBuilder;
 pub use config::{
-    AutoConfig, AutoEnsembleConfig, AutoEnsembleMethod, AutoTrainedModel, BuildPhaseTimes,
-    BuildResult, TreeTunerConfig, TreeTunerPreset, TreeTuningResult, TuningLevel,
+    AutoConfig, AutoEnsembleConfig, AutoEnsembleMethod, BuildPhaseTimes, BuildResult,
+    TreeTunerConfig, TreeTunerPreset, TreeTuningResult, TuningLevel,
 };
 pub use progress::{
     ConsoleProgress, ProgressCallback, ProgressUpdate, QuietProgress, TrainingPhase,
 };
 pub use universal::{
-    BoostingMode, ModeSelection, UniversalConfig, UniversalModel, UniversalPreset,
+    BoostingMode, ModeSelection, StackingStrategy, UniversalConfig, UniversalModel, UniversalPreset,
 };

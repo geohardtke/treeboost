@@ -38,8 +38,8 @@ use crate::analysis::{Confidence, DataFrameProfile, DatasetAnalysis};
 use crate::dataset::{BinnedDataset, DataPipeline};
 use crate::features::FeaturePlan;
 use crate::model::{
-    AutoBuilder, AutoConfig, AutoTrainedModel, BoostingMode, BuildPhaseTimes, BuildResult,
-    TreeTuningResult, TuningLevel, UniversalModel,
+    AutoBuilder, AutoConfig, BoostingMode, BuildPhaseTimes, BuildResult, TreeTuningResult,
+    TuningLevel, UniversalModel,
 };
 use crate::preprocessing::PreprocessingPlan;
 use crate::tuner::ltt::LttTuningResult;
@@ -52,8 +52,8 @@ use std::time::Duration;
 /// This is the main user-facing type for trained models. It wraps the
 /// `UniversalModel` along with all the metadata from the training process.
 pub struct AutoModel {
-    /// The underlying trained model
-    model: AutoTrainedModel,
+    /// The underlying trained model (UniversalModel handles all modes and ensembles)
+    model: UniversalModel,
 
     /// Boosting mode that was used
     mode: BoostingMode,
@@ -164,32 +164,21 @@ impl AutoModel {
         // Also get preprocessed DataFrame with encoded categoricals
         let (preprocessed_df, dataset) = self.prepare_dataset_for_prediction(df)?;
 
-        match &self.model {
-            AutoTrainedModel::Universal(model) => {
-                // For LinearThenTree, use dual-representation inference if FeatureExtractor is stored
-                if matches!(self.mode, crate::model::BoostingMode::LinearThenTree) {
-                    if let Some(ref extractor) = model.feature_extractor() {
-                        // CRITICAL: Extract from preprocessed_df (with encoded categoricals),
-                        // NOT from original df (with String categoricals)
-                        let (raw_features, _num_features) =
-                            extractor.extract(&preprocessed_df, &self.target_column)?;
+        // For LinearThenTree, use dual-representation inference if FeatureExtractor is stored
+        if matches!(self.mode, crate::model::BoostingMode::LinearThenTree) {
+            if let Some(ref extractor) = self.model.feature_extractor() {
+                // CRITICAL: Extract from preprocessed_df (with encoded categoricals),
+                // NOT from original df (with String categoricals)
+                let (raw_features, _num_features) =
+                    extractor.extract(&preprocessed_df, &self.target_column)?;
 
-                        return Ok(model.predict_with_raw_features(&dataset, &raw_features));
-                    }
-                }
-
-                Ok(model.predict(&dataset))
-            }
-            AutoTrainedModel::Ensemble(ensemble) => Ok(ensemble.predict(&dataset)),
-            AutoTrainedModel::LttEnsemble(ltt) => {
-                if let Some(ref extractor) = ltt.feature_extractor() {
-                    let (raw_features, _) = extractor.extract(&preprocessed_df, &self.target_column)?;
-                    Ok(ltt.predict_with_raw_features(&dataset, &raw_features))
-                } else {
-                    Ok(ltt.predict(&dataset))
-                }
+                return Ok(self
+                    .model
+                    .predict_with_raw_features(&dataset, &raw_features));
             }
         }
+
+        Ok(self.model.predict(&dataset))
     }
 
     /// Predict using only the linear component (LinearThenTree mode only)
@@ -210,50 +199,23 @@ impl AutoModel {
         // Use same preprocessing as full prediction
         let (preprocessed_df, dataset) = self.prepare_dataset_for_prediction(df)?;
 
-        match &self.model {
-            AutoTrainedModel::Universal(model) => {
-                // Extract features using FeatureExtractor
-                if let Some(ref extractor) = model.feature_extractor() {
-                    let (raw_features, _num_features) =
-                        extractor.extract(&preprocessed_df, &self.target_column)?;
+        // Extract features using FeatureExtractor
+        if let Some(ref extractor) = self.model.feature_extractor() {
+            let (raw_features, _num_features) =
+                extractor.extract(&preprocessed_df, &self.target_column)?;
 
-                    // Get linear-only predictions from the model
-                    return Ok(model.predict_linear_only(&dataset, &raw_features)?);
-                }
-
-                Err(TreeBoostError::Config(
-                    "LinearThenTree model missing FeatureExtractor - cannot predict".to_string(),
-                ))
-            }
-            AutoTrainedModel::Ensemble(_) => {
-                Err(TreeBoostError::Config(
-                    "predict_linear_only() not available for ensemble models".to_string(),
-                ))
-            }
-            AutoTrainedModel::LttEnsemble(ltt) => {
-                // For LTT Ensemble, compute base + shrinkage * linear predictions
-                if let Some(ref extractor) = ltt.feature_extractor() {
-                    let (raw_features, _num_features) =
-                        extractor.extract(&preprocessed_df, &self.target_column)?;
-
-                    // Use LTT's predict_linear_only (base + linear with shrinkage)
-                    return Ok(ltt.predict_linear_only(&dataset, &raw_features));
-                }
-
-                Err(TreeBoostError::Config(
-                    "LTT Ensemble model missing FeatureExtractor - cannot predict".to_string(),
-                ))
-            }
+            // Get linear-only predictions from the model
+            return Ok(self.model.predict_linear_only(&dataset, &raw_features)?);
         }
+
+        Err(TreeBoostError::Config(
+            "LinearThenTree model missing FeatureExtractor - cannot predict".to_string(),
+        ))
     }
 
     /// Predict on a BinnedDataset (for advanced users)
     pub fn predict_binned(&self, dataset: &BinnedDataset) -> Vec<f32> {
-        match &self.model {
-            AutoTrainedModel::Universal(model) => model.predict(dataset),
-            AutoTrainedModel::Ensemble(ensemble) => ensemble.predict(dataset),
-            AutoTrainedModel::LttEnsemble(ltt) => ltt.predict(dataset),
-        }
+        self.model.predict(dataset)
     }
 
     /// Get the boosting mode that was used
@@ -306,13 +268,17 @@ impl AutoModel {
         self.tree_tuning.as_ref()
     }
 
-    /// Get the underlying UniversalModel (if available)
-    pub fn inner(&self) -> Option<&UniversalModel> {
-        match &self.model {
-            AutoTrainedModel::Universal(model) => Some(model),
-            AutoTrainedModel::Ensemble(_) => None,
-            AutoTrainedModel::LttEnsemble(_) => None,
-        }
+    /// Get the underlying UniversalModel
+    pub fn inner(&self) -> &UniversalModel {
+        &self.model
+    }
+
+    /// Get the discovered UniversalConfig
+    ///
+    /// This returns the config that AutoModel discovered through analysis and tuning.
+    /// You can export this config to JSON and use it to retrain with UniversalModel directly.
+    pub fn config(&self) -> &crate::model::UniversalConfig {
+        self.model.config()
     }
 
     /// Get a comprehensive summary of the training process
@@ -553,11 +519,59 @@ impl AutoModel {
         Ok((preprocessed_df, dataset))
     }
 
-    // Note: save/load methods are not yet implemented for UniversalModel
-    // TODO: Add serialization support to UniversalModel and enable these methods
-    //
-    // pub fn save(&self, path: impl AsRef<Path>) -> Result<()>
-    // pub fn load(path: impl AsRef<Path>) -> Result<Self>
+    /// Export the discovered config to JSON
+    ///
+    /// This saves the UniversalConfig that AutoModel discovered through analysis and tuning.
+    /// You can load this config and use it to retrain with UniversalModel directly.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Train with AutoModel
+    /// let model = AutoModel::train(&df, "target")?;
+    ///
+    /// // Export the discovered config
+    /// model.save_config("optimal_config.json")?;
+    ///
+    /// // Later: Load and tweak the config
+    /// let config = UniversalConfig::load_json("optimal_config.json")?;
+    /// let tweaked = config.with_learning_rate(0.05); // Adjust as needed
+    ///
+    /// // Retrain with the tweaked config
+    /// let new_model = UniversalModel::train(&dataset, tweaked, &loss_fn)?;
+    /// ```
+    pub fn save_config(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        let config = self.config();
+
+        let json = serde_json::to_string_pretty(config).map_err(|e| {
+            TreeBoostError::Serialization(format!("Failed to serialize config to JSON: {}", e))
+        })?;
+
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Save the trained model to a file
+    ///
+    /// This saves the underlying UniversalModel (weights, trees, ensembles, etc.) for inference.
+    /// The model can be loaded later using `UniversalModel::load()`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Train and save both config and model
+    /// let model = AutoModel::train(&df, "target")?;
+    /// model.save_config("config.json")?;      // For retraining with AutoML
+    /// model.save("model.rkyv")?;               // For inference
+    ///
+    /// // Later: Load for inference only (not AutoML)
+    /// let loaded = UniversalModel::load("model.rkyv")?;
+    /// let preds = loaded.predict(&dataset)?;
+    /// ```
+    pub fn save(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        self.model.save(path)
+    }
+
 }
 
 impl std::fmt::Debug for AutoModel {
