@@ -60,6 +60,6 @@ pub use profiler::{
 };
 pub use report::{compact_summary, AnalysisReport};
 pub use stats::{
-    compute_correlation, compute_correlation_mixed, compute_mean, compute_r2, compute_range,
-    compute_std, compute_variance,
+    compute_correlation, compute_correlation_mixed, compute_mean, compute_mse, compute_r2,
+    compute_range, compute_std, compute_variance,
 };

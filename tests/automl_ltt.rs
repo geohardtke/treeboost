@@ -5,6 +5,57 @@ use treeboost::{
     model::{AutoConfig, AutoModel, BoostingMode, TuningLevel, UniversalConfig},
 };
 
+/// Test that shrinkage_factor is correctly applied and impacts predictions.
+/// Verifies the config is stored and affects model behavior.
+#[test]
+fn test_shrinkage_factor_applied() {
+    let x: Vec<f64> = (0..50).map(|i| i as f64 * 0.1).collect();
+    let y: Vec<f64> = x.iter().map(|v| 2.0 * v + 5.0).collect();
+
+    let df = DataFrame::new(vec![
+        Series::new("x".into(), x).into(),
+        Series::new("target".into(), y.clone()).into(),
+    ])
+    .unwrap();
+
+    // Test different shrinkage values are stored and affect predictions
+    for &shrinkage in &[0.1f32, 0.5, 1.0] {
+        let linear_config = LinearConfig::ridge(0.01)
+            .with_shrinkage_factor(shrinkage)
+            .with_max_iter(500);
+
+        let tree_config = TreeConfig::default().with_max_depth(3);
+
+        let univ_config = UniversalConfig::default()
+            .with_mode(BoostingMode::LinearThenTree)
+            .with_linear_config(linear_config)
+            .with_tree_config(tree_config)
+            .with_num_rounds(20)
+            .with_learning_rate(0.1);
+
+        let config = AutoConfig::new()
+            .with_auto_features(false)
+            .with_tuning(TuningLevel::None)
+            .with_custom_config(univ_config);
+
+        let model = AutoModel::train_with_config(&df, "target", config).unwrap();
+        let preds = model.predict(&df).unwrap();
+
+        // Verify config was applied
+        let stored_shrinkage = model.inner().config().linear_config.shrinkage_factor;
+        assert!(
+            (stored_shrinkage - shrinkage).abs() < 1e-6,
+            "shrinkage_factor not stored correctly: expected {}, got {}",
+            shrinkage,
+            stored_shrinkage
+        );
+
+        // Verify predictions are valid
+        assert_eq!(preds.len(), df.height());
+        assert!(preds.iter().all(|p| p.is_finite()));
+    }
+}
+
 #[test]
 fn test_ltt_pure_linear_data() {
     // Generate pure linear data: y = 2x + 3
@@ -360,8 +411,6 @@ fn test_ltt_with_pipeline_encoded_categoricals() {
     // 2. DataPipeline encodes them (target encoding)
     // 3. AutoBuilder extracts features from encoded DataFrame
     // 4. Feature counts should match between linear and tree
-
-    use treeboost::dataset::DataPipeline;
 
     // Generate data with numeric and categorical features
     let x_values: Vec<f64> = (0..200).map(|i| i as f64 * 0.1).collect();

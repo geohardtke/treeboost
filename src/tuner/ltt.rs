@@ -4,8 +4,9 @@
 //! hyperparameter spaces that must be tuned in sequence:
 //!
 //! 1. **Phase 1**: Tune linear model (alpha, l1_ratio)
-//! 2. **Phase 2**: Tune tree model on residuals (depth, learning_rate, etc.)
-//! 3. **Phase 3**: Joint refinement (shrinkage balancing)
+//! 2. **Phase 1.5**: Select shrinkage factor based on linear R²
+//! 3. **Phase 2**: Tune tree model on residuals (depth, learning_rate, etc.)
+//! 4. **Phase 3**: Joint refinement (extrapolation damping)
 //!
 //! # Why Sequential?
 //!
@@ -31,9 +32,62 @@
 //! println!("Best tree depth: {}", result.tree_params.max_depth);
 //! ```
 
+use crate::analysis::{compute_mse, compute_r2};
 use crate::learner::{LinearBooster, LinearConfig, WeakLearner};
-use crate::Result;
+use crate::{Result, TreeBoostError};
 use std::time::{Duration, Instant};
+
+// =============================================================================
+// Constants - Named values for all thresholds and heuristics
+// =============================================================================
+
+/// Shrinkage factor selection thresholds based on linear R²
+mod shrinkage_thresholds {
+    /// R² above this indicates strong linear signal → prefer higher shrinkage
+    pub const STRONG_LINEAR_R2: f32 = 0.6;
+    /// R² below this indicates weak linear signal → prefer lower shrinkage
+    pub const WEAK_LINEAR_R2: f32 = 0.3;
+    /// Minimum shrinkage to consider when linear signal is strong
+    pub const HIGH_SHRINKAGE_MIN: f32 = 0.5;
+    /// Maximum shrinkage to consider when linear signal is weak
+    pub const LOW_SHRINKAGE_MAX: f32 = 0.7;
+    /// Default shrinkage factor when no better option found
+    pub const DEFAULT_SHRINKAGE: f32 = 0.7;
+}
+
+/// Tree heuristic scoring parameters
+mod tree_scoring {
+    /// Residual std threshold for switching scoring strategies
+    pub const HIGH_VARIANCE_THRESHOLD: f32 = 1.0;
+
+    // High variance weights (complex residuals need deeper trees)
+    /// Weight for depth when residuals are high variance
+    pub const DEPTH_WEIGHT_HIGH_VAR: f32 = 0.15;
+    /// Weight for num_rounds when residuals are high variance
+    pub const ROUNDS_WEIGHT_HIGH_VAR: f32 = 0.001;
+    /// Penalty for learning rate when residuals are high variance (stability)
+    pub const LR_PENALTY_HIGH_VAR: f32 = 0.5;
+
+    // Low variance weights (simple residuals need simpler trees)
+    /// Weight for depth when residuals are low variance
+    pub const DEPTH_WEIGHT_LOW_VAR: f32 = 0.1;
+    /// Weight for learning rate when residuals are low variance
+    pub const LR_WEIGHT_LOW_VAR: f32 = 1.0;
+    /// Penalty for num_rounds when residuals are low variance
+    pub const ROUNDS_PENALTY_LOW_VAR: f32 = 0.0005;
+
+    // Extreme configuration penalties
+    /// Depth threshold above which to penalize
+    pub const MAX_DEPTH_THRESHOLD: u32 = 8;
+    /// Learning rate threshold below which to penalize
+    pub const MIN_LR_THRESHOLD: f32 = 0.02;
+    /// Penalty value for extreme configurations
+    pub const EXTREME_CONFIG_PENALTY: f32 = 0.1;
+}
+
+// =============================================================================
+// Data Structures
+// =============================================================================
 
 /// Linear phase hyperparameters
 #[derive(Debug, Clone, Copy)]
@@ -46,6 +100,11 @@ pub struct LinearHyperparams {
     /// Range: [0.0, 1.0]
     pub l1_ratio: f32,
 
+    /// Shrinkage factor for ensemble weighting
+    /// Controls how much linear model contributes to final prediction
+    /// Range: [0.1, 1.0]. Higher = trust linear more.
+    pub shrinkage_factor: f32,
+
     /// Extrapolation damping toward target mean for OOD safety
     /// Range: [0.0, 0.5]
     pub extrapolation_damping: f32,
@@ -56,6 +115,7 @@ impl Default for LinearHyperparams {
         Self {
             lambda: 1.0,
             l1_ratio: 0.0, // Ridge by default
+            shrinkage_factor: shrinkage_thresholds::DEFAULT_SHRINKAGE,
             extrapolation_damping: 0.0,
         }
     }
@@ -67,6 +127,7 @@ impl LinearHyperparams {
         Self {
             lambda: 1.0,
             l1_ratio: 0.0,
+            shrinkage_factor: shrinkage_thresholds::DEFAULT_SHRINKAGE,
             extrapolation_damping: 0.0,
         }
     }
@@ -76,6 +137,7 @@ impl LinearHyperparams {
         Self {
             lambda: 1.0,
             l1_ratio: 1.0,
+            shrinkage_factor: shrinkage_thresholds::DEFAULT_SHRINKAGE,
             extrapolation_damping: 0.0,
         }
     }
@@ -85,6 +147,7 @@ impl LinearHyperparams {
         Self {
             lambda: 1.0,
             l1_ratio: 0.5,
+            shrinkage_factor: shrinkage_thresholds::DEFAULT_SHRINKAGE,
             extrapolation_damping: 0.0,
         }
     }
@@ -94,6 +157,7 @@ impl LinearHyperparams {
         LinearConfig::default()
             .with_lambda(self.lambda)
             .with_l1_ratio(self.l1_ratio)
+            .with_shrinkage_factor(self.shrinkage_factor)
             .with_extrapolation_damping(self.extrapolation_damping)
     }
 }
@@ -241,10 +305,56 @@ pub struct JointTrial {
     pub combined_rmse: f32,
 }
 
+// =============================================================================
+// Data Split - Encapsulates train/validation data to reduce parameter count
+// =============================================================================
+
+/// Encapsulates train/validation split data
+///
+/// This struct groups related data to reduce function parameter count
+/// and make the API cleaner.
+struct DataSplit<'a> {
+    train_features: &'a [f32],
+    train_targets: &'a [f32],
+    val_features: &'a [f32],
+    val_targets: &'a [f32],
+    num_features: usize,
+}
+
+impl<'a> DataSplit<'a> {
+    fn new(
+        train_features: &'a [f32],
+        train_targets: &'a [f32],
+        val_features: &'a [f32],
+        val_targets: &'a [f32],
+        num_features: usize,
+    ) -> Self {
+        Self {
+            train_features,
+            train_targets,
+            val_features,
+            val_targets,
+            num_features,
+        }
+    }
+}
+
+/// Result of evaluating a linear configuration
+struct LinearEvalResult {
+    train_preds: Vec<f32>,
+    val_preds: Vec<f32>,
+    r2: f32,
+    rmse: f32,
+}
+
+// =============================================================================
+// LTT Tuner Configuration
+// =============================================================================
+
 /// LTT Tuner configuration
 #[derive(Debug, Clone)]
 pub struct LttTunerConfig {
-    /// Validation split ratio
+    /// Validation split ratio (must be in (0.0, 1.0))
     pub val_ratio: f32,
 
     // Linear phase config
@@ -261,9 +371,14 @@ pub struct LttTunerConfig {
     /// Num rounds values to try
     pub num_rounds_values: Vec<u32>,
 
-    // Joint refinement config
-    /// Prediction shrinkage values to try
-    pub shrinkage_values: Vec<f32>,
+    // Shrinkage factor tuning (Phase 1.5)
+    /// Shrinkage factor values to try for ensemble weighting
+    /// These control how much linear model contributes vs trees
+    pub shrinkage_factor_values: Vec<f32>,
+
+    // Joint refinement config (extrapolation damping)
+    /// Extrapolation damping values to try
+    pub extrapolation_damping_values: Vec<f32>,
     /// Enable joint refinement phase
     pub enable_joint_refinement: bool,
 
@@ -282,8 +397,10 @@ impl Default for LttTunerConfig {
             max_depth_values: vec![4, 6, 8],
             learning_rate_values: vec![0.05, 0.1, 0.15],
             num_rounds_values: vec![300, 500, 800],
-            // Joint refinement: 5 trials
-            shrinkage_values: vec![0.0, 0.1, 0.2, 0.3, 0.4],
+            // Shrinkage factor: 5 values centered around typical optimal (0.5-0.9)
+            shrinkage_factor_values: vec![0.3, 0.5, 0.7, 0.85, 1.0],
+            // Extrapolation damping: usually 0 unless OOD is a concern
+            extrapolation_damping_values: vec![0.0, 0.1, 0.2],
             enable_joint_refinement: true,
             seed: 42,
         }
@@ -300,8 +417,10 @@ impl LttTunerConfig {
             max_depth_values: vec![4, 6],
             learning_rate_values: vec![0.05, 0.1],
             num_rounds_values: vec![300, 500],
-            shrinkage_values: vec![0.0, 0.2],
-            enable_joint_refinement: true,
+            // Quick: 3 shrinkage values
+            shrinkage_factor_values: vec![0.5, 0.7, 1.0],
+            extrapolation_damping_values: vec![0.0],
+            enable_joint_refinement: false, // Skip for quick mode
             seed: 42,
         }
     }
@@ -315,12 +434,69 @@ impl LttTunerConfig {
             max_depth_values: vec![3, 4, 5, 6, 7, 8],
             learning_rate_values: vec![0.01, 0.03, 0.05, 0.1, 0.15, 0.2],
             num_rounds_values: vec![200, 400, 600, 800, 1000],
-            shrinkage_values: vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
+            // Thorough: 7 shrinkage values
+            shrinkage_factor_values: vec![0.2, 0.4, 0.5, 0.6, 0.7, 0.85, 1.0],
+            extrapolation_damping_values: vec![0.0, 0.1, 0.2, 0.3],
             enable_joint_refinement: true,
             seed: 42,
         }
     }
+
+    /// Validate configuration parameters
+    fn validate(&self) -> Result<()> {
+        // Validate val_ratio
+        if self.val_ratio <= 0.0 || self.val_ratio >= 1.0 {
+            return Err(TreeBoostError::Config(format!(
+                "val_ratio must be in (0.0, 1.0), got {}",
+                self.val_ratio
+            )));
+        }
+
+        // Validate non-empty configuration grids
+        if self.lambda_values.is_empty() {
+            return Err(TreeBoostError::Config(
+                "lambda_values cannot be empty".into(),
+            ));
+        }
+        if self.l1_ratio_values.is_empty() {
+            return Err(TreeBoostError::Config(
+                "l1_ratio_values cannot be empty".into(),
+            ));
+        }
+        if self.max_depth_values.is_empty() {
+            return Err(TreeBoostError::Config(
+                "max_depth_values cannot be empty".into(),
+            ));
+        }
+        if self.learning_rate_values.is_empty() {
+            return Err(TreeBoostError::Config(
+                "learning_rate_values cannot be empty".into(),
+            ));
+        }
+        if self.num_rounds_values.is_empty() {
+            return Err(TreeBoostError::Config(
+                "num_rounds_values cannot be empty".into(),
+            ));
+        }
+        if self.shrinkage_factor_values.is_empty() {
+            return Err(TreeBoostError::Config(
+                "shrinkage_factor_values cannot be empty".into(),
+            ));
+        }
+        if self.enable_joint_refinement && self.extrapolation_damping_values.is_empty() {
+            return Err(TreeBoostError::Config(
+                "extrapolation_damping_values cannot be empty when joint refinement is enabled"
+                    .into(),
+            ));
+        }
+
+        Ok(())
+    }
 }
+
+// =============================================================================
+// LTT Tuner Implementation
+// =============================================================================
 
 /// LTT Tuner for sequential hyperparameter optimization
 pub struct LttTuner {
@@ -345,7 +521,7 @@ impl LttTuner {
             * self.config.learning_rate_values.len()
             * self.config.num_rounds_values.len();
         let joint_trials = if self.config.enable_joint_refinement {
-            self.config.shrinkage_values.len()
+            self.config.extrapolation_damping_values.len()
         } else {
             0
         };
@@ -361,28 +537,44 @@ impl LttTuner {
     ///
     /// # Returns
     /// Best configuration and tuning history
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// - Configuration is invalid (empty grids, bad val_ratio)
+    /// - Input data is invalid (empty, mismatched dimensions)
+    /// - Split produces empty train/validation sets
     pub fn tune(
         &self,
         features: &[f32],
         num_features: usize,
         targets: &[f32],
     ) -> Result<LttTuningResult> {
+        // === Comprehensive input validation ===
+        self.validate_inputs(features, num_features, targets)?;
+
         let start = Instant::now();
         let mut history = LttTuningHistory::default();
         let mut phase_times = PhaseTimes::default();
 
         let num_rows = targets.len();
-        if features.len() != num_rows * num_features {
-            return Err(crate::TreeBoostError::Data(format!(
-                "Feature matrix size mismatch: expected {}, got {}",
-                num_rows * num_features,
-                features.len()
-            )));
-        }
 
         // Create train/val split indices
-        let val_size = (num_rows as f32 * self.config.val_ratio) as usize;
+        let val_size = ((num_rows as f32) * self.config.val_ratio).ceil() as usize;
         let train_size = num_rows - val_size;
+
+        // Validate split produces valid sets
+        if train_size == 0 {
+            return Err(TreeBoostError::Data(format!(
+                "Train/val split produced empty training set (val_ratio={}, num_rows={})",
+                self.config.val_ratio, num_rows
+            )));
+        }
+        if val_size == 0 {
+            return Err(TreeBoostError::Data(format!(
+                "Train/val split produced empty validation set (val_ratio={}, num_rows={})",
+                self.config.val_ratio, num_rows
+            )));
+        }
 
         // Simple split (last val_ratio% as validation)
         let train_indices: Vec<usize> = (0..train_size).collect();
@@ -394,49 +586,49 @@ impl LttTuner {
         let (val_features, val_targets) =
             Self::extract_split(features, targets, num_features, &val_indices);
 
-        // === PHASE 1: Tune linear model ===
-        let phase1_start = Instant::now();
-        let (best_linear, linear_r2, linear_train_preds) = self.tune_linear_phase(
+        let split = DataSplit::new(
             &train_features,
             &train_targets,
             &val_features,
             &val_targets,
             num_features,
-            &mut history,
-        )?;
+        );
+
+        // === PHASE 1: Tune linear model (lambda, l1_ratio) ===
+        let phase1_start = Instant::now();
+        let (mut best_linear, linear_r2, linear_train_preds, linear_val_preds) =
+            self.tune_linear_phase(&split, &mut history)?;
         phase_times.linear_phase = phase1_start.elapsed();
 
-        // Compute residuals on training set for tree phase
+        // === PHASE 1.5: Select shrinkage_factor based on linear R² ===
+        // This determines how much to trust linear vs trees
+        let best_shrinkage =
+            self.select_shrinkage_factor(linear_r2, &linear_val_preds, &val_targets);
+        best_linear.shrinkage_factor = best_shrinkage;
+
+        // Compute residuals WITH shrinkage applied
+        // Trees will learn to fix what's left AFTER shrinkage scaling
         let train_residuals: Vec<f32> = train_targets
             .iter()
             .zip(linear_train_preds.iter())
-            .map(|(&t, &p)| t - p)
+            .map(|(&t, &p)| t - best_shrinkage * p)
             .collect();
 
-        // === PHASE 2: Tune tree model on residuals ===
+        // === PHASE 2: Tune tree model on shrinkage-adjusted residuals ===
         let phase2_start = Instant::now();
         let best_tree = self.tune_tree_phase(&train_residuals, &mut history)?;
         phase_times.tree_phase = phase2_start.elapsed();
 
-        // === PHASE 3: Joint refinement (optional) ===
+        // === PHASE 3: Joint refinement (extrapolation damping, optional) ===
         let mut final_linear = best_linear;
         if self.config.enable_joint_refinement {
             let phase3_start = Instant::now();
-            final_linear = self.tune_joint_phase(
-                &train_features,
-                &train_targets,
-                &val_features,
-                &val_targets,
-                num_features,
-                &best_linear,
-                &mut history,
-            )?;
+            final_linear = self.tune_joint_phase(&split, &best_linear, &mut history)?;
             phase_times.joint_phase = phase3_start.elapsed();
         }
 
         // Compute final RMSE
-        let final_rmse =
-            self.compute_final_rmse(&final_linear, &val_features, &val_targets, num_features)?;
+        let final_rmse = self.compute_final_rmse(&final_linear, &split)?;
 
         Ok(LttTuningResult {
             linear_params: final_linear,
@@ -447,6 +639,56 @@ impl LttTuner {
             phase_times,
             history,
         })
+    }
+
+    /// Comprehensive input validation
+    fn validate_inputs(
+        &self,
+        features: &[f32],
+        num_features: usize,
+        targets: &[f32],
+    ) -> Result<()> {
+        // Validate configuration
+        self.config.validate()?;
+
+        // Validate num_features
+        if num_features == 0 {
+            return Err(TreeBoostError::Data(
+                "num_features must be greater than 0".into(),
+            ));
+        }
+
+        // Validate non-empty inputs
+        if targets.is_empty() {
+            return Err(TreeBoostError::Data("targets cannot be empty".into()));
+        }
+        if features.is_empty() {
+            return Err(TreeBoostError::Data("features cannot be empty".into()));
+        }
+
+        // Validate feature matrix dimensions
+        let num_rows = targets.len();
+        let expected_features = num_rows * num_features;
+        if features.len() != expected_features {
+            return Err(TreeBoostError::Data(format!(
+                "Feature matrix size mismatch: expected {} ({}×{}), got {}",
+                expected_features,
+                num_rows,
+                num_features,
+                features.len()
+            )));
+        }
+
+        // Validate minimum data size for meaningful tuning
+        let min_rows = 10; // Need at least some data for train/val split
+        if num_rows < min_rows {
+            return Err(TreeBoostError::Data(format!(
+                "Insufficient data for tuning: need at least {} rows, got {}",
+                min_rows, num_rows
+            )));
+        }
+
+        Ok(())
     }
 
     /// Extract features and targets for a subset of indices
@@ -469,19 +711,61 @@ impl LttTuner {
         (split_features, split_targets)
     }
 
-    /// Phase 1: Tune linear model hyperparameters
+    // =========================================================================
+    // Helper: Linear Model Evaluation (eliminates code duplication)
+    // =========================================================================
+
+    /// Train and evaluate a linear model configuration
+    ///
+    /// This helper method encapsulates the common pattern of:
+    /// 1. Creating a LinearBooster with given config
+    /// 2. Fitting on training data
+    /// 3. Predicting on validation data
+    /// 4. Computing metrics (R², RMSE)
+    ///
+    /// Used by tune_linear_phase, tune_joint_phase, and compute_final_rmse.
+    fn evaluate_linear_config(config: LinearConfig, split: &DataSplit) -> Result<LinearEvalResult> {
+        let mut booster = LinearBooster::new(split.num_features, config);
+
+        // Fit on training data
+        let train_preds = booster.fit_direct(
+            split.train_features,
+            split.num_features,
+            split.train_targets,
+        )?;
+
+        // Predict on validation data
+        let val_preds = booster.predict_batch(split.val_features, split.num_features);
+
+        // Compute metrics using shared utilities
+        let r2 = compute_r2(split.val_targets, &val_preds);
+        let mse = compute_mse(split.val_targets, &val_preds);
+        let rmse = mse.sqrt();
+
+        Ok(LinearEvalResult {
+            train_preds,
+            val_preds,
+            r2,
+            rmse,
+        })
+    }
+
+    // =========================================================================
+    // Phase 1: Linear Model Tuning
+    // =========================================================================
+
+    /// Phase 1: Tune linear model hyperparameters (lambda, l1_ratio)
+    ///
+    /// Returns: (best_params, best_r2, train_preds, val_preds)
     fn tune_linear_phase(
         &self,
-        train_features: &[f32],
-        train_targets: &[f32],
-        val_features: &[f32],
-        val_targets: &[f32],
-        num_features: usize,
+        split: &DataSplit,
         history: &mut LttTuningHistory,
-    ) -> Result<(LinearHyperparams, f32, Vec<f32>)> {
+    ) -> Result<(LinearHyperparams, f32, Vec<f32>, Vec<f32>)> {
         let mut best_params = LinearHyperparams::default();
         let mut best_r2 = f32::NEG_INFINITY;
-        let mut best_train_preds = Vec::new();
+        let mut best_train_preds: Option<Vec<f32>> = None;
+        let mut best_val_preds: Option<Vec<f32>> = None;
 
         for &lambda in &self.config.lambda_values {
             for &l1_ratio in &self.config.l1_ratio_values {
@@ -489,74 +773,203 @@ impl LttTuner {
                     .with_lambda(lambda)
                     .with_l1_ratio(l1_ratio);
 
-                let mut booster = LinearBooster::new(num_features, config);
-
-                // Use fit_direct for direct regression (not gradient boosting)
-                let train_preds =
-                    booster.fit_direct(train_features, num_features, train_targets)?;
-
-                // Compute validation metrics
-                let val_preds = booster.predict_batch(val_features, num_features);
-                let (r2, rmse) = Self::compute_regression_metrics(&val_preds, val_targets);
+                let eval_result = Self::evaluate_linear_config(config, split)?;
 
                 history.linear_trials.push(LinearTrial {
                     lambda,
                     l1_ratio,
-                    r2,
-                    rmse,
+                    r2: eval_result.r2,
+                    rmse: eval_result.rmse,
                 });
 
-                if r2 > best_r2 {
-                    best_r2 = r2;
+                if eval_result.r2 > best_r2 {
+                    best_r2 = eval_result.r2;
                     best_params = LinearHyperparams {
                         lambda,
                         l1_ratio,
+                        shrinkage_factor: shrinkage_thresholds::DEFAULT_SHRINKAGE,
                         extrapolation_damping: 0.0,
                     };
-                    best_train_preds = train_preds;
+                    best_train_preds = Some(eval_result.train_preds);
+                    best_val_preds = Some(eval_result.val_preds);
                 }
             }
         }
 
-        Ok((best_params, best_r2, best_train_preds))
+        // Safety: We validated config has non-empty grids, so at least one iteration ran
+        let train_preds = best_train_preds
+            .ok_or_else(|| TreeBoostError::Training("Linear phase produced no results".into()))?;
+        let val_preds = best_val_preds
+            .ok_or_else(|| TreeBoostError::Training("Linear phase produced no results".into()))?;
+
+        Ok((best_params, best_r2, train_preds, val_preds))
     }
+
+    // =========================================================================
+    // Phase 1.5: Shrinkage Factor Selection
+    // =========================================================================
+
+    /// Phase 1.5: Select optimal shrinkage_factor (ensemble weight tuning)
+    ///
+    /// After the linear model is trained, this phase decides how much weight to
+    /// give the linear model in the final ensemble:
+    /// - shrinkage = 1.0 → fully trust linear predictions (trees fit residuals as-is)
+    /// - shrinkage < 1.0 → scale down linear predictions, trees fit larger residuals
+    ///
+    /// # Strategy
+    ///
+    /// 1. Use R² as proxy for linear model quality
+    /// 2. Strong R² (>0.6) → prefer higher shrinkage (trust linear more)
+    /// 3. Weak R² (<0.3) → prefer lower shrinkage (rely more on trees)
+    /// 4. Medium → try all configured values
+    ///
+    /// This heuristic reduces search space from O(N³) to O(N) dimensions.
+    ///
+    /// # Arguments
+    /// * `linear_r2` - R² from Phase 1 linear tuning
+    /// * `linear_val_preds` - Validation predictions from best linear model
+    /// * `val_targets` - Validation target values
+    fn select_shrinkage_factor(
+        &self,
+        linear_r2: f32,
+        linear_val_preds: &[f32],
+        val_targets: &[f32],
+    ) -> f32 {
+        use shrinkage_thresholds::*;
+
+        // If only one shrinkage value configured, use it
+        if self.config.shrinkage_factor_values.len() <= 1 {
+            return self
+                .config
+                .shrinkage_factor_values
+                .first()
+                .copied()
+                .unwrap_or(DEFAULT_SHRINKAGE);
+        }
+
+        // Use R² to narrow the search range (heuristic filtering)
+        let candidates: Vec<f32> = if linear_r2 > STRONG_LINEAR_R2 {
+            // Strong linear signal: prefer higher shrinkage values
+            self.config
+                .shrinkage_factor_values
+                .iter()
+                .filter(|&&s| s >= HIGH_SHRINKAGE_MIN)
+                .copied()
+                .collect()
+        } else if linear_r2 < WEAK_LINEAR_R2 {
+            // Weak linear signal: prefer lower shrinkage values
+            self.config
+                .shrinkage_factor_values
+                .iter()
+                .filter(|&&s| s <= LOW_SHRINKAGE_MAX)
+                .copied()
+                .collect()
+        } else {
+            // Medium R²: try all configured values
+            self.config.shrinkage_factor_values.clone()
+        };
+
+        // If filtering left no candidates, use all
+        let candidates = if candidates.is_empty() {
+            self.config.shrinkage_factor_values.clone()
+        } else {
+            candidates
+        };
+
+        // Quick evaluation: which shrinkage gives lowest residual variance?
+        // Lower residual variance = easier for trees = better ensemble
+        // Note: This is a simplified evaluation - trees aren't trained yet,
+        // but it gives a reasonable estimate based on linear contribution.
+        let mut best_shrinkage = DEFAULT_SHRINKAGE;
+        let mut best_metric = f32::INFINITY;
+
+        for &shrinkage in &candidates {
+            // Compute residual variance with this shrinkage
+            let residual_var: f32 = linear_val_preds
+                .iter()
+                .zip(val_targets.iter())
+                .map(|(&p, &t)| {
+                    let residual = t - shrinkage * p;
+                    residual * residual
+                })
+                .sum::<f32>()
+                / val_targets.len().max(1) as f32;
+
+            if residual_var < best_metric {
+                best_metric = residual_var;
+                best_shrinkage = shrinkage;
+            }
+        }
+
+        best_shrinkage
+    }
+
+    // =========================================================================
+    // Phase 2: Tree Model Tuning
+    // =========================================================================
 
     /// Phase 2: Tune tree model hyperparameters on residuals
     ///
-    /// Note: This is a simplified version that selects tree params based on heuristics.
-    /// A full implementation would train actual GBDTModel on residuals and evaluate.
+    /// Uses heuristic scoring based on residual characteristics to select
+    /// optimal tree configuration. This is a simplified version that avoids
+    /// training actual trees during tuning.
+    ///
+    /// # Heuristic Strategy
+    ///
+    /// - High variance residuals (std > 1.0):
+    ///   - Prefer deeper trees and more rounds (capture complexity)
+    ///   - Lower learning rate for stability
+    ///
+    /// - Low variance residuals:
+    ///   - Simpler trees suffice
+    ///   - Higher learning rate acceptable
+    ///   - Fewer rounds needed
+    ///
+    /// A full implementation would train actual GBDTModel on residuals.
     fn tune_tree_phase(
         &self,
         residuals: &[f32],
         history: &mut LttTuningHistory,
     ) -> Result<TreeHyperparams> {
+        use tree_scoring::*;
+
         let mut best_params = TreeHyperparams::default();
         let mut best_score = f32::NEG_INFINITY;
 
         // Compute residual statistics to inform tree param selection
         let residual_std = crate::analysis::compute_std(residuals);
         let residual_range = crate::analysis::compute_range(residuals);
+        let is_high_variance = residual_std > HIGH_VARIANCE_THRESHOLD;
 
         for &max_depth in &self.config.max_depth_values {
             for &learning_rate in &self.config.learning_rate_values {
                 for &num_rounds in &self.config.num_rounds_values {
-                    // Heuristic scoring based on residual characteristics
-                    // Higher residual variance suggests need for more complex trees
-                    let complexity_score = if residual_std > 1.0 {
-                        // High variance residuals: prefer deeper trees, more rounds
-                        (max_depth as f32 * 0.15) + (num_rounds as f32 * 0.001)
-                            - (learning_rate * 0.5) // Lower LR for stability
+                    // Compute complexity score based on residual characteristics
+                    let complexity_score = if is_high_variance {
+                        // High variance: prefer deeper trees, more rounds, lower LR
+                        (max_depth as f32 * DEPTH_WEIGHT_HIGH_VAR)
+                            + (num_rounds as f32 * ROUNDS_WEIGHT_HIGH_VAR)
+                            - (learning_rate * LR_PENALTY_HIGH_VAR)
                     } else {
-                        // Low variance residuals: simpler trees suffice
-                        (max_depth as f32 * 0.1) + (learning_rate * 1.0)
-                            - (num_rounds as f32 * 0.0005) // Fewer rounds needed
+                        // Low variance: simpler trees, higher LR, fewer rounds
+                        (max_depth as f32 * DEPTH_WEIGHT_LOW_VAR)
+                            + (learning_rate * LR_WEIGHT_LOW_VAR)
+                            - (num_rounds as f32 * ROUNDS_PENALTY_LOW_VAR)
                     };
 
-                    // Penalize extreme configurations
-                    let penalty = if max_depth > 8 { 0.1 } else { 0.0 }
-                        + if learning_rate < 0.02 { 0.1 } else { 0.0 };
+                    // Apply penalties for extreme configurations
+                    let depth_penalty = if max_depth > MAX_DEPTH_THRESHOLD {
+                        EXTREME_CONFIG_PENALTY
+                    } else {
+                        0.0
+                    };
+                    let lr_penalty = if learning_rate < MIN_LR_THRESHOLD {
+                        EXTREME_CONFIG_PENALTY
+                    } else {
+                        0.0
+                    };
 
-                    let score = complexity_score - penalty;
+                    let score = complexity_score - depth_penalty - lr_penalty;
                     let simulated_rmse = residual_range / (1.0 + score.abs());
 
                     history.tree_trials.push(TreeTrial {
@@ -584,41 +997,41 @@ impl LttTuner {
         Ok(best_params)
     }
 
-    /// Phase 3: Joint refinement (prediction shrinkage tuning)
-    #[allow(clippy::too_many_arguments)]
+    // =========================================================================
+    // Phase 3: Joint Refinement
+    // =========================================================================
+
+    /// Phase 3: Joint refinement (extrapolation damping tuning)
+    ///
+    /// Fine-tunes the extrapolation damping parameter which controls how
+    /// predictions are dampened toward the target mean for out-of-distribution
+    /// safety.
     fn tune_joint_phase(
         &self,
-        train_features: &[f32],
-        train_targets: &[f32],
-        val_features: &[f32],
-        val_targets: &[f32],
-        num_features: usize,
+        split: &DataSplit,
         linear_params: &LinearHyperparams,
         history: &mut LttTuningHistory,
     ) -> Result<LinearHyperparams> {
         let mut best_params = *linear_params;
         let mut best_rmse = f32::INFINITY;
 
-        for &shrinkage in &self.config.shrinkage_values {
+        for &damping in &self.config.extrapolation_damping_values {
             let config = LinearConfig::default()
                 .with_lambda(linear_params.lambda)
                 .with_l1_ratio(linear_params.l1_ratio)
-                .with_extrapolation_damping(shrinkage);
+                .with_shrinkage_factor(linear_params.shrinkage_factor)
+                .with_extrapolation_damping(damping);
 
-            let mut booster = LinearBooster::new(num_features, config);
-            booster.fit_direct(train_features, num_features, train_targets)?;
-
-            let val_preds = booster.predict_batch(val_features, num_features);
-            let (_, rmse) = Self::compute_regression_metrics(&val_preds, val_targets);
+            let eval_result = Self::evaluate_linear_config(config, split)?;
 
             history.joint_trials.push(JointTrial {
-                extrapolation_damping: shrinkage,
-                combined_rmse: rmse,
+                extrapolation_damping: damping,
+                combined_rmse: eval_result.rmse,
             });
 
-            if rmse < best_rmse {
-                best_rmse = rmse;
-                best_params.extrapolation_damping = shrinkage;
+            if eval_result.rmse < best_rmse {
+                best_rmse = eval_result.rmse;
+                best_params.extrapolation_damping = damping;
             }
         }
 
@@ -629,49 +1042,11 @@ impl LttTuner {
     fn compute_final_rmse(
         &self,
         linear_params: &LinearHyperparams,
-        val_features: &[f32],
-        val_targets: &[f32],
-        num_features: usize,
+        split: &DataSplit,
     ) -> Result<f32> {
         let config = linear_params.to_config();
-        let mut booster = LinearBooster::new(num_features, config);
-        booster.fit_direct(val_features, num_features, val_targets)?;
-
-        let val_preds = booster.predict_batch(val_features, num_features);
-        let (_, rmse) = Self::compute_regression_metrics(&val_preds, val_targets);
-
-        Ok(rmse)
-    }
-
-    /// Compute R² and RMSE for regression
-    fn compute_regression_metrics(predictions: &[f32], targets: &[f32]) -> (f32, f32) {
-        let n = predictions.len() as f32;
-        if n == 0.0 {
-            return (0.0, f32::INFINITY);
-        }
-
-        let mean_target: f32 = targets.iter().sum::<f32>() / n;
-
-        let mut ss_res = 0.0f32;
-        let mut ss_tot = 0.0f32;
-        let mut mse = 0.0f32;
-
-        for (&pred, &target) in predictions.iter().zip(targets.iter()) {
-            let residual = target - pred;
-            ss_res += residual * residual;
-            ss_tot += (target - mean_target).powi(2);
-            mse += residual * residual;
-        }
-
-        let r2 = if ss_tot > 0.0 {
-            1.0 - (ss_res / ss_tot)
-        } else {
-            0.0
-        };
-
-        let rmse = (mse / n).sqrt();
-
-        (r2, rmse)
+        let eval_result = Self::evaluate_linear_config(config, split)?;
+        Ok(eval_result.rmse)
     }
 }
 
@@ -680,6 +1055,10 @@ impl Default for LttTuner {
         Self::with_defaults()
     }
 }
+
+// =============================================================================
+// Tests
+// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -690,6 +1069,10 @@ mod tests {
         let params = LinearHyperparams::default();
         assert_eq!(params.lambda, 1.0);
         assert_eq!(params.l1_ratio, 0.0); // Ridge
+        assert_eq!(
+            params.shrinkage_factor,
+            shrinkage_thresholds::DEFAULT_SHRINKAGE
+        );
         assert_eq!(params.extrapolation_damping, 0.0);
     }
 
@@ -719,7 +1102,7 @@ mod tests {
         let tree_trials = config.max_depth_values.len()
             * config.learning_rate_values.len()
             * config.num_rounds_values.len();
-        let joint_trials = config.shrinkage_values.len();
+        let joint_trials = config.extrapolation_damping_values.len();
 
         assert_eq!(
             tuner.estimated_trials(),
@@ -728,27 +1111,56 @@ mod tests {
     }
 
     #[test]
-    fn test_regression_metrics() {
-        let predictions = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let targets = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+    fn test_config_validation_empty_grids() {
+        let mut config = LttTunerConfig::default();
+        config.lambda_values = vec![];
 
-        let (r2, rmse) = LttTuner::compute_regression_metrics(&predictions, &targets);
-
-        // Perfect predictions
-        assert!((r2 - 1.0).abs() < 0.001);
-        assert!(rmse.abs() < 0.001);
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("lambda_values"));
     }
 
     #[test]
-    fn test_regression_metrics_imperfect() {
-        let predictions = vec![1.0, 2.5, 2.5, 4.0, 5.5];
-        let targets = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+    fn test_config_validation_bad_val_ratio() {
+        let mut config = LttTunerConfig::default();
+        config.val_ratio = 1.5; // Invalid
 
-        let (r2, rmse) = LttTuner::compute_regression_metrics(&predictions, &targets);
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("val_ratio"));
+    }
 
-        // Should have reasonable R² but non-zero RMSE
-        assert!(r2 > 0.0 && r2 < 1.0);
-        assert!(rmse > 0.0);
+    #[test]
+    fn test_input_validation_empty_targets() {
+        let tuner = LttTuner::with_defaults();
+        let features = vec![1.0, 2.0, 3.0];
+        let targets: Vec<f32> = vec![];
+
+        let result = tuner.tune(&features, 1, &targets);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn test_input_validation_zero_features() {
+        let tuner = LttTuner::with_defaults();
+        let features = vec![1.0, 2.0, 3.0];
+        let targets = vec![1.0, 2.0, 3.0];
+
+        let result = tuner.tune(&features, 0, &targets);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("num_features"));
+    }
+
+    #[test]
+    fn test_input_validation_dimension_mismatch() {
+        let tuner = LttTuner::with_defaults();
+        let features = vec![1.0, 2.0, 3.0]; // 3 elements
+        let targets = vec![1.0, 2.0]; // 2 rows, but features suggest 3×1
+
+        let result = tuner.tune(&features, 1, &targets);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mismatch"));
     }
 
     #[test]
@@ -769,7 +1181,9 @@ mod tests {
         let config = LttTunerConfig::quick();
         let tuner = LttTuner::new(config);
 
-        let result = tuner.tune(&features, num_features, &targets).unwrap();
+        let result = tuner
+            .tune(&features, num_features, &targets)
+            .expect("LTT tuner should successfully fit linear data");
 
         // Should find reasonable hyperparameters
         assert!(result.linear_r2 > 0.5, "R² should be > 0.5 for linear data");
@@ -783,6 +1197,7 @@ mod tests {
         let params = LinearHyperparams {
             lambda: 0.5,
             l1_ratio: 0.3,
+            shrinkage_factor: 0.8,
             extrapolation_damping: 0.1,
         };
 
@@ -790,6 +1205,62 @@ mod tests {
 
         assert!((config.lambda - 0.5).abs() < 1e-6);
         assert!((config.l1_ratio - 0.3).abs() < 1e-6);
+        assert!((config.shrinkage_factor - 0.8).abs() < 1e-6);
         assert!((config.extrapolation_damping - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_shrinkage_factor_selection_strong_linear() {
+        let config = LttTunerConfig::default();
+        let tuner = LttTuner::new(config);
+
+        // Strong linear R² should prefer higher shrinkage
+        let high_r2 = 0.8;
+        let preds = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let targets = vec![1.0, 2.0, 3.0, 4.0, 5.0]; // Perfect match
+
+        let shrinkage = tuner.select_shrinkage_factor(high_r2, &preds, &targets);
+
+        // Should select from high shrinkage candidates (>= 0.5)
+        assert!(
+            shrinkage >= shrinkage_thresholds::HIGH_SHRINKAGE_MIN,
+            "Strong R² should prefer high shrinkage, got {}",
+            shrinkage
+        );
+    }
+
+    #[test]
+    fn test_shrinkage_factor_selection_weak_linear() {
+        let config = LttTunerConfig::default();
+        let tuner = LttTuner::new(config);
+
+        // Weak linear R² should prefer lower shrinkage
+        let low_r2 = 0.1;
+        let preds = vec![5.0, 4.0, 3.0, 2.0, 1.0]; // Reversed - bad predictions
+        let targets = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+
+        let shrinkage = tuner.select_shrinkage_factor(low_r2, &preds, &targets);
+
+        // Should select from low shrinkage candidates (<= 0.7)
+        assert!(
+            shrinkage <= shrinkage_thresholds::LOW_SHRINKAGE_MAX,
+            "Weak R² should prefer low shrinkage, got {}",
+            shrinkage
+        );
+    }
+
+    #[test]
+    fn test_constants_are_reasonable() {
+        // Verify our named constants have sensible values
+        use shrinkage_thresholds::*;
+        assert!(STRONG_LINEAR_R2 > WEAK_LINEAR_R2);
+        assert!(HIGH_SHRINKAGE_MIN > 0.0 && HIGH_SHRINKAGE_MIN < 1.0);
+        assert!(LOW_SHRINKAGE_MAX > 0.0 && LOW_SHRINKAGE_MAX < 1.0);
+        assert!(DEFAULT_SHRINKAGE > 0.0 && DEFAULT_SHRINKAGE <= 1.0);
+
+        use tree_scoring::*;
+        assert!(HIGH_VARIANCE_THRESHOLD > 0.0);
+        assert!(MAX_DEPTH_THRESHOLD > 0);
+        assert!(MIN_LR_THRESHOLD > 0.0);
     }
 }
