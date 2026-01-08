@@ -162,16 +162,6 @@ impl DataPipeline {
         target_column: &str,
         categorical_columns: Option<&[&str]>,
     ) -> Result<(BinnedDataset, PipelineState, DataFrame)> {
-        eprintln!(
-            "[PHASE1 DataPipeline] Input DataFrame: {} rows, {} cols",
-            df.height(),
-            df.width()
-        );
-        eprintln!(
-            "[PHASE1 DataPipeline] Column names: {:?}",
-            df.get_column_names()
-        );
-
         let _num_rows = df.height();
 
         // Extract target column
@@ -230,6 +220,7 @@ impl DataPipeline {
         let mut all_info: Vec<FeatureInfo> = Vec::with_capacity(feature_names.len());
         let mut categorical_encodings: Vec<CategoricalEncodingState> = Vec::new();
         let mut categorical_indices: Vec<usize> = Vec::new();
+        let mut encoded_series: Vec<(String, Vec<f64>)> = Vec::new(); // Store (name, encoded_values) for Float columns
 
         for (col_idx, name) in feature_names.iter().enumerate() {
             let col = df.column(name.as_str()).map_err(|e| {
@@ -239,12 +230,17 @@ impl DataPipeline {
 
             if categorical_set.contains(name.as_str()) {
                 // Categorical column: CMS filter → Target Encode → Bin
-                let (binned, info, encoding_state) =
-                    self.process_categorical_column(name.clone(), series, &targets_filtered)?;
+                let (binned, info, encoding_state, encoded_values) = self
+                    .process_categorical_column_with_values(
+                        name.clone(),
+                        series,
+                        &targets_filtered,
+                    )?;
                 all_binned.push(binned);
                 all_info.push(info);
                 categorical_encodings.push(encoding_state);
                 categorical_indices.push(col_idx);
+                encoded_series.push((name.clone(), encoded_values)); // Store for Float64 DataFrame
             } else {
                 // Numeric column: Quantile bin directly
                 let (binned, info) = self.process_numeric_column(name.clone(), series)?;
@@ -261,27 +257,65 @@ impl DataPipeline {
 
         let dataset = BinnedDataset::new(num_rows, features, targets_f32.clone(), all_info.clone());
 
-        eprintln!(
-            "[PHASE2 DataPipeline] After binning: {} rows, {} features",
-            num_rows,
-            all_info.len()
-        );
-        eprintln!("[PHASE2 DataPipeline] Feature names: {:?}", feature_names);
-        eprintln!(
-            "[PHASE2 DataPipeline] Targets: len={}, mean={:.4}, first 5: {:?}",
-            targets_f32.len(),
-            targets_f32.iter().sum::<f32>() / targets_f32.len() as f32,
-            &targets_f32[..targets_f32.len().min(5)]
-        );
-
         let state = PipelineState {
             feature_info: all_info,
             categorical_encodings,
-            column_order: feature_names,
+            column_order: feature_names.clone(),
             categorical_indices,
         };
 
-        Ok((dataset, state, df))
+        // Build Preprocessed DataFrame with Encoded Categoricals
+        // ========================================================
+        //
+        // Critical design: Create a "filtered DataFrame" where categorical columns
+        // are replaced with their encoded Float64 equivalents.
+        //
+        // Why this matters:
+        //
+        // 1. BinnedDataset construction:
+        //    - Already has encoded categorical values (via target encoding)
+        //    - Stored as quantile bins (u8 values)
+        //
+        // 2. LinearThenTree raw feature extraction:
+        //    - Needs raw f32 values (not binned) for linear model accuracy
+        //    - FeatureExtractor normally skips String/Categorical columns
+        //    - BUT we want those encoded values for linear model!
+        //
+        // 3. Solution: Preprocessed DataFrame
+        //    - Categorical columns → Float64 (encoded values)
+        //    - Numeric columns → unchanged
+        //    - FeatureExtractor can now extract ALL features as numeric
+        //
+        // This ensures:
+        // - LinearThenTree gets full feature set (including encoded categoricals)
+        // - No information loss compared to BinnedDataset
+        // - Consistent preprocessing between training and inference
+        //
+        let encoded_cat_map: std::collections::HashMap<&str, &Vec<f64>> = encoded_series
+            .iter()
+            .map(|(name, vals)| (name.as_str(), vals))
+            .collect();
+
+        let mut new_columns: Vec<polars::prelude::Column> = Vec::new();
+        for name in feature_names.iter() {
+            if let Some(encoded_vals) = encoded_cat_map.get(name.as_str()) {
+                // Categorical: use encoded Float64 values
+                new_columns.push(Series::new(name.as_str().into(), *encoded_vals).into());
+            } else {
+                // Numeric: keep original column
+                let col = df.column(name.as_str())?;
+                new_columns.push(col.clone());
+            }
+        }
+        // Add target column back
+        let target_col = df.column(target_column)?;
+        new_columns.push(target_col.clone());
+
+        let filtered_df = DataFrame::new(new_columns).map_err(|e| {
+            TreeBoostError::Data(format!("Failed to build filtered DataFrame: {}", e))
+        })?;
+
+        Ok((dataset, state, filtered_df))
     }
 
     /// Load and process a CSV file for inference using learned state
@@ -293,7 +327,8 @@ impl DataPipeline {
         let df = CsvReadOptions::default()
             .try_into_reader_with_file_path(Some(path.as_ref().to_path_buf()))?
             .finish()?;
-        self.process_for_inference(df, state)
+        let (_preprocessed_df, dataset) = self.process_for_inference(df, state)?;
+        Ok(dataset)
     }
 
     /// Load and process a Parquet file for inference using learned state
@@ -304,7 +339,8 @@ impl DataPipeline {
     ) -> Result<BinnedDataset> {
         let pl_path = PlPath::new(&path.as_ref().to_string_lossy());
         let df = LazyFrame::scan_parquet(pl_path, Default::default())?.collect()?;
-        self.process_for_inference(df, state)
+        let (_preprocessed_df, dataset) = self.process_for_inference(df, state)?;
+        Ok(dataset)
     }
 
     /// Process a DataFrame for inference using learned state
@@ -312,18 +348,7 @@ impl DataPipeline {
         &self,
         df: DataFrame,
         state: &PipelineState,
-    ) -> Result<BinnedDataset> {
-        eprintln!(
-            "[DEBUG process_for_inference] Input df: {} rows, {} cols",
-            df.height(),
-            df.width()
-        );
-        eprintln!(
-            "[DEBUG process_for_inference] State has {} features, {} categorical",
-            state.feature_info.len(),
-            state.categorical_indices.len()
-        );
-
+    ) -> Result<(DataFrame, BinnedDataset)> {
         let num_rows = df.height();
 
         // Build lookup for categorical encoding states
@@ -337,6 +362,7 @@ impl DataPipeline {
             state.categorical_indices.iter().copied().collect();
 
         let mut all_binned: Vec<Vec<u8>> = Vec::with_capacity(state.column_order.len());
+        let mut encoded_series: Vec<Series> = Vec::with_capacity(state.column_order.len());
 
         for (col_idx, name) in state.column_order.iter().enumerate() {
             let col = df.column(name.as_str()).map_err(|e| {
@@ -345,10 +371,6 @@ impl DataPipeline {
             let series = col.as_materialized_series();
 
             if cat_indices_set.contains(&col_idx) {
-                eprintln!(
-                    "[DEBUG process_for_inference] Column {}: '{}' - CATEGORICAL",
-                    col_idx, name
-                );
                 // Categorical: use learned encoding
                 let encoding_state = cat_state_map.get(name.as_str()).ok_or_else(|| {
                     TreeBoostError::Data(format!(
@@ -357,18 +379,41 @@ impl DataPipeline {
                     ))
                 })?;
                 let binned = self.apply_categorical_encoding(series, encoding_state)?;
+
+                // Also get the encoded values for the preprocessed DataFrame
+                let categories = self.series_to_strings(series)?;
+                let encoded_values: Vec<f64> = categories
+                    .iter()
+                    .map(|cat| {
+                        let idx = encoding_state.category_mapping.get_index(cat);
+                        if idx == encoding_state.category_mapping.unknown_idx {
+                            encoding_state.encoding_map.default_value
+                        } else {
+                            encoding_state.encoding_map.encode(cat)
+                        }
+                    })
+                    .collect();
+
+                encoded_series.push(Series::new(name.clone().into(), encoded_values));
                 all_binned.push(binned);
             } else {
-                eprintln!(
-                    "[DEBUG process_for_inference] Column {}: '{}' - NUMERIC",
-                    col_idx, name
-                );
-                // Numeric: use learned bin boundaries
+                // Numeric: use learned bin boundaries and keep original values
                 let info = &state.feature_info[col_idx];
                 let binned = self.apply_numeric_binning(series, info)?;
+                encoded_series.push(series.clone());
                 all_binned.push(binned);
             }
         }
+
+        // Build preprocessed DataFrame with encoded categoricals as Float64
+        // Convert Series to Column for compatibility with polars
+        let columns: Vec<_> = encoded_series
+            .into_iter()
+            .map(|s| s.into_column())
+            .collect();
+        let preprocessed_df = DataFrame::new(columns).map_err(|e| {
+            TreeBoostError::Data(format!("Failed to create preprocessed DataFrame: {}", e))
+        })?;
 
         // Flatten to column-major layout
         let mut features = Vec::with_capacity(num_rows * all_binned.len());
@@ -379,12 +424,9 @@ impl DataPipeline {
         // Dummy targets for inference
         let targets = vec![0.0f32; num_rows];
 
-        Ok(BinnedDataset::new(
-            num_rows,
-            features,
-            targets,
-            state.feature_info.clone(),
-        ))
+        let dataset = BinnedDataset::new(num_rows, features, targets, state.feature_info.clone());
+
+        Ok((preprocessed_df, dataset))
     }
 
     /// Process a numeric column: quantile binning
@@ -394,13 +436,6 @@ impl DataPipeline {
         series: &Series,
     ) -> Result<(Vec<u8>, FeatureInfo)> {
         let mut values = self.series_to_f64(series)?;
-
-        if name == "id" {
-            eprintln!(
-                "[DEBUG process_numeric_column TRAINING] Feature 'id': first 5 values: {:?}",
-                &values[..values.len().min(5)]
-            );
-        }
 
         // Impute NaN values with median (more robust than mean for outliers)
         let non_nan_values: Vec<f64> = values.iter().copied().filter(|v| !v.is_nan()).collect();
@@ -515,6 +550,36 @@ impl DataPipeline {
         Ok((binned, info, encoding_state))
     }
 
+    /// Process a categorical column (training) AND return encoded Float64 values
+    ///
+    /// This is like process_categorical_column but also returns the encoded values
+    /// so we can build a DataFrame with Float64 columns for FeatureExtractor.
+    fn process_categorical_column_with_values(
+        &self,
+        name: String,
+        series: &Series,
+        targets: &[f64],
+    ) -> Result<(Vec<u8>, FeatureInfo, CategoricalEncodingState, Vec<f64>)> {
+        let (binned, info, encoding_state) =
+            self.process_categorical_column(name, series, targets)?;
+
+        // Get the encoded values by applying the encoding map
+        let categories = self.series_to_strings(series)?;
+        let encoded: Vec<f64> = categories
+            .iter()
+            .map(|cat| {
+                let idx = encoding_state.category_mapping.get_index(cat);
+                if idx == encoding_state.category_mapping.unknown_idx {
+                    encoding_state.encoding_map.default_value
+                } else {
+                    encoding_state.encoding_map.encode(cat)
+                }
+            })
+            .collect();
+
+        Ok((binned, info, encoding_state, encoded))
+    }
+
     /// Apply learned categorical encoding for inference
     fn apply_categorical_encoding(
         &self,
@@ -545,9 +610,6 @@ impl DataPipeline {
             .map(|&v| QuantileBinner::bin_value(v, &state.bin_boundaries))
             .collect();
 
-        eprintln!("[DEBUG apply_categorical_encoding] Feature '{}': {} bins, first 5 encoded: {:?}, first 5 bins: {:?}",
-            state.name, state.bin_boundaries.len(), &encoded[..encoded.len().min(5)], &binned[..binned.len().min(5)]);
-
         Ok(binned)
     }
 
@@ -555,22 +617,10 @@ impl DataPipeline {
     fn apply_numeric_binning(&self, series: &Series, info: &FeatureInfo) -> Result<Vec<u8>> {
         let values = self.series_to_f64(series)?;
 
-        eprintln!(
-            "[DEBUG apply_numeric_binning] Feature '{}': {} boundaries, first 5 values: {:?}",
-            info.name,
-            info.bin_boundaries.len(),
-            &values[..values.len().min(5)]
-        );
-
         let binned: Vec<u8> = values
             .iter()
             .map(|&v| QuantileBinner::bin_value(v, &info.bin_boundaries))
             .collect();
-
-        eprintln!(
-            "[DEBUG apply_numeric_binning] First 5 bins: {:?}",
-            &binned[..binned.len().min(5)]
-        );
 
         Ok(binned)
     }
@@ -689,7 +739,8 @@ mod tests {
         }
         .unwrap();
 
-        let test_dataset = pipeline.process_for_inference(test_df, &state).unwrap();
+        let (_test_preprocessed_df, test_dataset) =
+            pipeline.process_for_inference(test_df, &state).unwrap();
 
         assert_eq!(test_dataset.num_rows(), 3);
         assert_eq!(test_dataset.num_features(), 2);

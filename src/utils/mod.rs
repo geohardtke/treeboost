@@ -1,5 +1,7 @@
 //! Shared utility functions
 
+pub mod features;
+
 /// Check if two f32 values are approximately equal.
 ///
 /// Uses a combined tolerance approach (similar to numpy's `isclose`):

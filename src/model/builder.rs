@@ -44,6 +44,7 @@
 //! ```
 
 use crate::analysis::{Confidence, DataFrameProfile, DatasetAnalysis};
+use crate::dataset::feature_extractor::LinearFeatureConfig;
 use crate::dataset::{BinnedDataset, DataPipeline};
 use crate::features::{FeaturePlan, SmartFeatureEngine};
 use crate::model::config::{AutoConfig, BuildPhaseTimes, BuildResult, TuningLevel};
@@ -139,6 +140,28 @@ impl AutoBuilder {
     /// ```
     pub fn with_progress_callback(mut self, callback: Arc<dyn ProgressCallback>) -> Self {
         self.config.progress_callback = callback;
+        self
+    }
+
+    /// Set custom feature extractor configuration for LinearThenTree mode
+    ///
+    /// This controls which features are extracted for the linear component.
+    /// By default, all features are included (no exclusions).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use treeboost::dataset::feature_extractor::LinearFeatureConfig;
+    ///
+    /// let feature_config = LinearFeatureConfig::default()
+    ///     .with_exclude_categorical(true)  // Exclude categorical features from linear model
+    ///     .with_exclude_id(true);          // Exclude ID columns
+    ///
+    /// let builder = AutoBuilder::new()
+    ///     .with_linear_feature_config(feature_config);
+    /// ```
+    pub fn with_linear_feature_config(mut self, config: LinearFeatureConfig) -> Self {
+        self.config.linear_feature_config = config;
         self
     }
 
@@ -269,7 +292,7 @@ impl AutoBuilder {
             message: Some(format!("{} rows", df.height())),
         });
 
-        let (dataset, pipeline_state, _filtered_df) =
+        let (dataset, pipeline_state, filtered_df) =
             self.prepare_dataset_and_state(df, target_col)?;
 
         // === Phase 5: Dataset Analysis (for mode selection) ===
@@ -330,7 +353,8 @@ impl AutoBuilder {
             let config = tuning::create_config_for_mode(mode, self.config.tuning_level);
             (config, None, None)
         } else {
-            tuning::tune_hyperparameters(&self.config, &dataset, mode, df, target_col, &profile)?
+            // CRITICAL: Pass filtered_df (preprocessed) to tuning for LTT raw feature extraction
+            tuning::tune_hyperparameters(&self.config, &dataset, mode, &filtered_df, target_col, &profile)?
         };
         phase_times.tuning = phase_start.elapsed();
 
@@ -352,17 +376,74 @@ impl AutoBuilder {
         });
 
         let phase_start = Instant::now();
-        // Create FeatureExtractor for LinearThenTree mode to ensure consistent feature extraction
-        let (feature_extractor, raw_features) = if matches!(mode, BoostingMode::LinearThenTree) {
-            let extractor = crate::dataset::feature_extractor::FeatureExtractor::new();
-            // Extract raw features from original DataFrame for linear model
-            let (features, _num_features) = extractor.extract(df, target_col)?;
-            (Some(extractor), Some(features))
+        // LinearThenTree Feature Extraction Strategy
+        // ==========================================
+        //
+        // Critical design for LinearThenTree mode:
+        //
+        // 1. TREE COMPONENT needs ALL features (including categoricals, IDs, etc.)
+        //    - BinnedDataset contains all preprocessed features
+        //    - Trees make splits on the full feature space
+        //
+        // 2. LINEAR COMPONENT may want a SUBSET (e.g., exclude IDs, categoricals)
+        //    - Linear models work best with numeric predictors
+        //    - User can configure which features to exclude via LinearFeatureConfig
+        //
+        // Implementation approach:
+        // - Extract ALL features as raw_features array (matches BinnedDataset)
+        // - Build linear_feature_indices to select subset for linear model
+        // - During training: linear_booster uses selected indices
+        // - During prediction: same indices applied to maintain consistency
+        //
+        // This ensures:
+        // - Training and inference use identical feature selection
+        // - Trees use full feature space (no information loss)
+        // - Linear model uses only appropriate features (better generalization)
+        //
+        let (feature_extractor, raw_features, linear_indices) = if matches!(mode, BoostingMode::LinearThenTree) {
+            // Step 1: Extract ALL features (no filtering) to match BinnedDataset
+            let all_config = LinearFeatureConfig {
+                exclude_columns: std::collections::HashSet::new(),
+                exclude_categorical: false,
+                exclude_id: false,
+                exclude_constant: false,
+                exclude_boolean: false,
+                exclude_datetime: false,
+                exclude_text: false,
+            };
+            let all_extractor = crate::dataset::feature_extractor::FeatureExtractor::with_config(all_config);
+            let (all_features, _num_all_features) = all_extractor.extract(&filtered_df, target_col)?;
+
+            // Step 2: Build linear_feature_indices based on filter config
+            let filter_config = &self.config.linear_feature_config;
+            let filter_extractor = crate::dataset::feature_extractor::FeatureExtractor::with_config(
+                filter_config.clone()
+            );
+            let mut linear_feature_indices = Vec::new();
+
+            let col_names: Vec<String> = filtered_df.get_column_names().iter()
+                .map(|s| s.to_string())
+                .collect();
+
+            // Build indices relative to EXTRACTED features (target excluded)
+            let mut feature_idx = 0;
+            for col_name in &col_names {
+                if col_name == target_col {
+                    continue; // Skip target
+                }
+                // Check if this column should be used by linear (based on filter config)
+                if !filter_extractor.should_exclude_column(&filtered_df, col_name, target_col) {
+                    linear_feature_indices.push(feature_idx);
+                }
+                feature_idx += 1;  // Increment for each non-target feature
+            }
+
+            (Some(all_extractor), Some(all_features), Some(linear_feature_indices))
         } else {
-            (None, None)
+            (None, None, None)
         };
         let model =
-            self.train_model(&dataset, universal_config, feature_extractor, raw_features)?;
+            self.train_model(&dataset, universal_config, feature_extractor, raw_features, linear_indices)?;
         phase_times.training = phase_start.elapsed();
 
         if self.config.verbose {
@@ -475,32 +556,35 @@ impl AutoBuilder {
         Ok((mode, Some(analysis), confidence))
     }
 
-    /// Tune hyperparameters based on mode
-
     /// Train the final model
     fn train_model(
         &self,
         dataset: &BinnedDataset,
-        config: UniversalConfig,
+        mut config: UniversalConfig,
         feature_extractor: Option<crate::dataset::feature_extractor::FeatureExtractor>,
         raw_features: Option<Vec<f32>>,
+        linear_indices: Option<Vec<usize>>,
     ) -> Result<UniversalModel> {
         // Use MSE loss as default (could be made configurable)
         let loss = crate::loss::MseLoss;
 
-        // Pass raw features to training if we're in LTT mode
+        // Add feature_extractor to config
+        config.feature_extractor = feature_extractor;
+
+        // Pass raw features AND linear_feature_indices to training if we're in LTT mode
         if matches!(config.mode, crate::model::BoostingMode::LinearThenTree)
             && raw_features.is_some()
+            && linear_indices.is_some()
         {
-            UniversalModel::train_with_raw_features(
+            UniversalModel::train_with_linear_feature_selection(
                 dataset,
                 &raw_features.as_ref().unwrap(),
+                &linear_indices.as_ref().unwrap(),
                 config,
                 &loss,
-                feature_extractor,
             )
         } else {
-            UniversalModel::train(dataset, config, &loss, feature_extractor)
+            UniversalModel::train(dataset, config, &loss)
         }
     }
 }

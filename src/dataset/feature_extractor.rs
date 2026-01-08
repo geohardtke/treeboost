@@ -243,35 +243,37 @@ pub struct LinearFeatureConfig {
     /// Columns to exclude from linear model (user override)
     pub exclude_columns: HashSet<String>,
 
-    /// Auto-exclude categoricals from linear model
-    pub auto_exclude_categorical: bool,
+    /// Exclude categoricals from linear model
+    pub exclude_categorical: bool,
 
-    /// Auto-exclude ID-like columns (high cardinality + monotonic)
-    pub auto_exclude_id: bool,
+    /// Exclude ID-like columns (high cardinality + monotonic)
+    pub exclude_id: bool,
 
-    /// Auto-exclude constant columns (zero variance)
-    pub auto_exclude_constant: bool,
+    /// Exclude constant columns (zero variance)
+    pub exclude_constant: bool,
 
-    /// Auto-exclude boolean columns
-    pub auto_exclude_boolean: bool,
+    /// Exclude boolean columns
+    pub exclude_boolean: bool,
 
-    /// Auto-exclude datetime columns
-    pub auto_exclude_datetime: bool,
+    /// Exclude datetime columns
+    pub exclude_datetime: bool,
 
-    /// Auto-exclude text columns (high cardinality strings)
-    pub auto_exclude_text: bool,
+    /// Exclude text columns (high cardinality strings)
+    pub exclude_text: bool,
 }
 
 impl Default for LinearFeatureConfig {
     fn default() -> Self {
+        // IMPORTANT: Sensible defaults for linear models
+        // Exclude problematic column types that hurt linear model performance
         Self {
             exclude_columns: HashSet::new(),
-            auto_exclude_categorical: true, // Categoricals → trees only
-            auto_exclude_id: true,          // ID columns → not predictive
-            auto_exclude_constant: true,    // Constant columns → no information
-            auto_exclude_boolean: false,    // Booleans → can be useful for linear
-            auto_exclude_datetime: false,   // Datetime → let feature engineering decide
-            auto_exclude_text: true,        // High-cardinality text → trees only
+            exclude_categorical: true,  // Categoricals already encoded by DataPipeline
+            exclude_id: true,           // ID columns have no predictive value
+            exclude_constant: true,     // Zero variance columns are useless
+            exclude_boolean: false,     // Booleans can be useful (0/1)
+            exclude_datetime: true,     // DateTime needs feature engineering first
+            exclude_text: true,         // High-cardinality text needs encoding
         }
     }
 }
@@ -295,38 +297,38 @@ impl LinearFeatureConfig {
     }
 
     /// Enable/disable categorical auto-exclusion
-    pub fn with_auto_exclude_categorical(mut self, enable: bool) -> Self {
-        self.auto_exclude_categorical = enable;
+    pub fn with_exclude_categorical(mut self, enable: bool) -> Self {
+        self.exclude_categorical = enable;
         self
     }
 
     /// Enable/disable ID auto-exclusion
-    pub fn with_auto_exclude_id(mut self, enable: bool) -> Self {
-        self.auto_exclude_id = enable;
+    pub fn with_exclude_id(mut self, enable: bool) -> Self {
+        self.exclude_id = enable;
         self
     }
 
     /// Enable/disable constant auto-exclusion
-    pub fn with_auto_exclude_constant(mut self, enable: bool) -> Self {
-        self.auto_exclude_constant = enable;
+    pub fn with_exclude_constant(mut self, enable: bool) -> Self {
+        self.exclude_constant = enable;
         self
     }
 
     /// Enable/disable boolean auto-exclusion
-    pub fn with_auto_exclude_boolean(mut self, enable: bool) -> Self {
-        self.auto_exclude_boolean = enable;
+    pub fn with_exclude_boolean(mut self, enable: bool) -> Self {
+        self.exclude_boolean = enable;
         self
     }
 
     /// Enable/disable datetime auto-exclusion
-    pub fn with_auto_exclude_datetime(mut self, enable: bool) -> Self {
-        self.auto_exclude_datetime = enable;
+    pub fn with_exclude_datetime(mut self, enable: bool) -> Self {
+        self.exclude_datetime = enable;
         self
     }
 
     /// Enable/disable text auto-exclusion
-    pub fn with_auto_exclude_text(mut self, enable: bool) -> Self {
-        self.auto_exclude_text = enable;
+    pub fn with_exclude_text(mut self, enable: bool) -> Self {
+        self.exclude_text = enable;
         self
     }
 }
@@ -503,12 +505,12 @@ impl FeatureExtractor {
             // Check if we should exclude this type
             let should_exclude = match col_type {
                 ColumnType::Numeric => false, // Always include numeric
-                ColumnType::Boolean => self.config.auto_exclude_boolean,
-                ColumnType::Categorical => self.config.auto_exclude_categorical,
-                ColumnType::IdLike => self.config.auto_exclude_id,
-                ColumnType::Constant => self.config.auto_exclude_constant,
-                ColumnType::DateTime => self.config.auto_exclude_datetime,
-                ColumnType::Text => self.config.auto_exclude_text,
+                ColumnType::Boolean => self.config.exclude_boolean,
+                ColumnType::Categorical => self.config.exclude_categorical,
+                ColumnType::IdLike => self.config.exclude_id,
+                ColumnType::Constant => self.config.exclude_constant,
+                ColumnType::DateTime => self.config.exclude_datetime,
+                ColumnType::Text => self.config.exclude_text,
             };
 
             if should_exclude {
@@ -519,15 +521,7 @@ impl FeatureExtractor {
                 continue;
             }
 
-            // Only include numeric and boolean types (booleans can be converted to 0/1)
-            if !matches!(col_type, ColumnType::Numeric | ColumnType::Boolean) {
-                excluded_by_type
-                    .entry(col_type)
-                    .or_insert_with(Vec::new)
-                    .push(col_name_str.to_string());
-                continue;
-            }
-
+            // Include this feature (config-based exclusion already applied above)
             feature_names.push(col_name_str.to_string());
         }
 
@@ -554,8 +548,8 @@ impl FeatureExtractor {
         // Build report
         let report = FeatureExtractionReport {
             total_columns,
-            excluded_by_type,
-            excluded_by_user,
+            excluded_by_type: excluded_by_type.clone(),
+            excluded_by_user: excluded_by_user.clone(),
             target_column: target_col.to_string(),
             final_features: feature_names.clone(),
         };
@@ -575,7 +569,7 @@ impl FeatureExtractor {
     }
 
     /// Convert AnyValue to f32 with error handling
-    fn anyvalue_to_f32(&self, val: AnyValue, row_idx: usize, col_name: &str) -> f32 {
+    fn anyvalue_to_f32(&self, val: AnyValue, _row_idx: usize, _col_name: &str) -> f32 {
         match val {
             AnyValue::Null => {
                 // Fill NaN with 0 for linear model
@@ -613,13 +607,7 @@ impl FeatureExtractor {
                     0.0
                 }
             }
-            _ => {
-                eprintln!(
-                    "[FeatureExtractor] Unexpected type at row {}, col {}: {:?}. Using 0.0",
-                    row_idx, col_name, val
-                );
-                0.0
-            }
+            _ => 0.0,
         }
     }
 
@@ -644,12 +632,12 @@ impl FeatureExtractor {
 
             match col_type {
                 ColumnType::Numeric => false,
-                ColumnType::Boolean => self.config.auto_exclude_boolean,
-                ColumnType::Categorical => self.config.auto_exclude_categorical,
-                ColumnType::IdLike => self.config.auto_exclude_id,
-                ColumnType::Constant => self.config.auto_exclude_constant,
-                ColumnType::DateTime => self.config.auto_exclude_datetime,
-                ColumnType::Text => self.config.auto_exclude_text,
+                ColumnType::Boolean => self.config.exclude_boolean,
+                ColumnType::Categorical => self.config.exclude_categorical,
+                ColumnType::IdLike => self.config.exclude_id,
+                ColumnType::Constant => self.config.exclude_constant,
+                ColumnType::DateTime => self.config.exclude_datetime,
+                ColumnType::Text => self.config.exclude_text,
             }
         } else {
             true
@@ -799,7 +787,7 @@ mod tests {
         assert!(result.feature_names.contains(&"flag".to_string()));
 
         // But can be excluded
-        let config = LinearFeatureConfig::new().with_auto_exclude_boolean(true);
+        let config = LinearFeatureConfig::new().with_exclude_boolean(true);
         let extractor = FeatureExtractor::with_config(config);
         let result = extractor.extract_numeric_features(&df, "target").unwrap();
         assert!(!result.feature_names.contains(&"flag".to_string()));
@@ -848,7 +836,7 @@ mod tests {
     fn test_serialization_roundtrip() {
         let config = LinearFeatureConfig::new()
             .with_exclude_columns(&["col1", "col2"])
-            .with_auto_exclude_categorical(false);
+            .with_exclude_categorical(false);
 
         let extractor = FeatureExtractor::with_config(config.clone());
 
@@ -857,8 +845,8 @@ mod tests {
 
         // Verify config is created correctly
         assert_eq!(
-            extractor.config.auto_exclude_categorical,
-            config.auto_exclude_categorical
+            extractor.config.exclude_categorical,
+            config.exclude_categorical
         );
         assert_eq!(extractor.config.exclude_columns, config.exclude_columns);
     }

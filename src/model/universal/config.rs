@@ -1,5 +1,6 @@
 //! Configuration for UniversalModel
 
+use crate::dataset::feature_extractor::FeatureExtractor;
 use crate::learner::{LinearConfig, TreeConfig};
 use crate::model::universal::mode::BoostingMode;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -50,6 +51,15 @@ pub struct UniversalConfig {
     ///
     /// **Rule of thumb**: 100M rows × 100 features = ~40GB memory
     pub max_linear_memory_mb: usize,
+
+    /// Feature extractor for LinearThenTree mode
+    ///
+    /// Used to extract raw numeric features from DataFrame for the linear component.
+    /// If None, LinearThenTree will use the deprecated `train_with_linear_feature_selection()`
+    /// method that requires manual feature extraction.
+    #[rkyv(with = rkyv::with::Skip)]
+    #[serde(skip)]
+    pub feature_extractor: Option<FeatureExtractor>,
 }
 
 impl Default for UniversalConfig {
@@ -66,6 +76,7 @@ impl Default for UniversalConfig {
             seed: 42,
             linear_rounds: 1, // Single round with many CD iterations (fit once)
             max_linear_memory_mb: 0, // No limit by default
+            feature_extractor: None,
         }
     }
 }
@@ -139,6 +150,24 @@ impl UniversalConfig {
     /// ```
     pub fn with_max_linear_memory_mb(mut self, mb: usize) -> Self {
         self.max_linear_memory_mb = mb;
+        self
+    }
+
+    /// Set the feature extractor for LinearThenTree mode
+    ///
+    /// The feature extractor is used to extract raw numeric features from DataFrames
+    /// for the linear component in LinearThenTree mode. This allows automatic feature
+    /// selection and handling of non-numeric columns.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = UniversalConfig::new()
+    ///     .with_mode(BoostingMode::LinearThenTree)
+    ///     .with_feature_extractor(Some(FeatureExtractor::default()));
+    /// ```
+    pub fn with_feature_extractor(mut self, extractor: Option<FeatureExtractor>) -> Self {
+        self.feature_extractor = extractor;
         self
     }
 

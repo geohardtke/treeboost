@@ -75,7 +75,7 @@ fn test_data_pipeline_end_to_end() {
     }
     .unwrap();
 
-    let test_dataset = pipeline
+    let (_test_preprocessed_df, test_dataset) = pipeline
         .process_for_inference(test_df, &state)
         .expect("Inference pipeline should succeed");
 

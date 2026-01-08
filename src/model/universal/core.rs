@@ -11,6 +11,7 @@ use crate::dataset::BinnedDataset;
 use crate::learner::{LinearBooster, TreeBooster, WeakLearner};
 use crate::loss::LossFunction;
 use crate::tree::Tree;
+use crate::utils::features::extract_selected_features;
 use crate::Result;
 use rand::SeedableRng;
 use rayon::prelude::*;
@@ -111,8 +112,8 @@ impl UniversalModel {
         dataset: &BinnedDataset,
         config: UniversalConfig,
         loss_fn: &dyn LossFunction,
-        feature_extractor: Option<crate::dataset::feature_extractor::FeatureExtractor>,
     ) -> Result<Self> {
+        let feature_extractor = config.feature_extractor.clone();
         match config.mode {
             BoostingMode::PureTree => {
                 Self::train_pure_tree(dataset, config, loss_fn, None, feature_extractor)
@@ -158,8 +159,8 @@ impl UniversalModel {
         raw_features: &[f32],
         config: UniversalConfig,
         loss_fn: &dyn LossFunction,
-        feature_extractor: Option<crate::dataset::feature_extractor::FeatureExtractor>,
     ) -> Result<Self> {
+        let feature_extractor = config.feature_extractor.clone();
         match config.mode {
             BoostingMode::PureTree => {
                 Self::train_pure_tree(dataset, config, loss_fn, None, feature_extractor)
@@ -197,8 +198,8 @@ impl UniversalModel {
         linear_feature_indices: &[usize],
         config: UniversalConfig,
         loss_fn: &dyn LossFunction,
-        feature_extractor: Option<crate::dataset::feature_extractor::FeatureExtractor>,
     ) -> Result<Self> {
+        let feature_extractor = config.feature_extractor.clone();
         match config.mode {
             BoostingMode::PureTree => {
                 Self::train_pure_tree(dataset, config, loss_fn, None, feature_extractor)
@@ -364,7 +365,7 @@ impl UniversalModel {
             }
             ModeSelection::Fixed(mode) => {
                 config.mode = mode;
-                Self::train(dataset, config, loss_fn, None)
+                Self::train(dataset, config, loss_fn)
             }
         }
     }
@@ -514,18 +515,12 @@ impl UniversalModel {
         // generalization.
 
         // Extract selected features for linear model if indices are specified
-        let linear_features: Vec<f32> = if let Some(ref indices) = linear_indices {
-            // Extract only selected features
-            let mut selected = Vec::with_capacity(num_rows * indices.len());
-            for row in 0..num_rows {
-                for &feat_idx in indices {
-                    selected.push(raw_features[row * num_raw_features + feat_idx]);
-                }
-            }
-            selected
-        } else {
-            raw_features.clone()
-        };
+        let linear_features = extract_selected_features(
+            &raw_features,
+            num_rows,
+            num_raw_features,
+            linear_indices.as_deref(),
+        );
 
         let mut linear_booster =
             LinearBooster::new(num_linear_features, config.linear_config.clone());
@@ -863,23 +858,19 @@ impl UniversalModel {
                     let num_lin_feats = self.num_linear_features.unwrap_or(num_raw_features);
 
                     // Extract selected features if indices are specified
-                    let linear_features: Vec<f32> =
-                        if let Some(ref indices) = self.linear_feature_indices {
-                            let mut selected = Vec::with_capacity(num_rows * indices.len());
-                            for row in 0..num_rows {
-                                for &feat_idx in indices {
-                                    selected.push(raw_features[row * num_raw_features + feat_idx]);
-                                }
-                            }
-                            selected
-                        } else {
-                            raw_features.to_vec()
-                        };
+                    let linear_features = extract_selected_features(
+                        raw_features,
+                        num_rows,
+                        num_raw_features,
+                        self.linear_feature_indices.as_deref(),
+                    );
 
                     let linear_preds = linear.predict_batch(&linear_features, num_lin_feats);
 
-                    for i in 0..num_rows {
-                        predictions[i] += linear_preds[i];
+                    // Apply same learning rate as during training
+                    let lr = self.config.linear_config.learning_rate;
+                    for i in 0..num_rows.min(linear_preds.len()) {
+                        predictions[i] += lr * linear_preds[i];
                     }
                 }
 
@@ -900,6 +891,55 @@ impl UniversalModel {
                 self.predict(dataset)
             }
         }
+    }
+
+    /// Predict using only linear component (LinearThenTree mode only)
+    ///
+    /// Returns predictions from base + linear model, without tree contribution.
+    /// Useful for comparing linear-only vs full LinearThenTree performance.
+    pub fn predict_linear_only(
+        &self,
+        dataset: &BinnedDataset,
+        raw_features: &[f32],
+    ) -> Result<Vec<f32>> {
+        if !matches!(self.config.mode, BoostingMode::LinearThenTree) {
+            return Err(crate::TreeBoostError::Config(
+                "predict_linear_only() only available for LinearThenTree mode".to_string(),
+            ));
+        }
+
+        let num_rows = dataset.num_rows();
+        let mut predictions = vec![self.base_prediction; num_rows];
+
+        // Add only linear contribution (no trees)
+        if let Some(ref linear) = self.linear_booster {
+            let num_raw_features = if num_rows > 0 {
+                raw_features.len() / num_rows
+            } else {
+                self.num_features
+            };
+
+            let num_lin_feats = self.num_linear_features.unwrap_or(num_raw_features);
+
+            // Extract selected features if indices are specified
+            let linear_features = extract_selected_features(
+                raw_features,
+                num_rows,
+                num_raw_features,
+                self.linear_feature_indices.as_deref(),
+            );
+
+            let linear_preds = linear.predict_batch(&linear_features, num_lin_feats);
+
+            // NOTE: For linear-only, we return the full linear model prediction
+            // WITHOUT the boosting shrinkage (learning_rate). This shows the
+            // standalone linear model's performance for fair comparison.
+            for i in 0..num_rows.min(linear_preds.len()) {
+                predictions[i] += linear_preds[i];
+            }
+        }
+
+        Ok(predictions)
     }
 
     /// Predict for a single row
@@ -1440,7 +1480,7 @@ impl TunableModel for UniversalModel {
     fn train(dataset: &BinnedDataset, config: &Self::Config) -> crate::Result<Self> {
         // Create a default MSE loss for tuning (loss type could be parameterized later)
         let loss_fn = crate::loss::MseLoss::new();
-        Self::train(dataset, config.clone(), &loss_fn, None)
+        Self::train(dataset, config.clone(), &loss_fn)
     }
 
     fn predict(&self, dataset: &BinnedDataset) -> Vec<f32> {
@@ -1625,7 +1665,7 @@ mod tests {
             .with_num_rounds(num_rounds)
             .with_linear_rounds(1);
 
-        let model = UniversalModel::train(&dataset, config, &loss, None).unwrap();
+        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
         (model, dataset)
     }
 
@@ -1660,7 +1700,7 @@ mod tests {
             .with_mode(BoostingMode::PureTree)
             .with_num_rounds(5);
 
-        let model = UniversalModel::train(&dataset, config, &loss, None).unwrap();
+        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
 
         assert_eq!(model.mode(), BoostingMode::PureTree);
         assert_eq!(model.num_trees(), 5);
@@ -1676,7 +1716,7 @@ mod tests {
             .with_mode(BoostingMode::PureTree)
             .with_num_rounds(5);
 
-        let model = UniversalModel::train(&dataset, config, &loss, None).unwrap();
+        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
         let predictions = model.predict(&dataset);
 
         assert_eq!(predictions.len(), 100);
@@ -1693,7 +1733,7 @@ mod tests {
             .with_num_rounds(5)
             .with_linear_rounds(3);
 
-        let model = UniversalModel::train(&dataset, config, &loss, None).unwrap();
+        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
 
         assert_eq!(model.mode(), BoostingMode::LinearThenTree);
         assert_eq!(model.num_trees(), 5);
@@ -1710,7 +1750,7 @@ mod tests {
             .with_num_rounds(5)
             .with_linear_rounds(3);
 
-        let model = UniversalModel::train(&dataset, config, &loss, None).unwrap();
+        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
         let predictions = model.predict(&dataset);
 
         assert_eq!(predictions.len(), 100);
@@ -1726,7 +1766,7 @@ mod tests {
             .with_mode(BoostingMode::RandomForest)
             .with_num_rounds(10);
 
-        let model = UniversalModel::train(&dataset, config, &loss, None).unwrap();
+        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
 
         assert_eq!(model.mode(), BoostingMode::RandomForest);
         assert!(model.num_trees() <= 10); // Some trees might fail to grow
@@ -1742,7 +1782,7 @@ mod tests {
             .with_mode(BoostingMode::RandomForest)
             .with_num_rounds(10);
 
-        let model = UniversalModel::train(&dataset, config, &loss, None).unwrap();
+        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
         let predictions = model.predict(&dataset);
 
         assert_eq!(predictions.len(), 100);
@@ -1758,7 +1798,7 @@ mod tests {
             .with_mode(BoostingMode::PureTree)
             .with_num_rounds(5);
 
-        let model = UniversalModel::train(&dataset, config, &loss, None).unwrap();
+        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
 
         let batch_preds = model.predict(&dataset);
         for i in 0..50 {

@@ -560,15 +560,7 @@ impl LinearBooster {
 
         // Fit scaler if not already fitted
         if !self.scaler_fitted {
-            eprintln!(
-                "[DEBUG LinearBooster.fit_direct] Fitting scaler on features: first 5 vals: {:?}",
-                &features[..features.len().min(5)]
-            );
             self.fit_scaler(features, num_features);
-            eprintln!(
-                "[DEBUG LinearBooster.fit_direct] After fit_scaler: means[0]={:.4}, stds[0]={:.4}",
-                self.means[0], self.stds[0]
-            );
         }
 
         let lambda = self.config.lambda as f64;

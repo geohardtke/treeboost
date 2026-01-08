@@ -161,13 +161,15 @@ impl AutoModel {
     /// Returns predictions as a Vec<f32>.
     pub fn predict(&self, df: &DataFrame) -> Result<Vec<f32>> {
         // Convert DataFrame to BinnedDataset for prediction
-        let dataset = self.prepare_dataset_for_prediction(df)?;
+        // Also get preprocessed DataFrame with encoded categoricals
+        let (preprocessed_df, dataset) = self.prepare_dataset_for_prediction(df)?;
 
         // For LinearThenTree, use dual-representation inference if FeatureExtractor is stored
         if matches!(self.mode, crate::model::BoostingMode::LinearThenTree) {
             if let Some(ref extractor) = self.model.feature_extractor() {
-                // Extract raw features using same FeatureExtractor as training
-                let (raw_features, _num_features) = extractor.extract(df, &self.target_column)?;
+                // CRITICAL: Extract from preprocessed_df (with encoded categoricals),
+                // NOT from original df (with String categoricals)
+                let (raw_features, _num_features) = extractor.extract(&preprocessed_df, &self.target_column)?;
 
                 return Ok(self
                     .model
@@ -176,6 +178,37 @@ impl AutoModel {
         }
 
         Ok(self.model.predict(&dataset))
+    }
+
+    /// Predict using only the linear component (LinearThenTree mode only)
+    ///
+    /// For fair comparison between linear-only and full LinearThenTree.
+    /// Uses the same preprocessing pipeline as the full model.
+    ///
+    /// # Returns
+    /// - `Ok(Vec<f32>)`: Linear-only predictions (base + linear model)
+    /// - `Err`: If model is not LinearThenTree mode
+    pub fn predict_linear_only(&self, df: &DataFrame) -> Result<Vec<f32>> {
+        if !matches!(self.mode, crate::model::BoostingMode::LinearThenTree) {
+            return Err(TreeBoostError::Config(
+                "predict_linear_only() only available for LinearThenTree mode".to_string(),
+            ));
+        }
+
+        // Use same preprocessing as full prediction
+        let (preprocessed_df, dataset) = self.prepare_dataset_for_prediction(df)?;
+
+        // Extract features using FeatureExtractor
+        if let Some(ref extractor) = self.model.feature_extractor() {
+            let (raw_features, _num_features) = extractor.extract(&preprocessed_df, &self.target_column)?;
+
+            // Get linear-only predictions from the model
+            return Ok(self.model.predict_linear_only(&dataset, &raw_features)?);
+        }
+
+        Err(TreeBoostError::Config(
+            "LinearThenTree model missing FeatureExtractor - cannot predict".to_string(),
+        ))
     }
 
     /// Predict on a BinnedDataset (for advanced users)
@@ -455,7 +488,7 @@ impl AutoModel {
     }
 
     /// Prepare a DataFrame for prediction
-    fn prepare_dataset_for_prediction(&self, df: &DataFrame) -> Result<BinnedDataset> {
+    fn prepare_dataset_for_prediction(&self, df: &DataFrame) -> Result<(DataFrame, BinnedDataset)> {
         // CRITICAL: Use the fitted pipeline state from training!
         // Without this, predictions will be nonsense because the model expects
         // features encoded the same way as during training.
@@ -469,9 +502,10 @@ impl AutoModel {
         let pipeline = DataPipeline::with_defaults();
 
         // process_for_inference() applies the learned encodings/scalers/binners
-        let dataset = pipeline.process_for_inference(df.clone(), pipeline_state)?;
+        // Returns (preprocessed_df, dataset) where preprocessed_df has encoded categoricals
+        let (preprocessed_df, dataset) = pipeline.process_for_inference(df.clone(), pipeline_state)?;
 
-        Ok(dataset)
+        Ok((preprocessed_df, dataset))
     }
 
     // Note: save/load methods are not yet implemented for UniversalModel
