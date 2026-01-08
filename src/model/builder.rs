@@ -347,7 +347,10 @@ impl AutoBuilder {
 
         let phase_start = Instant::now();
         let (universal_config, ltt_tuning, tree_tuning) =
-            if adapted_config.tuning_level == TuningLevel::None {
+            // CRITICAL: If user provided custom_config, use it directly (bypasses all tuning)
+            if let Some(ref custom) = self.config.custom_config {
+                (custom.clone(), None, None)
+            } else if adapted_config.tuning_level == TuningLevel::None {
                 // Skip tuning, use defaults
                 let config = tuning::create_config_for_mode(mode, self.config.tuning_level);
                 (config, None, None)
@@ -593,19 +596,14 @@ impl AutoBuilder {
         config.feature_extractor = feature_extractor;
 
         // Pass raw features AND linear_feature_indices to training if we're in LTT mode
-        if matches!(config.mode, crate::model::BoostingMode::LinearThenTree)
-            && raw_features.is_some()
-            && linear_indices.is_some()
-        {
-            UniversalModel::train_with_linear_feature_selection(
-                dataset,
-                &raw_features.as_ref().unwrap(),
-                &linear_indices.as_ref().unwrap(),
-                config,
-                &loss,
-            )
-        } else {
-            UniversalModel::train(dataset, config, &loss)
+        // Use pattern matching instead of is_some() + unwrap() for idiomatic Rust
+        match (config.mode, raw_features, linear_indices) {
+            (crate::model::BoostingMode::LinearThenTree, Some(features), Some(indices)) => {
+                UniversalModel::train_with_linear_feature_selection(
+                    dataset, &features, &indices, config, &loss,
+                )
+            }
+            _ => UniversalModel::train(dataset, config, &loss),
         }
     }
 }
