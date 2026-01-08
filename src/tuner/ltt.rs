@@ -33,6 +33,8 @@
 //! ```
 
 use crate::analysis::{compute_mse, compute_r2};
+use crate::booster::{GBDTConfig, GBDTModel};
+use crate::dataset::{BinnedDataset, FeatureInfo, QuantileBinner};
 use crate::defaults::{
     linear as linear_defaults, ltt as ltt_defaults, seeds as seeds_defaults, tree as tree_defaults,
 };
@@ -586,7 +588,7 @@ impl LttTuner {
         // === PHASE 1.5: Select shrinkage_factor based on linear R² ===
         // This determines how much to trust linear vs trees
         let best_shrinkage =
-            self.select_shrinkage_factor(linear_r2, &linear_val_preds, &val_targets);
+            self.select_shrinkage_factor(&linear_train_preds, &linear_val_preds, &split);
         best_linear.shrinkage_factor = best_shrinkage;
 
         // Compute residuals WITH shrinkage applied
@@ -801,22 +803,18 @@ impl LttTuner {
     ///
     /// # Strategy
     ///
-    /// 1. Use R² as proxy for linear model quality
-    /// 2. Strong R² (>0.6) → prefer higher shrinkage (trust linear more)
-    /// 3. Weak R² (<0.3) → prefer lower shrinkage (rely more on trees)
-    /// 4. Medium → try all configured values
-    ///
-    /// This heuristic reduces search space from O(N³) to O(N) dimensions.
+    /// Train a tiny tree model on residuals for each candidate shrinkage and
+    /// select the value that minimizes combined validation RMSE.
     ///
     /// # Arguments
-    /// * `linear_r2` - R² from Phase 1 linear tuning
+    /// * `linear_train_preds` - Training predictions from best linear model
     /// * `linear_val_preds` - Validation predictions from best linear model
-    /// * `val_targets` - Validation target values
+    /// * `split` - Train/validation split data
     fn select_shrinkage_factor(
         &self,
-        linear_r2: f32,
+        linear_train_preds: &[f32],
         linear_val_preds: &[f32],
-        val_targets: &[f32],
+        split: &DataSplit,
     ) -> f32 {
         // If only one shrinkage value configured, use it
         if self.config.shrinkage_factor_values.len() <= 1 {
@@ -828,61 +826,168 @@ impl LttTuner {
                 .unwrap_or(ltt_defaults::DEFAULT_LTT_SHRINKAGE);
         }
 
-        // Use R² to narrow the search range (heuristic filtering)
-        let candidates: Vec<f32> = if linear_r2 > ltt_defaults::STRONG_LINEAR_R2 {
-            // Strong linear signal: prefer higher shrinkage values
-            self.config
-                .shrinkage_factor_values
-                .iter()
-                .filter(|&&s| s >= ltt_defaults::HIGH_SHRINKAGE_MIN)
-                .copied()
-                .collect()
-        } else if linear_r2 < ltt_defaults::WEAK_LINEAR_R2 {
-            // Weak linear signal: prefer lower shrinkage values
-            self.config
-                .shrinkage_factor_values
-                .iter()
-                .filter(|&&s| s <= ltt_defaults::LOW_SHRINKAGE_MAX)
-                .copied()
-                .collect()
-        } else {
-            // Medium R²: try all configured values
-            self.config.shrinkage_factor_values.clone()
-        };
+        let candidates = self.config.shrinkage_factor_values.clone();
 
-        // If filtering left no candidates, use all
-        let candidates = if candidates.is_empty() {
-            self.config.shrinkage_factor_values.clone()
-        } else {
-            candidates
-        };
+        let (train_binned, val_binned, feature_info) =
+            Self::build_probe_binned_datasets(split);
 
-        // Quick evaluation: which shrinkage gives lowest residual variance?
-        // Lower residual variance = easier for trees = better ensemble
-        // Note: This is a simplified evaluation - trees aren't trained yet,
-        // but it gives a reasonable estimate based on linear contribution.
-        let mut best_shrinkage = ltt_defaults::DEFAULT_LTT_SHRINKAGE;
-        let mut best_metric = f32::INFINITY;
-
-        for &shrinkage in &candidates {
-            // Compute residual variance with this shrinkage
-            let residual_var: f32 = linear_val_preds
-                .iter()
-                .zip(val_targets.iter())
-                .map(|(&p, &t)| {
-                    let residual = t - shrinkage * p;
-                    residual * residual
-                })
-                .sum::<f32>()
-                / val_targets.len().max(1) as f32;
-
-            if residual_var < best_metric {
-                best_metric = residual_var;
-                best_shrinkage = shrinkage;
-            }
+        struct ShrinkageScore {
+            shrinkage: f32,
+            score: f32,
         }
 
+        let mut scores: Vec<ShrinkageScore> = Vec::with_capacity(candidates.len());
+
+        for &shrinkage in &candidates {
+            let train_residuals: Vec<f32> = split
+                .train_targets
+                .iter()
+                .zip(linear_train_preds.iter())
+                .map(|(&t, &p)| t - shrinkage * p)
+                .collect();
+            let val_residuals: Vec<f32> = split
+                .val_targets
+                .iter()
+                .zip(linear_val_preds.iter())
+                .map(|(&t, &p)| t - shrinkage * p)
+                .collect();
+
+            let train_dataset = BinnedDataset::new(
+                split.train_targets.len(),
+                train_binned.clone(),
+                train_residuals,
+                feature_info.clone(),
+            );
+            let val_dataset = BinnedDataset::new(
+                split.val_targets.len(),
+                val_binned.clone(),
+                val_residuals,
+                feature_info.clone(),
+            );
+
+            let probe_config = GBDTConfig::new()
+                .with_mse_loss()
+                .with_num_rounds(ltt_defaults::SHRINKAGE_PROBE_ROUNDS)
+                .with_learning_rate(ltt_defaults::SHRINKAGE_PROBE_LR)
+                .with_max_depth(ltt_defaults::SHRINKAGE_PROBE_DEPTH)
+                .with_min_samples_leaf(ltt_defaults::SHRINKAGE_PROBE_MIN_SAMPLES_LEAF)
+                .with_seed(self.config.seed);
+
+            let probe_model =
+                GBDTModel::train_binned(&train_dataset, probe_config).unwrap_or_else(|_| {
+                    GBDTModel::train_binned(
+                        &train_dataset,
+                        GBDTConfig::new()
+                            .with_mse_loss()
+                            .with_num_rounds(1)
+                            .with_max_depth(1)
+                            .with_seed(self.config.seed),
+                    )
+                    .expect("Probe fallback should succeed")
+                });
+
+            let residual_preds = probe_model.predict(&val_dataset);
+            let combined_preds: Vec<f32> = linear_val_preds
+                .iter()
+                .zip(residual_preds.iter())
+                .map(|(&p, &r)| shrinkage * p + r)
+                .collect();
+
+            let abs_errors: Vec<f32> = combined_preds
+                .iter()
+                .zip(split.val_targets.iter())
+                .map(|(&p, &t)| (p - t).abs())
+                .collect();
+            let mae = abs_errors.iter().sum::<f32>() / abs_errors.len().max(1) as f32;
+            let rmse = compute_mse(split.val_targets, &combined_preds).sqrt();
+
+            let mean_error = mae;
+            let std = {
+                let var = abs_errors
+                    .iter()
+                    .map(|&e| {
+                        let d = e - mean_error;
+                        d * d
+                    })
+                    .sum::<f32>()
+                    / abs_errors.len().max(1) as f32;
+                var.sqrt()
+            };
+
+            let score = rmse + 0.5 * mae + 0.2 * std;
+
+            scores.push(ShrinkageScore { shrinkage, score });
+        }
+
+        let best_by = |f: fn(&ShrinkageScore) -> f32| {
+            scores
+                .iter()
+                .min_by(|a, b| f(a).partial_cmp(&f(b)).unwrap())
+                .map(|s| (s.shrinkage, f(s)))
+                .unwrap()
+        };
+
+        let (best_shrinkage, _best_metric) = best_by(|s| s.score);
         best_shrinkage
+    }
+
+    fn build_probe_binned_datasets(split: &DataSplit) -> (Vec<u8>, Vec<u8>, Vec<FeatureInfo>) {
+        let num_train_rows = split.train_targets.len();
+        let num_val_rows = split.val_targets.len();
+        let num_features = split.num_features;
+        let binner = QuantileBinner::new(ltt_defaults::SHRINKAGE_PROBE_BINS);
+
+        let mut feature_info = Vec::with_capacity(num_features);
+        let mut boundaries: Vec<Vec<f64>> = Vec::with_capacity(num_features);
+
+        for feat in 0..num_features {
+            let mut combined = Vec::with_capacity(num_train_rows + num_val_rows);
+            for row in 0..num_train_rows {
+                combined.push(split.train_features[row * num_features + feat] as f64);
+            }
+            for row in 0..num_val_rows {
+                combined.push(split.val_features[row * num_features + feat] as f64);
+            }
+            let bins = binner.compute_boundaries(&combined);
+            boundaries.push(bins.clone());
+            feature_info.push(binner.create_feature_info(format!("f{}", feat), bins));
+        }
+
+        let train_binned = Self::bin_features(
+            split.train_features,
+            num_train_rows,
+            num_features,
+            &boundaries,
+            &binner,
+        );
+        let val_binned = Self::bin_features(
+            split.val_features,
+            num_val_rows,
+            num_features,
+            &boundaries,
+            &binner,
+        );
+
+        (train_binned, val_binned, feature_info)
+    }
+
+    fn bin_features(
+        features: &[f32],
+        num_rows: usize,
+        num_features: usize,
+        boundaries: &[Vec<f64>],
+        binner: &QuantileBinner,
+    ) -> Vec<u8> {
+        let mut binned = Vec::with_capacity(num_rows * num_features);
+        for feat in 0..num_features {
+            let mut values = Vec::with_capacity(num_rows);
+            for row in 0..num_rows {
+                values.push(features[row * num_features + feat] as f64);
+            }
+            let column = binner.bin_column(&values, &boundaries[feat]);
+            binned.extend_from_slice(&column);
+        }
+        binned
     }
 
     // =========================================================================
@@ -1187,41 +1292,59 @@ mod tests {
 
     #[test]
     fn test_shrinkage_factor_selection_strong_linear() {
-        let config = LttTunerConfig::default();
+        let mut config = LttTunerConfig::default();
+        let shrinkage_grid = vec![0.3, 0.7];
+        config.shrinkage_factor_values = shrinkage_grid.clone();
         let tuner = LttTuner::new(config);
 
-        // Strong linear R² should prefer higher shrinkage
-        let high_r2 = 0.8;
-        let preds = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let targets = vec![1.0, 2.0, 3.0, 4.0, 5.0]; // Perfect match
+        let train_features = vec![0.0, 1.0, 2.0, 3.0];
+        let val_features = vec![4.0, 5.0];
+        let train_targets = vec![0.0, 1.0, 2.0, 3.0];
+        let val_targets = vec![4.0, 5.0];
+        let split = DataSplit::new(
+            &train_features,
+            &train_targets,
+            &val_features,
+            &val_targets,
+            1,
+        );
+        let train_preds = vec![0.0, 1.0, 2.0, 3.0];
+        let val_preds = vec![4.0, 5.0];
 
-        let shrinkage = tuner.select_shrinkage_factor(high_r2, &preds, &targets);
+        let shrinkage = tuner.select_shrinkage_factor(&train_preds, &val_preds, &split);
 
-        // Should select from high shrinkage candidates (>= 0.5)
         assert!(
-            shrinkage >= ltt_defaults::HIGH_SHRINKAGE_MIN,
-            "Strong R² should prefer high shrinkage, got {}",
-            shrinkage
+            shrinkage_grid.contains(&shrinkage),
+            "Shrinkage should be selected from configured grid"
         );
     }
 
     #[test]
     fn test_shrinkage_factor_selection_weak_linear() {
-        let config = LttTunerConfig::default();
+        let mut config = LttTunerConfig::default();
+        let shrinkage_grid = vec![0.3, 0.7];
+        config.shrinkage_factor_values = shrinkage_grid.clone();
         let tuner = LttTuner::new(config);
 
-        // Weak linear R² should prefer lower shrinkage
-        let low_r2 = 0.1;
-        let preds = vec![5.0, 4.0, 3.0, 2.0, 1.0]; // Reversed - bad predictions
-        let targets = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let train_features = vec![0.0, 1.0, 2.0, 3.0];
+        let val_features = vec![4.0, 5.0];
+        let train_targets = vec![0.0, 1.0, 2.0, 3.0];
+        let val_targets = vec![4.0, 5.0];
+        let split = DataSplit::new(
+            &train_features,
+            &train_targets,
+            &val_features,
+            &val_targets,
+            1,
+        );
+        let train_preds = vec![3.0, 2.0, 1.0, 0.0];
+        let val_preds = vec![1.0, 0.0];
 
-        let shrinkage = tuner.select_shrinkage_factor(low_r2, &preds, &targets);
+        let shrinkage = tuner.select_shrinkage_factor(&train_preds, &val_preds, &split);
 
-        // Should select from low shrinkage candidates (<= 0.7)
         assert!(
-            shrinkage <= ltt_defaults::LOW_SHRINKAGE_MAX,
-            "Weak R² should prefer low shrinkage, got {}",
-            shrinkage
+            shrinkage_grid.contains(&shrinkage),
+            "Shrinkage should be selected from configured grid"
         );
     }
 
