@@ -1,7 +1,11 @@
 //! Configuration for UniversalModel
 
 use crate::dataset::feature_extractor::FeatureExtractor;
-use crate::learner::{LinearConfig, TreeConfig};
+use crate::defaults::{
+    gbdt as gbdt_defaults, seeds as seeds_defaults, tree as tree_defaults,
+    universal as universal_defaults,
+};
+use crate::learner::{LinearConfig, LinearPreset, TreeConfig, TreePreset};
 use crate::model::universal::mode::BoostingMode;
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -36,6 +40,12 @@ pub struct UniversalConfig {
     /// Early stopping rounds (0 to disable)
     pub early_stopping_rounds: usize,
 
+    /// Calibration set ratio for conformal prediction (0.0 to disable)
+    pub calibration_ratio: f32,
+
+    /// Conformal prediction quantile (e.g., 0.9 for 90% coverage)
+    pub conformal_quantile: f32,
+
     /// Random seed
     pub seed: u64,
 
@@ -66,25 +76,73 @@ impl Default for UniversalConfig {
     fn default() -> Self {
         Self {
             mode: BoostingMode::PureTree,
-            num_rounds: 100,
+            num_rounds: gbdt_defaults::DEFAULT_NUM_ROUNDS,
             tree_config: TreeConfig::default(),
             linear_config: LinearConfig::default(),
-            learning_rate: 0.1,
-            subsample: 1.0,
-            validation_ratio: 0.0,
-            early_stopping_rounds: 0,
-            seed: 42,
-            linear_rounds: 1, // Single round with many CD iterations (fit once)
-            max_linear_memory_mb: 0, // No limit by default
+            learning_rate: tree_defaults::DEFAULT_LEARNING_RATE,
+            subsample: gbdt_defaults::DEFAULT_SUBSAMPLE,
+            validation_ratio: gbdt_defaults::DEFAULT_VALIDATION_RATIO,
+            early_stopping_rounds: gbdt_defaults::DEFAULT_EARLY_STOPPING_ROUNDS,
+            calibration_ratio: gbdt_defaults::DEFAULT_CALIBRATION_RATIO,
+            conformal_quantile: gbdt_defaults::DEFAULT_CONFORMAL_QUANTILE,
+            seed: seeds_defaults::DEFAULT_SEED,
+            linear_rounds: universal_defaults::DEFAULT_LINEAR_ROUNDS, // Single round with many CD iterations (fit once)
+            max_linear_memory_mb: universal_defaults::DEFAULT_MAX_LINEAR_MEMORY_MB, // No limit by default
             feature_extractor: None,
         }
     }
+}
+
+/// Presets for common UniversalModel configurations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UniversalPreset {
+    /// Standard GBDT (GBDTConfig wrapper).
+    PureTree,
+    /// Linear first, then tree residuals.
+    LinearThenTree,
+    /// Bagged trees for variance reduction.
+    RandomForest,
+    /// LinearThenTree + aggressive linear shrinkage.
+    TimeSeries,
+    /// RandomForest + regularized trees.
+    NoisyTabular,
+    /// PureTree + conformal calibration.
+    UncertaintyAware,
 }
 
 impl UniversalConfig {
     /// Create new config with defaults
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Apply a preset configuration.
+    pub fn with_preset(mut self, preset: UniversalPreset) -> Self {
+        match preset {
+            UniversalPreset::PureTree => {
+                self.mode = BoostingMode::PureTree;
+            }
+            UniversalPreset::LinearThenTree => {
+                self.mode = BoostingMode::LinearThenTree;
+            }
+            UniversalPreset::RandomForest => {
+                self.mode = BoostingMode::RandomForest;
+            }
+            UniversalPreset::TimeSeries => {
+                self.mode = BoostingMode::LinearThenTree;
+                self.linear_config = self.linear_config.with_preset(LinearPreset::Aggressive);
+            }
+            UniversalPreset::NoisyTabular => {
+                self.mode = BoostingMode::RandomForest;
+                self.tree_config = self.tree_config.with_preset(TreePreset::Regularized);
+            }
+            UniversalPreset::UncertaintyAware => {
+                self.mode = BoostingMode::PureTree;
+                self.calibration_ratio = gbdt_defaults::CONFORMAL_CALIBRATION_RATIO;
+                self.conformal_quantile = gbdt_defaults::DEFAULT_CONFORMAL_QUANTILE;
+            }
+        }
+        self
     }
 
     pub fn with_mode(mut self, mode: BoostingMode) -> Self {
@@ -124,6 +182,13 @@ impl UniversalConfig {
 
     pub fn with_early_stopping_rounds(mut self, rounds: usize) -> Self {
         self.early_stopping_rounds = rounds;
+        self
+    }
+
+    /// Enable conformal calibration for uncertainty estimates.
+    pub fn with_conformal_calibration(mut self, ratio: f32, quantile: f32) -> Self {
+        self.calibration_ratio = ratio.clamp(0.0, 0.5);
+        self.conformal_quantile = quantile.clamp(0.5, 0.99);
         self
     }
 

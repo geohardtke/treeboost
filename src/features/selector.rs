@@ -2,6 +2,8 @@
 //!
 //! Filters generated features based on variance, correlation, and target importance.
 
+use crate::defaults::feature_selection as feature_selection_defaults;
+
 /// Configuration for feature selection
 #[derive(Debug, Clone)]
 pub struct SelectionConfig {
@@ -22,12 +24,12 @@ pub struct SelectionConfig {
 impl Default for SelectionConfig {
     fn default() -> Self {
         Self {
-            min_variance: 0.01,
-            max_correlation: 0.95,
-            max_features: 50,
-            use_target_selection: true,
-            drop_collinear: false,
-            collinearity_threshold: 0.99,
+            min_variance: feature_selection_defaults::DEFAULT_MIN_VARIANCE,
+            max_correlation: feature_selection_defaults::DEFAULT_MAX_CORRELATION,
+            max_features: feature_selection_defaults::DEFAULT_MAX_FEATURES,
+            use_target_selection: feature_selection_defaults::DEFAULT_USE_TARGET_SELECTION,
+            drop_collinear: feature_selection_defaults::DEFAULT_DROP_COLLINEAR,
+            collinearity_threshold: feature_selection_defaults::DEFAULT_COLLINEARITY_THRESHOLD,
         }
     }
 }

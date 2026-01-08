@@ -54,7 +54,9 @@ pub mod profiler;
 mod report;
 mod stats;
 
-pub use analyzer::{AnalysisConfig, Confidence, DatasetAnalysis, ModeScores, Recommendation};
+pub use analyzer::{
+    AnalysisConfig, AnalysisPreset, Confidence, DatasetAnalysis, ModeScores, Recommendation,
+};
 pub use profiler::{
     ColumnDataType, ColumnProfile, DataFrameProfile, DropReason, DroppedColumn, TaskType,
 };

@@ -44,7 +44,9 @@ pub(super) fn tune_hyperparameters(
             if matches!(mode, BoostingMode::LinearThenTree) {
                 use crate::learner::{LinearConfig, TreeConfig};
                 // Use stronger regularization for stability
-                let linear_config = LinearConfig::ridge(1.0)
+                let linear_config = LinearConfig::default()
+                    .with_preset(crate::learner::LinearPreset::Ridge)
+                    .with_lambda(1.0)
                     .with_shrinkage_factor(0.5)
                     .with_max_iter(200);
                 let tree_config = TreeConfig::default().with_max_depth(3);
@@ -91,9 +93,13 @@ fn tune_tree_model(
 
     // Get tuning configuration based on tuning level
     let tuner_cfg = match config.tuning_level {
-        TuningLevel::Quick => TreeTunerConfig::quick(),
-        TuningLevel::Standard => TreeTunerConfig::standard(),
-        TuningLevel::Thorough => TreeTunerConfig::thorough(),
+        TuningLevel::Quick => TreeTunerConfig::with_preset(crate::model::TreeTunerPreset::Quick),
+        TuningLevel::Standard => {
+            TreeTunerConfig::with_preset(crate::model::TreeTunerPreset::Standard)
+        }
+        TuningLevel::Thorough => {
+            TreeTunerConfig::with_preset(crate::model::TreeTunerPreset::Thorough)
+        }
         TuningLevel::None => return Ok((UniversalConfig::default().with_mode(mode), None)),
     };
 
@@ -200,10 +206,12 @@ fn tune_ltt(
 
     // Create tuner config based on tuning level
     let tuner_config = match config.tuning_level {
-        TuningLevel::Quick => LttTunerConfig::quick(),
+        TuningLevel::Quick => LttTunerConfig::default().with_preset(crate::tuner::ltt::LttTunerPreset::Quick),
         TuningLevel::Standard => LttTunerConfig::default(),
-        TuningLevel::Thorough => LttTunerConfig::thorough(),
-        TuningLevel::None => LttTunerConfig::quick(), // Should not reach here
+        TuningLevel::Thorough => {
+            LttTunerConfig::default().with_preset(crate::tuner::ltt::LttTunerPreset::Thorough)
+        }
+        TuningLevel::None => LttTunerConfig::default().with_preset(crate::tuner::ltt::LttTunerPreset::Quick), // Should not reach here
     };
 
     let tuner = LttTuner::new(tuner_config);

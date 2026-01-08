@@ -30,21 +30,22 @@
 //! Based on LightGBM's EFB algorithm from "LightGBM: A Highly Efficient Gradient
 //! Boosting Decision Tree" (NeurIPS 2017).
 
+use crate::defaults::bundler as bundler_defaults;
 use rkyv::{Archive, Deserialize, Serialize};
 
 use super::{BinnedDataset, FeatureInfo, DEFAULT_BIN};
 
 /// Maximum allowed conflict ratio (fraction of samples with conflicting non-zero values)
 /// LightGBM uses 0.01% (1/10000). We use a slightly higher threshold for robustness.
-const MAX_CONFLICT_RATIO: f32 = 0.001; // 0.1% of samples
+const MAX_CONFLICT_RATIO: f32 = bundler_defaults::DEFAULT_MAX_CONFLICT_RATIO;
 
 /// Minimum sparsity for a feature to be considered for bundling
 /// Dense features don't benefit much from bundling
-const MIN_SPARSITY_FOR_BUNDLING: f32 = 0.5; // At least 50% zeros
+const MIN_SPARSITY_FOR_BUNDLING: f32 = bundler_defaults::DEFAULT_MIN_SPARSITY;
 
 /// Maximum number of bundle candidates to search when adding a feature
 /// Limits O(n²) complexity; LightGBM uses 100
-const MAX_SEARCH_BUNDLES: usize = 100;
+const MAX_SEARCH_BUNDLES: usize = bundler_defaults::DEFAULT_MAX_SEARCH_BUNDLES;
 
 /// A bundle of mutually exclusive features
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
@@ -175,8 +176,8 @@ impl Default for BundlerConfig {
         Self {
             max_conflict_ratio: MAX_CONFLICT_RATIO,
             min_sparsity: MIN_SPARSITY_FOR_BUNDLING,
-            max_bins_per_bundle: 255,
-            enabled: true,
+            max_bins_per_bundle: bundler_defaults::DEFAULT_MAX_BINS_PER_BUNDLE,
+            enabled: bundler_defaults::DEFAULT_BUNDLING_ENABLED,
         }
     }
 }

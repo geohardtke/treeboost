@@ -46,6 +46,7 @@
 use crate::analysis::{Confidence, DataFrameProfile, DatasetAnalysis};
 use crate::dataset::feature_extractor::LinearFeatureConfig;
 use crate::dataset::{BinnedDataset, DataPipeline};
+use crate::defaults::auto as auto_defaults;
 use crate::features::{FeaturePlan, SmartFeatureEngine};
 use crate::model::config::{AutoConfig, BuildPhaseTimes, BuildResult, TuningLevel};
 use crate::model::progress::{ProgressCallback, ProgressUpdate, TrainingPhase};
@@ -514,7 +515,7 @@ impl AutoBuilder {
         // Otherwise use Tree
         let has_linear_signal = profile.columns.iter().any(|c| {
             c.target_correlation
-                .map(|r| r.abs() > crate::model::config::LINEAR_SIGNAL_THRESHOLD)
+                .map(|r| r.abs() > auto_defaults::LINEAR_SIGNAL_THRESHOLD)
                 .unwrap_or(false)
         });
 

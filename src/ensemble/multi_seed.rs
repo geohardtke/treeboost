@@ -5,6 +5,7 @@
 
 use crate::booster::{GBDTConfig, GBDTModel};
 use crate::dataset::{split_kfold, BinnedDataset};
+use crate::defaults::{ensemble as ensemble_defaults, seeds as seeds_defaults};
 use crate::tuner::Metric;
 use crate::Result;
 use rayon::prelude::*;
@@ -34,9 +35,9 @@ pub struct MultiSeedConfig {
 impl Default for MultiSeedConfig {
     fn default() -> Self {
         Self {
-            n_seeds: 5,
-            base_seed: 42,
-            n_folds: 5,
+            n_seeds: ensemble_defaults::DEFAULT_N_SEEDS,
+            base_seed: seeds_defaults::DEFAULT_SEED,
+            n_folds: ensemble_defaults::DEFAULT_N_FOLDS,
             parallel: true,
         }
     }

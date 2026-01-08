@@ -25,6 +25,7 @@
 
 use crate::analysis::profiler::{ColumnDataType, ColumnProfile, DataFrameProfile};
 use crate::analysis::DatasetAnalysis;
+use crate::defaults::features as feature_defaults;
 use std::collections::HashSet;
 
 /// Feature generation plan
@@ -159,6 +160,17 @@ pub struct SmartFeatureConfig {
     pub skip_features: HashSet<String>,
 }
 
+/// Presets for smart feature engineering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmartFeaturePreset {
+    /// All feature types enabled, 50 max.
+    Standard,
+    /// Polynomial + ratios only, 20 max.
+    Minimal,
+    /// All types, 100 max, lower thresholds.
+    Aggressive,
+}
+
 impl Default for SmartFeatureConfig {
     fn default() -> Self {
         Self {
@@ -166,13 +178,42 @@ impl Default for SmartFeatureConfig {
             enable_ratios: true,
             enable_interactions: true,
             enable_time_features: true,
-            max_new_features: 50,
-            low_linear_r2_threshold: 0.3,
-            ratio_correlation_threshold: 0.5,
-            top_n_polynomial: 5,
-            top_n_interactions: 10,
+            max_new_features: feature_defaults::DEFAULT_MAX_NEW_FEATURES,
+            low_linear_r2_threshold: feature_defaults::LOW_LINEAR_R2_THRESHOLD,
+            ratio_correlation_threshold: feature_defaults::RATIO_CORRELATION_THRESHOLD,
+            top_n_polynomial: feature_defaults::TOP_N_POLYNOMIAL,
+            top_n_interactions: feature_defaults::TOP_N_INTERACTIONS,
             skip_features: HashSet::new(),
         }
+    }
+}
+
+impl SmartFeatureConfig {
+    /// Apply a preset configuration.
+    pub fn with_preset(mut self, preset: SmartFeaturePreset) -> Self {
+        match preset {
+            SmartFeaturePreset::Standard => {}
+            SmartFeaturePreset::Minimal => {
+                self.enable_polynomial = true;
+                self.enable_ratios = true;
+                self.enable_interactions = false;
+                self.enable_time_features = false;
+                self.max_new_features = feature_defaults::MINIMAL_MAX_NEW_FEATURES;
+            }
+            SmartFeaturePreset::Aggressive => {
+                self.enable_polynomial = true;
+                self.enable_ratios = true;
+                self.enable_interactions = true;
+                self.enable_time_features = true;
+                self.max_new_features = feature_defaults::AGGRESSIVE_MAX_NEW_FEATURES;
+                self.low_linear_r2_threshold = feature_defaults::AGGRESSIVE_LOW_LINEAR_R2_THRESHOLD;
+                self.ratio_correlation_threshold =
+                    feature_defaults::AGGRESSIVE_RATIO_CORRELATION_THRESHOLD;
+                self.top_n_polynomial = feature_defaults::AGGRESSIVE_TOP_N_POLYNOMIAL;
+                self.top_n_interactions = feature_defaults::AGGRESSIVE_TOP_N_INTERACTIONS;
+            }
+        }
+        self
     }
 }
 

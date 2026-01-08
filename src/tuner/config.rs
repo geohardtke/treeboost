@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::defaults::{seeds as seeds_defaults, tuner as tuner_defaults};
 use crate::TreeBoostError;
 
 /// Model serialization format
@@ -244,9 +245,24 @@ pub struct ParameterSpace {
     params: Vec<ParamDef>,
 }
 
+/// Presets for parameter search spaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpacePreset {
+    /// max_depth, learning_rate only.
+    Minimal,
+    /// Standard regression parameters.
+    Regression,
+    /// Classification-optimized parameters.
+    Classification,
+    /// All parameters including GOSS and colsample.
+    Exhaustive,
+    /// UniversalModel mode selection + common params.
+    Universal,
+}
+
 impl Default for ParameterSpace {
     fn default() -> Self {
-        Self::default_regression()
+        Self::with_preset(SpacePreset::Regression)
     }
 }
 
@@ -256,10 +272,90 @@ impl ParameterSpace {
         Self { params: Vec::new() }
     }
 
+    /// Create a preset search space.
+    pub fn with_preset(preset: SpacePreset) -> Self {
+        match preset {
+            SpacePreset::Minimal => Self::minimal_space(),
+            SpacePreset::Regression => Self::regression_space(),
+            SpacePreset::Classification => Self::classification_space(),
+            SpacePreset::Exhaustive => Self::exhaustive(),
+            SpacePreset::Universal => Self::universal_space(),
+        }
+    }
+
     /// Create default search space for regression
     ///
     /// Includes: max_depth, learning_rate, subsample, lambda, entropy_weight
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use ParameterSpace::with_preset(SpacePreset::Regression)"
+    )]
     pub fn default_regression() -> Self {
+        Self::regression_space()
+    }
+
+    /// Create default search space for classification
+    ///
+    /// Same as regression but with different default centers optimized for classification
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use ParameterSpace::with_preset(SpacePreset::Classification)"
+    )]
+    pub fn default_classification() -> Self {
+        Self::classification_space()
+    }
+
+    /// Create an exhaustive search space (adds GOSS and colsample).
+    pub fn exhaustive() -> Self {
+        Self {
+            params: vec![
+                ParamDef::new("max_depth", ParamBounds::discrete(2, 12), 6.0),
+                ParamDef::new("learning_rate", ParamBounds::log_continuous(0.01, 0.5), 0.1),
+                ParamDef::new("subsample", ParamBounds::continuous(0.5, 1.0), 0.8),
+                ParamDef::new("colsample", ParamBounds::continuous(0.5, 1.0), 1.0),
+                ParamDef::new("lambda", ParamBounds::continuous(0.0, 10.0), 1.0),
+                ParamDef::new("entropy_weight", ParamBounds::continuous(0.0, 0.5), 0.0),
+                ParamDef::new("goss_top_rate", ParamBounds::continuous(0.1, 0.4), 0.2),
+                ParamDef::new("goss_other_rate", ParamBounds::continuous(0.05, 0.2), 0.1),
+            ],
+        }
+    }
+
+    /// Create a minimal search space (only learning_rate and max_depth)
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use ParameterSpace::with_preset(SpacePreset::Minimal)"
+    )]
+    pub fn minimal() -> Self {
+        Self::minimal_space()
+    }
+
+    /// Create search space for UniversalModel with mode selection
+    ///
+    /// Includes boosting mode (PureTree, LinearThenTree, RandomForest) and
+    /// parameters relevant to all modes.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use ParameterSpace::with_preset(SpacePreset::Universal)"
+    )]
+    pub fn universal_model() -> Self {
+        Self::universal_space()
+    }
+
+    /// Create search space for UniversalModel focusing on mode selection only
+    ///
+    /// Use this when you want to find the best mode without tuning other parameters.
+    pub fn universal_mode_only() -> Self {
+        Self {
+            params: vec![ParamDef::new(
+                "mode",
+                ParamBounds::categorical_from_strs(&["PureTree", "LinearThenTree", "RandomForest"]),
+                0.0,
+            )],
+        }
+    }
+
+    fn regression_space() -> Self {
         Self {
             params: vec![
                 ParamDef::new("max_depth", ParamBounds::discrete(2, 12), 6.0),
@@ -271,10 +367,7 @@ impl ParameterSpace {
         }
     }
 
-    /// Create default search space for classification
-    ///
-    /// Same as regression but with different default centers optimized for classification
-    pub fn default_classification() -> Self {
+    fn classification_space() -> Self {
         Self {
             params: vec![
                 ParamDef::new("max_depth", ParamBounds::discrete(2, 10), 5.0),
@@ -286,8 +379,7 @@ impl ParameterSpace {
         }
     }
 
-    /// Create a minimal search space (only learning_rate and max_depth)
-    pub fn minimal() -> Self {
+    fn minimal_space() -> Self {
         Self {
             params: vec![
                 ParamDef::new("max_depth", ParamBounds::discrete(3, 10), 6.0),
@@ -296,11 +388,7 @@ impl ParameterSpace {
         }
     }
 
-    /// Create search space for UniversalModel with mode selection
-    ///
-    /// Includes boosting mode (PureTree, LinearThenTree, RandomForest) and
-    /// parameters relevant to all modes.
-    pub fn universal_model() -> Self {
+    fn universal_space() -> Self {
         Self {
             params: vec![
                 // Mode selection (categorical)
@@ -321,19 +409,6 @@ impl ParameterSpace {
                 ParamDef::new("tree_max_depth", ParamBounds::discrete(3, 10), 6.0),
                 ParamDef::new("tree_lambda", ParamBounds::continuous(0.0, 10.0), 1.0),
             ],
-        }
-    }
-
-    /// Create search space for UniversalModel focusing on mode selection only
-    ///
-    /// Use this when you want to find the best mode without tuning other parameters.
-    pub fn universal_mode_only() -> Self {
-        Self {
-            params: vec![ParamDef::new(
-                "mode",
-                ParamBounds::categorical_from_strs(&["PureTree", "LinearThenTree", "RandomForest"]),
-                0.0,
-            )],
         }
     }
 
@@ -1123,34 +1198,47 @@ pub struct TunerConfig {
     pub save_model_formats: Vec<ModelFormat>,
 }
 
+/// Presets for tuner intensity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunerPreset {
+    /// 1 iteration, minimal rounds - CI/Debug only.
+    SmokeTest,
+    /// 2 iterations, loose thresholds - fast exploration.
+    Quick,
+    /// 5 iterations - balanced default.
+    Balanced,
+    /// 7+ iterations, strict thresholds - deep search.
+    Thorough,
+}
+
 impl Default for TunerConfig {
     fn default() -> Self {
         Self {
-            space: ParameterSpace::default_regression(),
-            n_iterations: 5,     // Max zoom iterations
-            initial_spread: 1.0, // Explore full range initially (100%)
-            zoom_factor: 0.8,    // Keep 80% each iteration (remove outliers)
+            space: ParameterSpace::with_preset(SpacePreset::Regression),
+            n_iterations: tuner_defaults::DEFAULT_N_ITERATIONS, // Max zoom iterations
+            initial_spread: tuner_defaults::DEFAULT_INITIAL_SPREAD, // Explore full range initially (100%)
+            zoom_factor: tuner_defaults::DEFAULT_ZOOM_FACTOR, // Keep 80% each iteration (remove outliers)
             grid_strategy: GridStrategy::Cartesian { points_per_dim: 3 },
             eval_strategy: EvalStrategy::Holdout {
-                validation_ratio: 0.2,
+                validation_ratio: tuner_defaults::DEFAULT_TUNER_VAL_RATIO,
                 folds: 1,
             },
             tuning_mode: TuningMode::Optimistic, // Fast by default (for backwards compat)
             parallel_trials: false,              // Conservative default (GPU contention)
             n_parallel: 0,                       // Auto-detect
-            num_rounds: 100,                     // Rounds per trial (early stopping will kick in)
+            num_rounds: tuner_defaults::DEFAULT_TUNER_ROUNDS, // Rounds per trial
 
             // Inner loop: Early stopping for individual models
-            early_stopping_rounds: 10, // Stop if no improvement for 10 rounds
-            validation_ratio: 0.2,     // 20% for validation
+            early_stopping_rounds: tuner_defaults::DEFAULT_TUNER_EARLY_STOP, // Stop if no improvement
+            validation_ratio: tuner_defaults::DEFAULT_TUNER_VAL_RATIO,
 
             // Outer loop: Diminishing returns for hyperparameter search
-            improvement_threshold: 0.001, // Stop if < 0.1% improvement between iterations
+            improvement_threshold: tuner_defaults::DEFAULT_IMPROVEMENT_THRESHOLD,
 
             // Balance check for classification
-            min_f1_score: 0.8, // Require at least 80% F1 score
+            min_f1_score: tuner_defaults::DEFAULT_MIN_F1_SCORE,
 
-            seed: 42,
+            seed: seeds_defaults::DEFAULT_SEED,
             verbose: true,
             optimization_metric: OptimizationMetric::ValidationLoss,
             task_type: TaskType::Regression,
@@ -1166,24 +1254,63 @@ impl TunerConfig {
         Self::default()
     }
 
+    /// Apply a preset configuration.
+    pub fn with_preset(mut self, preset: TunerPreset) -> Self {
+        match preset {
+            TunerPreset::SmokeTest => {
+                self.n_iterations = tuner_defaults::SMOKE_TEST_N_ITERATIONS;
+                self.num_rounds = tuner_defaults::QUICK_TUNER_ROUNDS;
+                self.early_stopping_rounds = tuner_defaults::QUICK_TUNER_EARLY_STOP;
+                self.improvement_threshold = tuner_defaults::QUICK_IMPROVEMENT_THRESHOLD;
+            }
+            TunerPreset::Quick => {
+                self.n_iterations = tuner_defaults::QUICK_N_ITERATIONS;
+                self.num_rounds = tuner_defaults::QUICK_TUNER_ROUNDS;
+                self.early_stopping_rounds = tuner_defaults::QUICK_TUNER_EARLY_STOP;
+                self.improvement_threshold = tuner_defaults::QUICK_IMPROVEMENT_THRESHOLD;
+            }
+            TunerPreset::Balanced => {
+                self.n_iterations = tuner_defaults::DEFAULT_N_ITERATIONS;
+                self.num_rounds = tuner_defaults::DEFAULT_TUNER_ROUNDS;
+                self.early_stopping_rounds = tuner_defaults::DEFAULT_TUNER_EARLY_STOP;
+                self.improvement_threshold = tuner_defaults::DEFAULT_IMPROVEMENT_THRESHOLD;
+            }
+            TunerPreset::Thorough => {
+                self.n_iterations = tuner_defaults::THOROUGH_N_ITERATIONS;
+                self.num_rounds = tuner_defaults::THOROUGH_TUNER_ROUNDS;
+                self.early_stopping_rounds = tuner_defaults::THOROUGH_TUNER_EARLY_STOP;
+                self.improvement_threshold = tuner_defaults::THOROUGH_IMPROVEMENT_THRESHOLD;
+            }
+        }
+        self
+    }
+
     /// Create a quick tuning config (2 iterations, fewer rounds)
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use TunerConfig::default().with_preset(TunerPreset::Quick)"
+    )]
     pub fn quick() -> Self {
         Self {
-            n_iterations: 2,
-            num_rounds: 50,
-            early_stopping_rounds: 5,    // Faster inner stopping
-            improvement_threshold: 0.01, // More lenient outer stopping (1%)
+            n_iterations: tuner_defaults::QUICK_N_ITERATIONS,
+            num_rounds: tuner_defaults::QUICK_TUNER_ROUNDS,
+            early_stopping_rounds: tuner_defaults::QUICK_TUNER_EARLY_STOP, // Faster inner stopping
+            improvement_threshold: tuner_defaults::QUICK_IMPROVEMENT_THRESHOLD, // More lenient outer stopping
             ..Default::default()
         }
     }
 
     /// Create a thorough tuning config (more iterations, stricter thresholds)
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use TunerConfig::default().with_preset(TunerPreset::Thorough)"
+    )]
     pub fn thorough() -> Self {
         Self {
-            n_iterations: 7,
-            num_rounds: 200,
-            early_stopping_rounds: 20,     // More patience per model
-            improvement_threshold: 0.0001, // Stricter outer threshold (0.01%)
+            n_iterations: tuner_defaults::THOROUGH_N_ITERATIONS,
+            num_rounds: tuner_defaults::THOROUGH_TUNER_ROUNDS,
+            early_stopping_rounds: tuner_defaults::THOROUGH_TUNER_EARLY_STOP, // More patience per model
+            improvement_threshold: tuner_defaults::THOROUGH_IMPROVEMENT_THRESHOLD, // Stricter outer threshold
             ..Default::default()
         }
     }

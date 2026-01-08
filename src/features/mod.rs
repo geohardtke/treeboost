@@ -34,12 +34,14 @@ mod selector;
 pub mod smart;
 mod stats;
 
+use crate::defaults::feature_generation as feature_generation_defaults;
 pub use interaction::{InteractionGenerator, InteractionType, PairSelection};
 pub use polynomial::PolynomialGenerator;
 pub use ratio::RatioGenerator;
 pub use selector::{FeatureSelector, SelectionConfig};
 pub use smart::{
-    FeaturePlan, LttFeaturePlan, SmartFeatureConfig, SmartFeatureEngine, TimeFeatureType,
+    FeaturePlan, LttFeaturePlan, SmartFeatureConfig, SmartFeatureEngine, SmartFeaturePreset,
+    TimeFeatureType,
 };
 
 /// Trait for feature generation strategies
@@ -90,12 +92,12 @@ pub struct FeatureGenerationConfig {
 impl Default for FeatureGenerationConfig {
     fn default() -> Self {
         Self {
-            polynomials: true,
-            ratios: true,
-            interactions: false, // Off by default (can generate many features)
-            max_degree: 2,
-            max_ratios_per_feature: 3,
-            max_interaction_pairs: 20,
+            polynomials: feature_generation_defaults::DEFAULT_POLYNOMIALS,
+            ratios: feature_generation_defaults::DEFAULT_RATIOS,
+            interactions: feature_generation_defaults::DEFAULT_INTERACTIONS, // Off by default
+            max_degree: feature_generation_defaults::DEFAULT_MAX_DEGREE,
+            max_ratios_per_feature: feature_generation_defaults::DEFAULT_MAX_RATIOS_PER_FEATURE,
+            max_interaction_pairs: feature_generation_defaults::DEFAULT_MAX_INTERACTION_PAIRS,
             interaction_types: vec![InteractionType::Multiply],
             selection: SelectionConfig::default(),
         }

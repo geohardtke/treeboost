@@ -21,7 +21,7 @@ pub mod wgpu;
 #[cfg(feature = "cuda")]
 pub mod cuda;
 
-pub use config::{BackendConfig, BackendType, GpuMode};
+pub use config::{BackendConfig, BackendPreset, BackendType, GpuMode};
 pub use scalar::ScalarBackend;
 pub use traits::{BinStorage, HistogramBackend, SparseColumn, SplitCandidate, SplitConfig};
 

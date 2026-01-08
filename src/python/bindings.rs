@@ -34,7 +34,7 @@ use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::backend::{BackendType, GpuMode};
-use crate::booster::{GBDTConfig, GBDTModel, LossType};
+use crate::booster::{GBDTConfig, GBDTModel, GbdtPreset, LossType};
 use crate::serialize;
 use crate::tree::MonotonicConstraint;
 use crate::tuner::ModelFormat;
@@ -200,6 +200,50 @@ impl PyGBDTConfig {
         Self {
             inner: GBDTConfig::default(),
         }
+    }
+
+    /// Create a new configuration from a preset name.
+    ///
+    /// Valid presets: standard, speed, accuracy, smalldata, largedata, conformal.
+    #[staticmethod]
+    fn preset(preset: &str) -> PyResult<Self> {
+        let preset = match preset.to_lowercase().as_str() {
+            "standard" => GbdtPreset::Standard,
+            "speed" => GbdtPreset::Speed,
+            "accuracy" => GbdtPreset::Accuracy,
+            "smalldata" | "small_data" => GbdtPreset::SmallData,
+            "largedata" | "large_data" => GbdtPreset::LargeData,
+            "conformal" => GbdtPreset::Conformal,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "unknown preset (use: standard, speed, accuracy, smalldata, largedata, conformal)",
+                ));
+            }
+        };
+        Ok(Self {
+            inner: GBDTConfig::default().with_preset(preset),
+        })
+    }
+
+    /// Return a new config with the given preset applied.
+    ///
+    /// Valid presets: standard, speed, accuracy, smalldata, largedata, conformal.
+    fn with_preset(&self, preset: &str) -> PyResult<Self> {
+        let mut inner = self.inner.clone();
+        inner = match preset.to_lowercase().as_str() {
+            "standard" => inner.with_preset(GbdtPreset::Standard),
+            "speed" => inner.with_preset(GbdtPreset::Speed),
+            "accuracy" => inner.with_preset(GbdtPreset::Accuracy),
+            "smalldata" | "small_data" => inner.with_preset(GbdtPreset::SmallData),
+            "largedata" | "large_data" => inner.with_preset(GbdtPreset::LargeData),
+            "conformal" => inner.with_preset(GbdtPreset::Conformal),
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "unknown preset (use: standard, speed, accuracy, smalldata, largedata, conformal)",
+                ));
+            }
+        };
+        Ok(Self { inner })
     }
 
     // Ensemble parameters

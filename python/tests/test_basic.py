@@ -289,3 +289,14 @@ def test_feature_names():
     model = GBDTModel.train(X, y, config, feature_names=feature_names)
 
     assert model.feature_names == feature_names
+
+
+def test_preset_configs():
+    """Test preset-based configuration helpers."""
+    from treeboost import GBDTConfig
+
+    accuracy_cfg = GBDTConfig.preset("accuracy")
+    assert accuracy_cfg.max_depth >= 8
+
+    conformal_cfg = GBDTConfig.preset("conformal")
+    assert conformal_cfg.calibration_ratio > 0.0

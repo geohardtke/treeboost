@@ -431,6 +431,12 @@ impl UniversalModel {
                 .with_early_stopping(config.early_stopping_rounds, config.validation_ratio);
         }
 
+        // Conformal calibration
+        if config.calibration_ratio > 0.0 {
+            gbdt_config.calibration_ratio = config.calibration_ratio;
+            gbdt_config.conformal_quantile = config.conformal_quantile;
+        }
+
         // Set loss type based on loss_fn type name (best effort)
         let loss_name = std::any::type_name_of_val(loss_fn);
         if loss_name.contains("PseudoHuber") {

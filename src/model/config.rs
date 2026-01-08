@@ -5,6 +5,7 @@
 
 use crate::analysis::{Confidence, DataFrameProfile, DatasetAnalysis};
 use crate::dataset::feature_extractor::LinearFeatureConfig;
+use crate::defaults::{auto as auto_defaults, seeds as seeds_defaults};
 use crate::features::FeaturePlan;
 use crate::model::progress::{ProgressCallback, QuietProgress};
 use crate::model::{BoostingMode, UniversalModel};
@@ -12,17 +13,6 @@ use crate::preprocessing::PreprocessingPlan;
 use crate::tuner::ltt::LttTuningResult;
 use std::sync::Arc;
 use std::time::Duration;
-
-// ============================================================================
-// Constants
-// ============================================================================
-
-/// Default validation split ratio for hyperparameter tuning
-pub const DEFAULT_VALIDATION_RATIO: f32 = 0.2;
-
-/// Minimum absolute correlation coefficient for detecting linear signal in data
-/// Used in mode selection to determine if LinearThenTree is appropriate
-pub const LINEAR_SIGNAL_THRESHOLD: f32 = 0.3;
 
 /// Tuning intensity level
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -130,13 +120,13 @@ impl Default for AutoConfig {
     fn default() -> Self {
         Self {
             tuning_level: TuningLevel::Standard,
-            val_ratio: 0.2,
+            val_ratio: auto_defaults::DEFAULT_VALIDATION_RATIO,
             auto_features: true,
             auto_preprocessing: true,
             auto_mode: true,
             force_mode: None,
-            max_generated_features: 50,
-            seed: 42,
+            max_generated_features: auto_defaults::AUTO_FEATURES_DEFAULT_COUNT,
+            seed: seeds_defaults::DEFAULT_SEED,
             verbose: false,
             time_budget: None,
             progress_callback: Arc::new(QuietProgress),
@@ -302,49 +292,93 @@ pub struct TreeTunerConfig {
     pub min_f1_score: f32,
 }
 
+/// Presets for tree tuner configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeTunerPreset {
+    /// depth [3-6], 30 samples, 1 iteration.
+    Quick,
+    /// depth [3-8], 100 samples, 3 iterations.
+    Standard,
+    /// depth [3-10], 150 samples, 15 iterations.
+    Thorough,
+}
+
 impl TreeTunerConfig {
-    /// Quick tuning preset (minimal search, fast)
-    pub fn quick() -> Self {
+    fn preset_quick() -> Self {
         Self {
-            max_depth_range: (3, 6),
-            learning_rate_range: (0.05, 0.15),
+            max_depth_range: auto_defaults::QUICK_DEPTH_RANGE,
+            learning_rate_range: auto_defaults::QUICK_LR_RANGE,
             n_samples: 30,
             n_iterations: 1,
             max_rounds: 100,
             early_stopping_rounds: 10,
-            validation_ratio: DEFAULT_VALIDATION_RATIO,
+            validation_ratio: auto_defaults::DEFAULT_VALIDATION_RATIO,
             improvement_threshold: 0.001,
             min_f1_score: 0.80,
         }
     }
 
-    /// Standard tuning preset (balanced search, moderate time)
-    pub fn standard() -> Self {
+    fn preset_standard() -> Self {
         Self {
-            max_depth_range: (3, 8),
-            learning_rate_range: (0.01, 0.15),
+            max_depth_range: auto_defaults::STANDARD_DEPTH_RANGE,
+            learning_rate_range: auto_defaults::STANDARD_LR_RANGE,
             n_samples: 100,
             n_iterations: 3,
             max_rounds: 200,
             early_stopping_rounds: 10,
-            validation_ratio: DEFAULT_VALIDATION_RATIO,
+            validation_ratio: auto_defaults::DEFAULT_VALIDATION_RATIO,
             improvement_threshold: 0.001,
             min_f1_score: 0.85,
         }
     }
 
-    /// Thorough tuning preset (extensive search, production quality)
-    pub fn thorough() -> Self {
+    fn preset_thorough() -> Self {
         Self {
-            max_depth_range: (3, 10),
-            learning_rate_range: (0.01, 0.15),
+            max_depth_range: auto_defaults::THOROUGH_DEPTH_RANGE,
+            learning_rate_range: auto_defaults::STANDARD_LR_RANGE,
             n_samples: 150,
             n_iterations: 15,
             max_rounds: 200,
             early_stopping_rounds: 10,
-            validation_ratio: DEFAULT_VALIDATION_RATIO,
+            validation_ratio: auto_defaults::DEFAULT_VALIDATION_RATIO,
             improvement_threshold: 0.001,
             min_f1_score: 0.85,
+        }
+    }
+
+    /// Quick tuning preset (minimal search, fast)
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use TreeTunerConfig::with_preset(TreeTunerPreset::Quick)"
+    )]
+    pub fn quick() -> Self {
+        Self::preset_quick()
+    }
+
+    /// Standard tuning preset (balanced search, moderate time)
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use TreeTunerConfig::with_preset(TreeTunerPreset::Standard)"
+    )]
+    pub fn standard() -> Self {
+        Self::preset_standard()
+    }
+
+    /// Thorough tuning preset (extensive search, production quality)
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use TreeTunerConfig::with_preset(TreeTunerPreset::Thorough)"
+    )]
+    pub fn thorough() -> Self {
+        Self::preset_thorough()
+    }
+
+    /// Apply a preset configuration.
+    pub fn with_preset(preset: TreeTunerPreset) -> Self {
+        match preset {
+            TreeTunerPreset::Quick => Self::preset_quick(),
+            TreeTunerPreset::Standard => Self::preset_standard(),
+            TreeTunerPreset::Thorough => Self::preset_thorough(),
         }
     }
 }

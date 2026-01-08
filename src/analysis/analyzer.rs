@@ -3,6 +3,7 @@
 //! The brain of TreeBoost's automatic mode selection.
 
 use crate::dataset::BinnedDataset;
+use crate::defaults::analysis as analysis_defaults;
 use crate::model::BoostingMode;
 use crate::Result;
 use polars::prelude::*;
@@ -35,36 +36,52 @@ pub struct AnalysisConfig {
     pub seed: u64,
 }
 
+/// Presets for analysis configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalysisPreset {
+    Fast,
+    Standard,
+    Thorough,
+}
+
 impl Default for AnalysisConfig {
     fn default() -> Self {
         Self {
-            max_sample_rows: 20_000,
-            linear_max_iter: 200, // Increased for better linear signal detection
-            tree_max_depth: 6,    // Increased for better tree signal detection
-            top_features_to_analyze: 50,
-            seed: 42,
+            max_sample_rows: analysis_defaults::DEFAULT_MAX_SAMPLE_ROWS,
+            linear_max_iter: analysis_defaults::DEFAULT_LINEAR_MAX_ITER,
+            tree_max_depth: analysis_defaults::DEFAULT_TREE_MAX_DEPTH,
+            top_features_to_analyze: analysis_defaults::DEFAULT_TOP_FEATURES,
+            seed: analysis_defaults::DEFAULT_ANALYSIS_SEED,
         }
     }
 }
 
 impl AnalysisConfig {
+    /// Create config from preset.
+    pub fn with_preset(preset: AnalysisPreset) -> Self {
+        match preset {
+            AnalysisPreset::Fast => Self::fast(),
+            AnalysisPreset::Standard => Self::default(),
+            AnalysisPreset::Thorough => Self::thorough(),
+        }
+    }
     pub fn fast() -> Self {
         Self {
-            max_sample_rows: 5_000,
-            linear_max_iter: 20,
-            tree_max_depth: 3,
-            top_features_to_analyze: 20,
-            seed: 42,
+            max_sample_rows: analysis_defaults::FAST_MAX_SAMPLE_ROWS,
+            linear_max_iter: analysis_defaults::FAST_LINEAR_MAX_ITER,
+            tree_max_depth: analysis_defaults::FAST_TREE_MAX_DEPTH,
+            top_features_to_analyze: analysis_defaults::FAST_TOP_FEATURES,
+            seed: analysis_defaults::DEFAULT_ANALYSIS_SEED,
         }
     }
 
     pub fn thorough() -> Self {
         Self {
-            max_sample_rows: 50_000,
-            linear_max_iter: 100,
-            tree_max_depth: 5,
-            top_features_to_analyze: 100,
-            seed: 42,
+            max_sample_rows: analysis_defaults::THOROUGH_MAX_SAMPLE_ROWS,
+            linear_max_iter: analysis_defaults::THOROUGH_LINEAR_MAX_ITER,
+            tree_max_depth: analysis_defaults::THOROUGH_TREE_MAX_DEPTH,
+            top_features_to_analyze: analysis_defaults::THOROUGH_TOP_FEATURES,
+            seed: analysis_defaults::DEFAULT_ANALYSIS_SEED,
         }
     }
 }

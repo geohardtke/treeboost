@@ -110,6 +110,7 @@
 //! let preds = booster.predict_batch(&features, 10);
 //! ```
 
+use crate::defaults::linear as linear_defaults;
 use crate::learner::WeakLearner;
 use crate::{Result, TreeBoostError};
 use rkyv::{Archive, Deserialize, Serialize};
@@ -194,18 +195,35 @@ pub struct LinearConfig {
     pub extrapolation_damping: f32,
 }
 
+/// Presets for common linear model configurations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinearPreset {
+    /// Pure Ridge (L2) - stable default.
+    Ridge,
+    /// Pure LASSO (L1) - sparse feature selection.
+    Lasso,
+    /// Elastic Net - balanced sparsity and stability.
+    ElasticNet,
+    /// Higher shrinkage - trust linear model more.
+    Aggressive,
+    /// Lower shrinkage - let trees dominate.
+    Conservative,
+    /// Ridge with extrapolation damping for safety.
+    SafeRidge,
+}
+
 impl Default for LinearConfig {
     fn default() -> Self {
         Self {
-            lambda: 1.0,           // Strong default regularization
-            l1_ratio: 0.0,         // Pure Ridge by default (most stable)
-            shrinkage_factor: 0.3, // Moderate ensemble weighting (more aggressive than tree
+            lambda: linear_defaults::DEFAULT_LAMBDA, // Strong default regularization
+            l1_ratio: linear_defaults::DEFAULT_L1_RATIO, // Pure Ridge by default (most stable)
+            shrinkage_factor: linear_defaults::DEFAULT_SHRINKAGE_FACTOR, // Moderate ensemble weighting
             // learning_rate=0.1, because linear models extrapolate
             // better and benefit from stronger ensemble weighting)
-            max_iter: 100,              // Many iterations for single-round convergence
-            tol: 1e-6,                  // Tight convergence
-            max_weight: 100.0,          // Prevent extreme weights
-            extrapolation_damping: 0.0, // No extrapolation damping by default
+            max_iter: linear_defaults::DEFAULT_MAX_ITER, // Many iterations for single-round convergence
+            tol: linear_defaults::DEFAULT_TOL,           // Tight convergence
+            max_weight: linear_defaults::DEFAULT_MAX_WEIGHT, // Prevent extreme weights
+            extrapolation_damping: linear_defaults::DEFAULT_EXTRAPOLATION_DAMPING, // No damping by default
         }
     }
 }
@@ -216,9 +234,43 @@ impl LinearConfig {
         Self::default()
     }
 
+    /// Apply a preset configuration.
+    pub fn with_preset(mut self, preset: LinearPreset) -> Self {
+        match preset {
+            LinearPreset::Ridge => {
+                self.lambda = linear_defaults::DEFAULT_LAMBDA;
+                self.l1_ratio = linear_defaults::DEFAULT_L1_RATIO;
+            }
+            LinearPreset::Lasso => {
+                self.lambda = linear_defaults::DEFAULT_LAMBDA;
+                self.l1_ratio = linear_defaults::LASSO_L1_RATIO;
+            }
+            LinearPreset::ElasticNet => {
+                self.lambda = linear_defaults::DEFAULT_LAMBDA;
+                self.l1_ratio = linear_defaults::ELASTIC_NET_L1_RATIO;
+            }
+            LinearPreset::Aggressive => {
+                self.shrinkage_factor = linear_defaults::AGGRESSIVE_SHRINKAGE;
+            }
+            LinearPreset::Conservative => {
+                self.shrinkage_factor = linear_defaults::CONSERVATIVE_SHRINKAGE;
+            }
+            LinearPreset::SafeRidge => {
+                self.lambda = linear_defaults::DEFAULT_LAMBDA;
+                self.l1_ratio = linear_defaults::DEFAULT_L1_RATIO;
+                self.extrapolation_damping = linear_defaults::SAFE_EXTRAPOLATION_DAMPING;
+            }
+        }
+        self
+    }
+
     /// Create a Ridge (L2) config
     ///
     /// Pure L2 regularization - smooth weights, handles correlated features well.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use LinearConfig::default().with_preset(LinearPreset::Ridge).with_lambda(lambda)"
+    )]
     pub fn ridge(lambda: f32) -> Self {
         Self::default().with_lambda(lambda).with_l1_ratio(0.0)
     }
@@ -227,6 +279,10 @@ impl LinearConfig {
     ///
     /// Pure L1 regularization - encourages sparse solutions (zero weights).
     /// Good for feature selection.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use LinearConfig::default().with_preset(LinearPreset::Lasso).with_lambda(lambda)"
+    )]
     pub fn lasso(lambda: f32) -> Self {
         Self::default().with_lambda(lambda).with_l1_ratio(1.0)
     }
@@ -240,6 +296,10 @@ impl LinearConfig {
     /// # Arguments
     /// - `lambda`: Overall regularization strength
     /// - `l1_ratio`: Balance between L1 and L2 (0.0 = Ridge, 1.0 = LASSO)
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use LinearConfig::default().with_preset(LinearPreset::ElasticNet).with_lambda(lambda)"
+    )]
     pub fn elastic_net(lambda: f32, l1_ratio: f32) -> Self {
         Self::default().with_lambda(lambda).with_l1_ratio(l1_ratio)
     }

@@ -92,7 +92,7 @@ pub use polars_ext::{
 pub use scaler::{MinMaxScaler, RobustScaler, Scaler, StandardScaler};
 pub use smart::{
     EncodingType, LttPreprocessingPlan, ModelType, PreprocessingPlan, PreprocessingStep,
-    ScalerType, SmartPreprocessConfig, SmartPreprocessor,
+    ScalerType, SmartPreprocessConfig, SmartPreprocessPreset, SmartPreprocessor,
 };
 pub use timeseries::{
     EwmaGenerator, LagGenerator, NaNStrategy, RollingGenerator, RollingStat, SeasonalComponent,

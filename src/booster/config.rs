@@ -2,17 +2,10 @@
 
 use crate::backend::{BackendType, GpuMode};
 use crate::dataset::OrderingStrategy;
+use crate::defaults::{gbdt as gbdt_defaults, seeds as seeds_defaults, tree as tree_defaults};
 use crate::loss::{BinaryLogLoss, LossFunction, MseLoss, PseudoHuberLoss};
 use crate::tree::MonotonicConstraint;
 use rkyv::{Archive, Deserialize, Serialize};
-
-// =============================================================================
-// Constants
-// =============================================================================
-
-/// Default minimum trees before early stopping can trigger.
-/// Set high enough (20) to allow models to learn basic patterns before stopping.
-pub const DEFAULT_MIN_EARLY_STOPPING_TREES: usize = 20;
 
 /// Loss function type for serialization
 #[derive(
@@ -79,6 +72,23 @@ impl LossType {
             _ => None,
         }
     }
+}
+
+/// Presets for common GBDT configurations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GbdtPreset {
+    /// Balanced defaults - good starting point.
+    Standard,
+    /// Shallow trees + GOSS for faster training.
+    Speed,
+    /// Deeper trees + lower LR + more rounds for accuracy.
+    Accuracy,
+    /// No subsampling for small datasets.
+    SmallData,
+    /// Aggressive subsampling + GOSS for large datasets.
+    LargeData,
+    /// Enable conformal calibration.
+    Conformal,
 }
 
 /// GBDT training configuration
@@ -219,43 +229,43 @@ impl Default for GBDTConfig {
     fn default() -> Self {
         Self {
             // Ensemble
-            num_rounds: 100,
-            learning_rate: 0.1,
+            num_rounds: gbdt_defaults::DEFAULT_NUM_ROUNDS,
+            learning_rate: tree_defaults::DEFAULT_LEARNING_RATE,
 
             // Tree
-            max_depth: 6,
-            max_leaves: 31,
-            min_samples_leaf: 1,
-            min_hessian_leaf: 1.0,
-            min_gain: 0.0,
+            max_depth: tree_defaults::DEFAULT_MAX_DEPTH,
+            max_leaves: tree_defaults::DEFAULT_MAX_LEAVES,
+            min_samples_leaf: tree_defaults::DEFAULT_MIN_SAMPLES_LEAF,
+            min_hessian_leaf: tree_defaults::DEFAULT_MIN_HESSIAN_LEAF,
+            min_gain: tree_defaults::DEFAULT_MIN_GAIN,
 
             // Regularization
-            lambda: 1.0,
-            entropy_weight: 0.0,
+            lambda: tree_defaults::DEFAULT_TREE_LAMBDA,
+            entropy_weight: tree_defaults::DEFAULT_ENTROPY_WEIGHT,
 
             // Loss
             loss_type: LossType::Mse,
 
             // Subsampling
-            subsample: 1.0,
-            colsample: 1.0,
+            subsample: gbdt_defaults::DEFAULT_SUBSAMPLE,
+            colsample: tree_defaults::DEFAULT_COLSAMPLE,
 
             // GOSS (disabled by default, most effective on large datasets)
             goss_enabled: false,
-            goss_top_rate: 0.2,
-            goss_other_rate: 0.1,
+            goss_top_rate: gbdt_defaults::DEFAULT_GOSS_TOP_RATE,
+            goss_other_rate: gbdt_defaults::DEFAULT_GOSS_OTHER_RATE,
 
             // Binning
-            num_bins: 255,
+            num_bins: gbdt_defaults::DEFAULT_NUM_BINS,
 
             // Conformal
-            calibration_ratio: 0.0,
-            conformal_quantile: 0.9,
+            calibration_ratio: gbdt_defaults::DEFAULT_CALIBRATION_RATIO,
+            conformal_quantile: gbdt_defaults::DEFAULT_CONFORMAL_QUANTILE,
 
             // Early stopping (disabled by default)
-            early_stopping_rounds: 0,
-            min_early_stopping_trees: DEFAULT_MIN_EARLY_STOPPING_TREES,
-            validation_ratio: 0.0,
+            early_stopping_rounds: gbdt_defaults::DEFAULT_EARLY_STOPPING_ROUNDS,
+            min_early_stopping_trees: gbdt_defaults::MIN_EARLY_STOPPING_TREES,
+            validation_ratio: gbdt_defaults::DEFAULT_VALIDATION_RATIO,
 
             // Performance optimizations (all ON by default)
             parallel_prediction: true,
@@ -279,7 +289,7 @@ impl Default for GBDTConfig {
             era_splitting: false,
 
             // Random seed (matches legacy hardcoded value for backwards compatibility)
-            seed: 123,
+            seed: seeds_defaults::GBDT_SEED,
         }
     }
 }
@@ -288,6 +298,40 @@ impl GBDTConfig {
     /// Create a new configuration with defaults
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Apply a preset configuration.
+    pub fn with_preset(mut self, preset: GbdtPreset) -> Self {
+        match preset {
+            GbdtPreset::Standard => {}
+            GbdtPreset::Speed => {
+                self.max_depth = tree_defaults::SHALLOW_MAX_DEPTH;
+                self.goss_enabled = true;
+                self.goss_top_rate = gbdt_defaults::DEFAULT_GOSS_TOP_RATE;
+                self.goss_other_rate = gbdt_defaults::DEFAULT_GOSS_OTHER_RATE;
+            }
+            GbdtPreset::Accuracy => {
+                self.max_depth = tree_defaults::DEEP_MAX_DEPTH;
+                self.learning_rate = tree_defaults::DEFAULT_LEARNING_RATE * 0.5;
+                self.num_rounds = gbdt_defaults::DEFAULT_NUM_ROUNDS * 2;
+            }
+            GbdtPreset::SmallData => {
+                self.subsample = gbdt_defaults::DEFAULT_SUBSAMPLE;
+                self.colsample = tree_defaults::DEFAULT_COLSAMPLE;
+                self.goss_enabled = false;
+            }
+            GbdtPreset::LargeData => {
+                self.subsample = gbdt_defaults::LARGE_DATA_SUBSAMPLE;
+                self.goss_enabled = true;
+                self.goss_top_rate = gbdt_defaults::DEFAULT_GOSS_TOP_RATE;
+                self.goss_other_rate = gbdt_defaults::DEFAULT_GOSS_OTHER_RATE;
+            }
+            GbdtPreset::Conformal => {
+                self.calibration_ratio = gbdt_defaults::CONFORMAL_CALIBRATION_RATIO;
+                self.conformal_quantile = gbdt_defaults::DEFAULT_CONFORMAL_QUANTILE;
+            }
+        }
+        self
     }
 
     /// Set number of boosting rounds
@@ -402,7 +446,7 @@ impl GBDTConfig {
     /// Set minimum trees before early stopping can trigger
     ///
     /// Prevents early stopping from killing models too early.
-    /// Default is 20 trees (see `DEFAULT_MIN_EARLY_STOPPING_TREES`).
+    /// Default is 20 trees (`defaults::gbdt::MIN_EARLY_STOPPING_TREES`).
     pub fn with_min_early_stopping_trees(mut self, min_trees: usize) -> Self {
         self.min_early_stopping_trees = min_trees;
         self

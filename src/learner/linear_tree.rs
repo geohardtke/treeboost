@@ -31,6 +31,7 @@
 //! ```
 
 use crate::dataset::BinnedDataset;
+use crate::defaults::linear_tree as linear_tree_defaults;
 use crate::learner::{LinearConfig, TreeConfig};
 use crate::tree::{NodeType, Tree};
 use crate::Result;
@@ -58,11 +59,13 @@ impl Default for LinearTreeConfig {
     fn default() -> Self {
         Self {
             tree_config: TreeConfig::default()
-                .with_max_depth(4) // Shallower trees since leaves are more expressive
-                .with_max_leaves(15)
-                .with_min_samples_leaf(20), // Need enough samples for linear fit
-            linear_config: LinearConfig::default().with_lambda(1.0).with_max_iter(50),
-            min_samples_for_linear: 10,
+                .with_max_depth(linear_tree_defaults::LINEAR_TREE_MAX_DEPTH) // Shallower trees since leaves are more expressive
+                .with_max_leaves(linear_tree_defaults::LINEAR_TREE_MAX_LEAVES)
+                .with_min_samples_leaf(linear_tree_defaults::LINEAR_TREE_MIN_SAMPLES_LEAF), // Need enough samples for linear fit
+            linear_config: LinearConfig::default()
+                .with_lambda(linear_tree_defaults::LINEAR_TREE_LAMBDA)
+                .with_max_iter(linear_tree_defaults::LINEAR_TREE_MAX_ITER),
+            min_samples_for_linear: linear_tree_defaults::MIN_SAMPLES_FOR_LINEAR,
         }
     }
 }

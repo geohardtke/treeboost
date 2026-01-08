@@ -4,6 +4,7 @@
 //! Uses forward selection starting from empty ensemble.
 
 use super::multi_seed::TrainedMember;
+use crate::defaults::ensemble as ensemble_defaults;
 use crate::tuner::Metric;
 
 /// Configuration for hill climbing selection
@@ -20,9 +21,9 @@ pub struct SelectionConfig {
 impl Default for SelectionConfig {
     fn default() -> Self {
         Self {
-            max_models: 0, // No limit
-            min_improvement: 1e-6,
-            patience: 5,
+            max_models: ensemble_defaults::DEFAULT_MAX_MODELS, // No limit
+            min_improvement: ensemble_defaults::DEFAULT_MIN_IMPROVEMENT,
+            patience: ensemble_defaults::DEFAULT_PATIENCE,
         }
     }
 }

@@ -7,6 +7,7 @@
 //! - SVE2 tensor-tile (HISTCNT) - future
 //! - Native backends: CUDA, ROCm, Metal - future extreme optimization
 
+use crate::defaults::split as split_defaults;
 use crate::histogram::Histogram;
 
 // Re-export SparseColumn from dataset to avoid duplication
@@ -91,11 +92,11 @@ pub struct SplitConfig {
 impl Default for SplitConfig {
     fn default() -> Self {
         Self {
-            lambda: 1.0,
-            min_samples_leaf: 20,
-            min_hessian_leaf: 1.0,
-            min_gain: 0.0,
-            entropy_weight: 0.0,
+            lambda: split_defaults::DEFAULT_SPLIT_LAMBDA,
+            min_samples_leaf: split_defaults::DEFAULT_SPLIT_MIN_SAMPLES_LEAF,
+            min_hessian_leaf: split_defaults::DEFAULT_SPLIT_MIN_HESSIAN_LEAF,
+            min_gain: split_defaults::DEFAULT_SPLIT_MIN_GAIN,
+            entropy_weight: split_defaults::DEFAULT_SPLIT_ENTROPY_WEIGHT,
         }
     }
 }

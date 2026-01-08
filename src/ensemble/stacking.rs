@@ -4,6 +4,7 @@
 //! predictions from multiple base models.
 
 use super::traits::Stacker;
+use crate::defaults::ensemble as ensemble_defaults;
 
 /// Configuration for Ridge stacking
 #[derive(Debug, Clone)]
@@ -21,10 +22,10 @@ pub struct StackingConfig {
 impl Default for StackingConfig {
     fn default() -> Self {
         Self {
-            alpha: 10.0,
-            rank_transform: false,
-            fit_intercept: true,
-            min_weight: 0.0,
+            alpha: ensemble_defaults::DEFAULT_STACKING_ALPHA,
+            rank_transform: ensemble_defaults::DEFAULT_RANK_TRANSFORM,
+            fit_intercept: ensemble_defaults::DEFAULT_FIT_INTERCEPT,
+            min_weight: ensemble_defaults::DEFAULT_MIN_WEIGHT,
         }
     }
 }

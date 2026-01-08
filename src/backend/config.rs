@@ -1,5 +1,7 @@
 //! Backend configuration types.
 
+use crate::defaults::backend as backend_defaults;
+
 /// GPU execution mode for GPU backends.
 ///
 /// This setting controls how much work is offloaded to the GPU.
@@ -138,14 +140,27 @@ pub struct BackendConfig {
     pub use_gpu_subgroups: bool,
 }
 
+/// Presets for backend selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendPreset {
+    /// Auto-detect best backend.
+    Auto,
+    /// Force CPU with SIMD.
+    CpuOnly,
+    /// Force GPU (fail if unavailable).
+    GpuRequired,
+    /// GPU with scalar fallback.
+    GpuPreferred,
+}
+
 impl Default for BackendConfig {
     fn default() -> Self {
         Self {
             preferred: BackendType::Auto,
             gpu_mode: GpuMode::default(),
             fallback_to_scalar: true,
-            tensor_tile_min_rows: 10_000,
-            gpu_batch_size: 32,
+            tensor_tile_min_rows: backend_defaults::TENSOR_TILE_MIN_ROWS,
+            gpu_batch_size: backend_defaults::DEFAULT_GPU_BATCH_SIZE,
             use_gpu_subgroups: false,
         }
     }
@@ -157,6 +172,31 @@ impl BackendConfig {
         Self::default()
     }
 
+    /// Apply a preset configuration.
+    pub fn with_preset(mut self, preset: BackendPreset) -> Self {
+        match preset {
+            BackendPreset::Auto => {
+                self.preferred = BackendType::Auto;
+                self.fallback_to_scalar = true;
+            }
+            BackendPreset::CpuOnly => {
+                self.preferred = BackendType::Scalar;
+                self.fallback_to_scalar = true;
+            }
+            BackendPreset::GpuRequired => {
+                self.preferred = BackendType::Wgpu;
+                self.fallback_to_scalar = false;
+                self.gpu_mode = GpuMode::Auto;
+            }
+            BackendPreset::GpuPreferred => {
+                self.preferred = BackendType::Wgpu;
+                self.fallback_to_scalar = true;
+                self.gpu_mode = GpuMode::Auto;
+            }
+        }
+        self
+    }
+
     /// Create config that always uses scalar backend.
     pub fn scalar() -> Self {
         Self {
@@ -164,7 +204,7 @@ impl BackendConfig {
             gpu_mode: GpuMode::Hybrid,
             fallback_to_scalar: true,
             tensor_tile_min_rows: usize::MAX,
-            gpu_batch_size: 32,
+            gpu_batch_size: backend_defaults::DEFAULT_GPU_BATCH_SIZE,
             use_gpu_subgroups: false,
         }
     }
@@ -179,8 +219,8 @@ impl BackendConfig {
             preferred: BackendType::Wgpu,
             gpu_mode: GpuMode::Auto,
             fallback_to_scalar: true,
-            tensor_tile_min_rows: 10_000,
-            gpu_batch_size: 32,
+            tensor_tile_min_rows: backend_defaults::TENSOR_TILE_MIN_ROWS,
+            gpu_batch_size: backend_defaults::DEFAULT_GPU_BATCH_SIZE,
             use_gpu_subgroups: false,
         }
     }

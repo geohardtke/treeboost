@@ -46,10 +46,10 @@ mod linear_tree;
 mod traits;
 mod tree;
 
-pub use linear::{LinearBooster, LinearConfig};
+pub use linear::{LinearBooster, LinearConfig, LinearPreset};
 pub use linear_tree::{LeafLinearModel, LinearTreeBooster, LinearTreeConfig};
 pub use traits::WeakLearner;
-pub use tree::{SerializableTreeBooster, TreeBooster, TreeConfig};
+pub use tree::{SerializableTreeBooster, TreeBooster, TreeConfig, TreePreset};
 
 use crate::dataset::BinnedDataset;
 use crate::{Result, TreeBoostError};

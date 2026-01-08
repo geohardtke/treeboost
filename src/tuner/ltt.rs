@@ -33,57 +33,12 @@
 //! ```
 
 use crate::analysis::{compute_mse, compute_r2};
+use crate::defaults::{
+    linear as linear_defaults, ltt as ltt_defaults, seeds as seeds_defaults, tree as tree_defaults,
+};
 use crate::learner::{LinearBooster, LinearConfig, WeakLearner};
 use crate::{Result, TreeBoostError};
 use std::time::{Duration, Instant};
-
-// =============================================================================
-// Constants - Named values for all thresholds and heuristics
-// =============================================================================
-
-/// Shrinkage factor selection thresholds based on linear R²
-mod shrinkage_thresholds {
-    /// R² above this indicates strong linear signal → prefer higher shrinkage
-    pub const STRONG_LINEAR_R2: f32 = 0.6;
-    /// R² below this indicates weak linear signal → prefer lower shrinkage
-    pub const WEAK_LINEAR_R2: f32 = 0.3;
-    /// Minimum shrinkage to consider when linear signal is strong
-    pub const HIGH_SHRINKAGE_MIN: f32 = 0.5;
-    /// Maximum shrinkage to consider when linear signal is weak
-    pub const LOW_SHRINKAGE_MAX: f32 = 0.7;
-    /// Default shrinkage factor when no better option found
-    pub const DEFAULT_SHRINKAGE: f32 = 0.7;
-}
-
-/// Tree heuristic scoring parameters
-mod tree_scoring {
-    /// Residual std threshold for switching scoring strategies
-    pub const HIGH_VARIANCE_THRESHOLD: f32 = 1.0;
-
-    // High variance weights (complex residuals need deeper trees)
-    /// Weight for depth when residuals are high variance
-    pub const DEPTH_WEIGHT_HIGH_VAR: f32 = 0.15;
-    /// Weight for num_rounds when residuals are high variance
-    pub const ROUNDS_WEIGHT_HIGH_VAR: f32 = 0.001;
-    /// Penalty for learning rate when residuals are high variance (stability)
-    pub const LR_PENALTY_HIGH_VAR: f32 = 0.5;
-
-    // Low variance weights (simple residuals need simpler trees)
-    /// Weight for depth when residuals are low variance
-    pub const DEPTH_WEIGHT_LOW_VAR: f32 = 0.1;
-    /// Weight for learning rate when residuals are low variance
-    pub const LR_WEIGHT_LOW_VAR: f32 = 1.0;
-    /// Penalty for num_rounds when residuals are low variance
-    pub const ROUNDS_PENALTY_LOW_VAR: f32 = 0.0005;
-
-    // Extreme configuration penalties
-    /// Depth threshold above which to penalize
-    pub const MAX_DEPTH_THRESHOLD: u32 = 8;
-    /// Learning rate threshold below which to penalize
-    pub const MIN_LR_THRESHOLD: f32 = 0.02;
-    /// Penalty value for extreme configurations
-    pub const EXTREME_CONFIG_PENALTY: f32 = 0.1;
-}
 
 // =============================================================================
 // Data Structures
@@ -110,45 +65,65 @@ pub struct LinearHyperparams {
     pub extrapolation_damping: f32,
 }
 
+/// Presets for linear hyperparameters in LTT tuning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinearHyperparamsPreset {
+    Ridge,
+    Lasso,
+    ElasticNet,
+}
+
 impl Default for LinearHyperparams {
     fn default() -> Self {
         Self {
-            lambda: 1.0,
-            l1_ratio: 0.0, // Ridge by default
-            shrinkage_factor: shrinkage_thresholds::DEFAULT_SHRINKAGE,
-            extrapolation_damping: 0.0,
+            lambda: linear_defaults::DEFAULT_LAMBDA,
+            l1_ratio: linear_defaults::DEFAULT_L1_RATIO, // Ridge by default
+            shrinkage_factor: ltt_defaults::DEFAULT_LTT_SHRINKAGE,
+            extrapolation_damping: linear_defaults::DEFAULT_EXTRAPOLATION_DAMPING,
         }
     }
 }
 
 impl LinearHyperparams {
     /// Create default Ridge regression params
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use LinearHyperparams::default().with_preset(LinearHyperparamsPreset::Ridge)"
+    )]
     pub fn ridge() -> Self {
         Self {
-            lambda: 1.0,
-            l1_ratio: 0.0,
-            shrinkage_factor: shrinkage_thresholds::DEFAULT_SHRINKAGE,
-            extrapolation_damping: 0.0,
+            lambda: linear_defaults::DEFAULT_LAMBDA,
+            l1_ratio: linear_defaults::DEFAULT_L1_RATIO,
+            shrinkage_factor: ltt_defaults::DEFAULT_LTT_SHRINKAGE,
+            extrapolation_damping: linear_defaults::DEFAULT_EXTRAPOLATION_DAMPING,
         }
     }
 
     /// Create LASSO params
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use LinearHyperparams::default().with_preset(LinearHyperparamsPreset::Lasso)"
+    )]
     pub fn lasso() -> Self {
         Self {
-            lambda: 1.0,
-            l1_ratio: 1.0,
-            shrinkage_factor: shrinkage_thresholds::DEFAULT_SHRINKAGE,
-            extrapolation_damping: 0.0,
+            lambda: linear_defaults::DEFAULT_LAMBDA,
+            l1_ratio: linear_defaults::LASSO_L1_RATIO,
+            shrinkage_factor: ltt_defaults::DEFAULT_LTT_SHRINKAGE,
+            extrapolation_damping: linear_defaults::DEFAULT_EXTRAPOLATION_DAMPING,
         }
     }
 
     /// Create ElasticNet params
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use LinearHyperparams::default().with_preset(LinearHyperparamsPreset::ElasticNet)"
+    )]
     pub fn elastic_net() -> Self {
         Self {
-            lambda: 1.0,
-            l1_ratio: 0.5,
-            shrinkage_factor: shrinkage_thresholds::DEFAULT_SHRINKAGE,
-            extrapolation_damping: 0.0,
+            lambda: linear_defaults::DEFAULT_LAMBDA,
+            l1_ratio: linear_defaults::ELASTIC_NET_L1_RATIO,
+            shrinkage_factor: ltt_defaults::DEFAULT_LTT_SHRINKAGE,
+            extrapolation_damping: linear_defaults::DEFAULT_EXTRAPOLATION_DAMPING,
         }
     }
 
@@ -159,6 +134,22 @@ impl LinearHyperparams {
             .with_l1_ratio(self.l1_ratio)
             .with_shrinkage_factor(self.shrinkage_factor)
             .with_extrapolation_damping(self.extrapolation_damping)
+    }
+
+    /// Apply a preset configuration.
+    pub fn with_preset(mut self, preset: LinearHyperparamsPreset) -> Self {
+        match preset {
+            LinearHyperparamsPreset::Ridge => {
+                self.l1_ratio = 0.0;
+            }
+            LinearHyperparamsPreset::Lasso => {
+                self.l1_ratio = 1.0;
+            }
+            LinearHyperparamsPreset::ElasticNet => {
+                self.l1_ratio = 0.5;
+            }
+        }
+        self
     }
 }
 
@@ -190,11 +181,20 @@ pub struct TreeHyperparams {
     pub colsample_bytree: f32,
 }
 
+/// Presets for tree hyperparameters in LTT tuning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeHyperparamsPreset {
+    /// depth=4, lr=0.05, rounds=1000, min_weight=3.0
+    Conservative,
+    /// depth=8, lr=0.15, rounds=500, min_weight=1.0
+    Aggressive,
+}
+
 impl Default for TreeHyperparams {
     fn default() -> Self {
         Self {
-            max_depth: 6,
-            learning_rate: 0.1,
+            max_depth: tree_defaults::DEFAULT_MAX_DEPTH as u32,
+            learning_rate: tree_defaults::DEFAULT_LEARNING_RATE,
             num_rounds: 500,
             min_child_weight: 1.0,
             subsample: 1.0,
@@ -205,6 +205,10 @@ impl Default for TreeHyperparams {
 
 impl TreeHyperparams {
     /// Conservative params (less overfitting)
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use TreeHyperparams::default().with_preset(TreeHyperparamsPreset::Conservative)"
+    )]
     pub fn conservative() -> Self {
         Self {
             max_depth: 4,
@@ -217,6 +221,10 @@ impl TreeHyperparams {
     }
 
     /// Aggressive params (more fitting power)
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use TreeHyperparams::default().with_preset(TreeHyperparamsPreset::Aggressive)"
+    )]
     pub fn aggressive() -> Self {
         Self {
             max_depth: 8,
@@ -226,6 +234,29 @@ impl TreeHyperparams {
             subsample: 1.0,
             colsample_bytree: 1.0,
         }
+    }
+
+    /// Apply a preset configuration.
+    pub fn with_preset(mut self, preset: TreeHyperparamsPreset) -> Self {
+        match preset {
+            TreeHyperparamsPreset::Conservative => {
+                self.max_depth = 4;
+                self.learning_rate = 0.05;
+                self.num_rounds = 1000;
+                self.min_child_weight = 3.0;
+                self.subsample = 0.8;
+                self.colsample_bytree = 0.8;
+            }
+            TreeHyperparamsPreset::Aggressive => {
+                self.max_depth = 8;
+                self.learning_rate = 0.15;
+                self.num_rounds = 500;
+                self.min_child_weight = 1.0;
+                self.subsample = 1.0;
+                self.colsample_bytree = 1.0;
+            }
+        }
+        self
     }
 }
 
@@ -386,59 +417,103 @@ pub struct LttTunerConfig {
     pub seed: u64,
 }
 
+/// Presets for LTT tuner configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LttTunerPreset {
+    /// Coarse grid, no joint refinement - fast.
+    Quick,
+    /// Standard grid with joint refinement.
+    Standard,
+    /// Dense grid, joint refinement - comprehensive.
+    Thorough,
+    /// Skip phase 2/joint refinement, focus on shrinkage only.
+    ShrinkageOnly,
+}
+
 impl Default for LttTunerConfig {
     fn default() -> Self {
         Self {
-            val_ratio: 0.2,
+            val_ratio: ltt_defaults::DEFAULT_LTT_VAL_RATIO,
             // Linear phase: 4×3 = 12 trials
-            lambda_values: vec![0.01, 0.1, 1.0, 10.0],
-            l1_ratio_values: vec![0.0, 0.5, 1.0], // Ridge, ElasticNet, LASSO
+            lambda_values: ltt_defaults::DEFAULT_LAMBDA_GRID.to_vec(),
+            l1_ratio_values: ltt_defaults::DEFAULT_L1_RATIO_GRID.to_vec(), // Ridge, ElasticNet, LASSO
             // Tree phase: 3×3×3 = 27 trials
-            max_depth_values: vec![4, 6, 8],
-            learning_rate_values: vec![0.05, 0.1, 0.15],
-            num_rounds_values: vec![300, 500, 800],
+            max_depth_values: ltt_defaults::DEFAULT_MAX_DEPTH_GRID.to_vec(),
+            learning_rate_values: ltt_defaults::DEFAULT_LR_GRID.to_vec(),
+            num_rounds_values: ltt_defaults::DEFAULT_ROUNDS_GRID.to_vec(),
             // Shrinkage factor: 5 values centered around typical optimal (0.5-0.9)
-            shrinkage_factor_values: vec![0.3, 0.5, 0.7, 0.85, 1.0],
+            shrinkage_factor_values: ltt_defaults::DEFAULT_SHRINKAGE_GRID.to_vec(),
             // Extrapolation damping: usually 0 unless OOD is a concern
-            extrapolation_damping_values: vec![0.0, 0.1, 0.2],
+            extrapolation_damping_values: ltt_defaults::DEFAULT_EXTRAPOLATION_DAMPING_GRID.to_vec(),
             enable_joint_refinement: true,
-            seed: 42,
+            seed: seeds_defaults::DEFAULT_SEED,
         }
     }
 }
 
 impl LttTunerConfig {
     /// Create a quick tuning config (fewer trials)
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use LttTunerConfig::default().with_preset(LttTunerPreset::Quick)"
+    )]
     pub fn quick() -> Self {
-        Self {
-            val_ratio: 0.2,
-            lambda_values: vec![0.1, 1.0],
-            l1_ratio_values: vec![0.0, 0.5],
-            max_depth_values: vec![4, 6],
-            learning_rate_values: vec![0.05, 0.1],
-            num_rounds_values: vec![300, 500],
-            // Quick: 3 shrinkage values
-            shrinkage_factor_values: vec![0.5, 0.7, 1.0],
-            extrapolation_damping_values: vec![0.0],
-            enable_joint_refinement: false, // Skip for quick mode
-            seed: 42,
-        }
+        Self::default().with_preset(LttTunerPreset::Quick)
     }
 
     /// Create a thorough tuning config (more trials)
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use LttTunerConfig::default().with_preset(LttTunerPreset::Thorough)"
+    )]
     pub fn thorough() -> Self {
-        Self {
-            val_ratio: 0.2,
-            lambda_values: vec![0.001, 0.01, 0.1, 1.0, 10.0],
-            l1_ratio_values: vec![0.0, 0.25, 0.5, 0.75, 1.0],
-            max_depth_values: vec![3, 4, 5, 6, 7, 8],
-            learning_rate_values: vec![0.01, 0.03, 0.05, 0.1, 0.15, 0.2],
-            num_rounds_values: vec![200, 400, 600, 800, 1000],
-            // Thorough: 7 shrinkage values
-            shrinkage_factor_values: vec![0.2, 0.4, 0.5, 0.6, 0.7, 0.85, 1.0],
-            extrapolation_damping_values: vec![0.0, 0.1, 0.2, 0.3],
-            enable_joint_refinement: true,
-            seed: 42,
+        Self::default().with_preset(LttTunerPreset::Thorough)
+    }
+
+    /// Apply a preset configuration.
+    pub fn with_preset(self, preset: LttTunerPreset) -> Self {
+        match preset {
+            LttTunerPreset::Quick => Self {
+                val_ratio: ltt_defaults::DEFAULT_LTT_VAL_RATIO,
+                lambda_values: ltt_defaults::QUICK_LAMBDA_GRID.to_vec(),
+                l1_ratio_values: ltt_defaults::QUICK_L1_RATIO_GRID.to_vec(),
+                max_depth_values: ltt_defaults::QUICK_MAX_DEPTH_GRID.to_vec(),
+                learning_rate_values: ltt_defaults::QUICK_LR_GRID.to_vec(),
+                num_rounds_values: ltt_defaults::QUICK_ROUNDS_GRID.to_vec(),
+                // Quick: 3 shrinkage values
+                shrinkage_factor_values: ltt_defaults::QUICK_SHRINKAGE_GRID.to_vec(),
+                extrapolation_damping_values: ltt_defaults::QUICK_EXTRAPOLATION_DAMPING_GRID
+                    .to_vec(),
+                enable_joint_refinement: false, // Skip for quick mode
+                seed: seeds_defaults::DEFAULT_SEED,
+            },
+            LttTunerPreset::Standard => Self::default(),
+            LttTunerPreset::Thorough => Self {
+                val_ratio: ltt_defaults::DEFAULT_LTT_VAL_RATIO,
+                lambda_values: ltt_defaults::THOROUGH_LAMBDA_GRID.to_vec(),
+                l1_ratio_values: ltt_defaults::THOROUGH_L1_RATIO_GRID.to_vec(),
+                max_depth_values: ltt_defaults::THOROUGH_MAX_DEPTH_GRID.to_vec(),
+                learning_rate_values: ltt_defaults::THOROUGH_LR_GRID.to_vec(),
+                num_rounds_values: ltt_defaults::THOROUGH_ROUNDS_GRID.to_vec(),
+                // Thorough: 7 shrinkage values
+                shrinkage_factor_values: ltt_defaults::THOROUGH_SHRINKAGE_GRID.to_vec(),
+                extrapolation_damping_values: ltt_defaults::THOROUGH_EXTRAPOLATION_DAMPING_GRID
+                    .to_vec(),
+                enable_joint_refinement: true,
+                seed: seeds_defaults::DEFAULT_SEED,
+            },
+            LttTunerPreset::ShrinkageOnly => {
+                let mut config = Self::default();
+                let linear_defaults = LinearHyperparams::default();
+                let tree_defaults = TreeHyperparams::default();
+                config.lambda_values = vec![linear_defaults.lambda];
+                config.l1_ratio_values = vec![linear_defaults.l1_ratio];
+                config.max_depth_values = vec![tree_defaults.max_depth];
+                config.learning_rate_values = vec![tree_defaults.learning_rate];
+                config.num_rounds_values = vec![tree_defaults.num_rounds];
+                config.enable_joint_refinement = false;
+                config
+            }
         }
     }
 
@@ -787,7 +862,7 @@ impl LttTuner {
                     best_params = LinearHyperparams {
                         lambda,
                         l1_ratio,
-                        shrinkage_factor: shrinkage_thresholds::DEFAULT_SHRINKAGE,
+                        shrinkage_factor: ltt_defaults::DEFAULT_LTT_SHRINKAGE,
                         extrapolation_damping: 0.0,
                     };
                     best_train_preds = Some(eval_result.train_preds);
@@ -835,8 +910,6 @@ impl LttTuner {
         linear_val_preds: &[f32],
         val_targets: &[f32],
     ) -> f32 {
-        use shrinkage_thresholds::*;
-
         // If only one shrinkage value configured, use it
         if self.config.shrinkage_factor_values.len() <= 1 {
             return self
@@ -844,24 +917,24 @@ impl LttTuner {
                 .shrinkage_factor_values
                 .first()
                 .copied()
-                .unwrap_or(DEFAULT_SHRINKAGE);
+                .unwrap_or(ltt_defaults::DEFAULT_LTT_SHRINKAGE);
         }
 
         // Use R² to narrow the search range (heuristic filtering)
-        let candidates: Vec<f32> = if linear_r2 > STRONG_LINEAR_R2 {
+        let candidates: Vec<f32> = if linear_r2 > ltt_defaults::STRONG_LINEAR_R2 {
             // Strong linear signal: prefer higher shrinkage values
             self.config
                 .shrinkage_factor_values
                 .iter()
-                .filter(|&&s| s >= HIGH_SHRINKAGE_MIN)
+                .filter(|&&s| s >= ltt_defaults::HIGH_SHRINKAGE_MIN)
                 .copied()
                 .collect()
-        } else if linear_r2 < WEAK_LINEAR_R2 {
+        } else if linear_r2 < ltt_defaults::WEAK_LINEAR_R2 {
             // Weak linear signal: prefer lower shrinkage values
             self.config
                 .shrinkage_factor_values
                 .iter()
-                .filter(|&&s| s <= LOW_SHRINKAGE_MAX)
+                .filter(|&&s| s <= ltt_defaults::LOW_SHRINKAGE_MAX)
                 .copied()
                 .collect()
         } else {
@@ -880,7 +953,7 @@ impl LttTuner {
         // Lower residual variance = easier for trees = better ensemble
         // Note: This is a simplified evaluation - trees aren't trained yet,
         // but it gives a reasonable estimate based on linear contribution.
-        let mut best_shrinkage = DEFAULT_SHRINKAGE;
+        let mut best_shrinkage = ltt_defaults::DEFAULT_LTT_SHRINKAGE;
         let mut best_metric = f32::INFINITY;
 
         for &shrinkage in &candidates {
@@ -931,15 +1004,13 @@ impl LttTuner {
         residuals: &[f32],
         history: &mut LttTuningHistory,
     ) -> Result<TreeHyperparams> {
-        use tree_scoring::*;
-
         let mut best_params = TreeHyperparams::default();
         let mut best_score = f32::NEG_INFINITY;
 
         // Compute residual statistics to inform tree param selection
         let residual_std = crate::analysis::compute_std(residuals);
         let residual_range = crate::analysis::compute_range(residuals);
-        let is_high_variance = residual_std > HIGH_VARIANCE_THRESHOLD;
+        let is_high_variance = residual_std > ltt_defaults::HIGH_VARIANCE_THRESHOLD;
 
         for &max_depth in &self.config.max_depth_values {
             for &learning_rate in &self.config.learning_rate_values {
@@ -947,24 +1018,24 @@ impl LttTuner {
                     // Compute complexity score based on residual characteristics
                     let complexity_score = if is_high_variance {
                         // High variance: prefer deeper trees, more rounds, lower LR
-                        (max_depth as f32 * DEPTH_WEIGHT_HIGH_VAR)
-                            + (num_rounds as f32 * ROUNDS_WEIGHT_HIGH_VAR)
-                            - (learning_rate * LR_PENALTY_HIGH_VAR)
+                        (max_depth as f32 * ltt_defaults::DEPTH_WEIGHT_HIGH_VAR)
+                            + (num_rounds as f32 * ltt_defaults::ROUNDS_WEIGHT_HIGH_VAR)
+                            - (learning_rate * ltt_defaults::LR_PENALTY_HIGH_VAR)
                     } else {
                         // Low variance: simpler trees, higher LR, fewer rounds
-                        (max_depth as f32 * DEPTH_WEIGHT_LOW_VAR)
-                            + (learning_rate * LR_WEIGHT_LOW_VAR)
-                            - (num_rounds as f32 * ROUNDS_PENALTY_LOW_VAR)
+                        (max_depth as f32 * ltt_defaults::DEPTH_WEIGHT_LOW_VAR)
+                            + (learning_rate * ltt_defaults::LR_WEIGHT_LOW_VAR)
+                            - (num_rounds as f32 * ltt_defaults::ROUNDS_PENALTY_LOW_VAR)
                     };
 
                     // Apply penalties for extreme configurations
-                    let depth_penalty = if max_depth > MAX_DEPTH_THRESHOLD {
-                        EXTREME_CONFIG_PENALTY
+                    let depth_penalty = if max_depth > ltt_defaults::MAX_DEPTH_THRESHOLD {
+                        ltt_defaults::EXTREME_CONFIG_PENALTY
                     } else {
                         0.0
                     };
-                    let lr_penalty = if learning_rate < MIN_LR_THRESHOLD {
-                        EXTREME_CONFIG_PENALTY
+                    let lr_penalty = if learning_rate < ltt_defaults::MIN_LR_THRESHOLD {
+                        ltt_defaults::EXTREME_CONFIG_PENALTY
                     } else {
                         0.0
                     };
@@ -1069,10 +1140,7 @@ mod tests {
         let params = LinearHyperparams::default();
         assert_eq!(params.lambda, 1.0);
         assert_eq!(params.l1_ratio, 0.0); // Ridge
-        assert_eq!(
-            params.shrinkage_factor,
-            shrinkage_thresholds::DEFAULT_SHRINKAGE
-        );
+        assert_eq!(params.shrinkage_factor, ltt_defaults::DEFAULT_LTT_SHRINKAGE);
         assert_eq!(params.extrapolation_damping, 0.0);
     }
 
@@ -1223,7 +1291,7 @@ mod tests {
 
         // Should select from high shrinkage candidates (>= 0.5)
         assert!(
-            shrinkage >= shrinkage_thresholds::HIGH_SHRINKAGE_MIN,
+            shrinkage >= ltt_defaults::HIGH_SHRINKAGE_MIN,
             "Strong R² should prefer high shrinkage, got {}",
             shrinkage
         );
@@ -1243,7 +1311,7 @@ mod tests {
 
         // Should select from low shrinkage candidates (<= 0.7)
         assert!(
-            shrinkage <= shrinkage_thresholds::LOW_SHRINKAGE_MAX,
+            shrinkage <= ltt_defaults::LOW_SHRINKAGE_MAX,
             "Weak R² should prefer low shrinkage, got {}",
             shrinkage
         );
@@ -1252,15 +1320,14 @@ mod tests {
     #[test]
     fn test_constants_are_reasonable() {
         // Verify our named constants have sensible values
-        use shrinkage_thresholds::*;
-        assert!(STRONG_LINEAR_R2 > WEAK_LINEAR_R2);
-        assert!(HIGH_SHRINKAGE_MIN > 0.0 && HIGH_SHRINKAGE_MIN < 1.0);
-        assert!(LOW_SHRINKAGE_MAX > 0.0 && LOW_SHRINKAGE_MAX < 1.0);
-        assert!(DEFAULT_SHRINKAGE > 0.0 && DEFAULT_SHRINKAGE <= 1.0);
-
-        use tree_scoring::*;
-        assert!(HIGH_VARIANCE_THRESHOLD > 0.0);
-        assert!(MAX_DEPTH_THRESHOLD > 0);
-        assert!(MIN_LR_THRESHOLD > 0.0);
+        assert!(ltt_defaults::STRONG_LINEAR_R2 > ltt_defaults::WEAK_LINEAR_R2);
+        assert!(ltt_defaults::HIGH_SHRINKAGE_MIN > 0.0 && ltt_defaults::HIGH_SHRINKAGE_MIN < 1.0);
+        assert!(ltt_defaults::LOW_SHRINKAGE_MAX > 0.0 && ltt_defaults::LOW_SHRINKAGE_MAX < 1.0);
+        assert!(
+            ltt_defaults::DEFAULT_LTT_SHRINKAGE > 0.0 && ltt_defaults::DEFAULT_LTT_SHRINKAGE <= 1.0
+        );
+        assert!(ltt_defaults::HIGH_VARIANCE_THRESHOLD > 0.0);
+        assert!(ltt_defaults::MAX_DEPTH_THRESHOLD > 0);
+        assert!(ltt_defaults::MIN_LR_THRESHOLD > 0.0);
     }
 }

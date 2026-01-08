@@ -1,0 +1,5 @@
+pub const DEFAULT_MAX_CONFLICT_RATIO: f32 = 0.001;
+pub const DEFAULT_MIN_SPARSITY: f32 = 0.5;
+pub const DEFAULT_MAX_SEARCH_BUNDLES: usize = 100;
+pub const DEFAULT_MAX_BINS_PER_BUNDLE: u16 = 255;
+pub const DEFAULT_BUNDLING_ENABLED: bool = true;

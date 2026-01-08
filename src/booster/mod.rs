@@ -7,5 +7,5 @@
 mod config;
 mod gbdt;
 
-pub use config::{GBDTConfig, LossType, DEFAULT_MIN_EARLY_STOPPING_TREES};
+pub use config::{GBDTConfig, GbdtPreset, LossType};
 pub use gbdt::GBDTModel;

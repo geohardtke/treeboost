@@ -95,6 +95,7 @@ use rkyv::Archive;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+use crate::defaults::linear_feature as linear_feature_defaults;
 use crate::Result;
 use crate::TreeBoostError;
 
@@ -268,12 +269,12 @@ impl Default for LinearFeatureConfig {
         // Exclude problematic column types that hurt linear model performance
         Self {
             exclude_columns: HashSet::new(),
-            exclude_categorical: true, // Categoricals already encoded by DataPipeline
-            exclude_id: true,          // ID columns have no predictive value
-            exclude_constant: true,    // Zero variance columns are useless
-            exclude_boolean: false,    // Booleans can be useful (0/1)
-            exclude_datetime: true,    // DateTime needs feature engineering first
-            exclude_text: true,        // High-cardinality text needs encoding
+            exclude_categorical: linear_feature_defaults::EXCLUDE_CATEGORICAL, // Categoricals already encoded by DataPipeline
+            exclude_id: linear_feature_defaults::EXCLUDE_ID, // ID columns have no predictive value
+            exclude_constant: linear_feature_defaults::EXCLUDE_CONSTANT, // Zero variance columns are useless
+            exclude_boolean: linear_feature_defaults::EXCLUDE_BOOLEAN, // Booleans can be useful (0/1)
+            exclude_datetime: linear_feature_defaults::EXCLUDE_DATETIME, // DateTime needs feature engineering first
+            exclude_text: linear_feature_defaults::EXCLUDE_TEXT, // High-cardinality text needs encoding
         }
     }
 }

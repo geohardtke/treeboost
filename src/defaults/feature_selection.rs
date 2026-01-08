@@ -1,0 +1,6 @@
+pub const DEFAULT_MIN_VARIANCE: f32 = 0.01;
+pub const DEFAULT_MAX_CORRELATION: f32 = 0.95;
+pub const DEFAULT_MAX_FEATURES: usize = 50;
+pub const DEFAULT_USE_TARGET_SELECTION: bool = true;
+pub const DEFAULT_DROP_COLLINEAR: bool = false;
+pub const DEFAULT_COLLINEARITY_THRESHOLD: f32 = 0.99;

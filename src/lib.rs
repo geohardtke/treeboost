@@ -91,6 +91,7 @@ pub mod analysis;
 pub mod backend;
 pub mod booster;
 pub mod dataset;
+pub mod defaults;
 pub mod encoding;
 pub mod ensemble;
 pub mod features;
@@ -100,6 +101,7 @@ pub mod learner;
 pub mod loss;
 pub mod model;
 pub mod monitoring;
+pub mod prelude;
 pub mod preprocessing;
 pub mod serialize;
 pub mod tree;
@@ -113,8 +115,10 @@ pub use backend::scalar::kernel;
 mod python;
 
 // Re-exports for convenience
-pub use backend::{BackendConfig, BackendSelector, BackendType, GpuMode, HistogramBackend};
-pub use booster::{GBDTConfig, GBDTModel};
+pub use backend::{
+    BackendConfig, BackendPreset, BackendSelector, BackendType, GpuMode, HistogramBackend,
+};
+pub use booster::{GBDTConfig, GBDTModel, GbdtPreset};
 pub use dataset::{BinnedDataset, FeatureInfo, FeatureType, QuantileBinner};
 pub use ensemble::{
     EnsembleBuilder, MultiSeedConfig, SelectionConfig as EnsembleSelectionConfig, StackedEnsemble,
@@ -122,13 +126,13 @@ pub use ensemble::{
 };
 pub use features::{
     FeatureGenerationConfig, FeatureGenerator, FeatureSelector, PolynomialGenerator,
-    RatioGenerator, SelectionConfig,
+    RatioGenerator, SelectionConfig, SmartFeatureConfig, SmartFeaturePreset,
 };
 pub use histogram::HistogramBuilder;
 pub use inference::Prediction;
 pub use learner::{
-    Booster, LeafLinearModel, LinearBooster, LinearConfig, LinearTreeBooster, LinearTreeConfig,
-    TreeBooster, TreeConfig, WeakLearner,
+    Booster, LeafLinearModel, LinearBooster, LinearConfig, LinearPreset, LinearTreeBooster,
+    LinearTreeConfig, TreeBooster, TreeConfig, TreePreset, WeakLearner,
 };
 pub use loss::{
     sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, PseudoHuberLoss,
@@ -136,23 +140,25 @@ pub use loss::{
 pub use model::{
     AutoBuilder, AutoConfig, AutoModel, BoostingMode, BuildPhaseTimes, BuildResult,
     ConsoleProgress, ModeSelection, ProgressCallback, ProgressUpdate, QuietProgress, TrainingPhase,
-    TuningLevel, UniversalConfig, UniversalModel,
+    TreeTunerPreset, TuningLevel, UniversalConfig, UniversalModel, UniversalPreset,
 };
 pub use monitoring::{AlertLevel, CVHoldoutTracker, ShiftDetector, ShiftResult};
 
 // Analysis module exports
 pub use analysis::{
-    compute_correlation, compute_r2, compute_variance, AnalysisConfig, AnalysisReport, Confidence,
-    DatasetAnalysis, Recommendation,
+    compute_correlation, compute_r2, compute_variance, AnalysisConfig, AnalysisPreset,
+    AnalysisReport, Confidence, DatasetAnalysis, Recommendation,
 };
 pub use preprocessing::{
     EncodingMap, FrequencyEncoder, ImputeStrategy, IndicatorImputer, LabelEncoder, MinMaxScaler,
     OneHotEncoder, OrderedTargetEncoder, PipelineBuilder, Preprocessor, RobustScaler, Scaler,
-    SimpleImputer, StandardScaler, UnknownStrategy, YeoJohnsonTransform,
+    SimpleImputer, SmartPreprocessConfig, SmartPreprocessPreset, StandardScaler, UnknownStrategy,
+    YeoJohnsonTransform,
 };
 pub use tree::{InteractionConstraints, MonotonicConstraint};
 pub use tuner::{
-    AutoTuner, EvalStrategy, GridStrategy, ModelFormat, ParameterSpace, SearchHistory, TunerConfig,
+    AutoTuner, EvalStrategy, GridStrategy, ModelFormat, ParameterSpace, SearchHistory, SpacePreset,
+    TunerConfig, TunerPreset,
 };
 
 /// Library error type

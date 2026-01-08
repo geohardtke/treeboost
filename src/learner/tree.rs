@@ -14,6 +14,7 @@
 
 use crate::backend::BackendType;
 use crate::dataset::BinnedDataset;
+use crate::defaults::tree as tree_defaults;
 use crate::tree::{InteractionConstraints, MonotonicConstraint, Tree, TreeGrower};
 use crate::Result;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -81,18 +82,33 @@ pub struct TreeConfig {
     pub era_splitting: bool,
 }
 
+/// Presets for common tree configurations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreePreset {
+    /// Balanced defaults - good starting point.
+    Standard,
+    /// Deeper trees for complex signals.
+    Deep,
+    /// Shallow trees for noisy data or faster training.
+    Shallow,
+    /// Higher regularization to prevent overfitting.
+    Regularized,
+    /// Minimal regularization for expressiveness.
+    Expressive,
+}
+
 impl Default for TreeConfig {
     fn default() -> Self {
         Self {
-            max_depth: 6,
-            max_leaves: 31, // 2^5 - 1
-            lambda: 1.0,
-            min_samples_leaf: 1,
-            min_hessian_leaf: 1.0,
-            entropy_weight: 0.0,
-            min_gain: 0.0,
-            learning_rate: 0.1,
-            colsample: 1.0,
+            max_depth: tree_defaults::DEFAULT_MAX_DEPTH,
+            max_leaves: tree_defaults::DEFAULT_MAX_LEAVES,
+            lambda: tree_defaults::DEFAULT_TREE_LAMBDA,
+            min_samples_leaf: tree_defaults::DEFAULT_MIN_SAMPLES_LEAF,
+            min_hessian_leaf: tree_defaults::DEFAULT_MIN_HESSIAN_LEAF,
+            entropy_weight: tree_defaults::DEFAULT_ENTROPY_WEIGHT,
+            min_gain: tree_defaults::DEFAULT_MIN_GAIN,
+            learning_rate: tree_defaults::DEFAULT_LEARNING_RATE,
+            colsample: tree_defaults::DEFAULT_COLSAMPLE,
             monotonic_constraints: Vec::new(),
             interaction_groups: Vec::new(),
             era_splitting: false,
@@ -104,6 +120,29 @@ impl TreeConfig {
     /// Create new config with defaults
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Apply a preset configuration.
+    pub fn with_preset(mut self, preset: TreePreset) -> Self {
+        match preset {
+            TreePreset::Standard => {}
+            TreePreset::Deep => {
+                self.max_depth = tree_defaults::DEEP_MAX_DEPTH;
+            }
+            TreePreset::Shallow => {
+                self.max_depth = tree_defaults::SHALLOW_MAX_DEPTH;
+            }
+            TreePreset::Regularized => {
+                self.lambda = tree_defaults::REGULARIZED_TREE_LAMBDA;
+                self.entropy_weight = tree_defaults::REGULARIZED_ENTROPY_WEIGHT;
+            }
+            TreePreset::Expressive => {
+                self.lambda = tree_defaults::EXPRESSIVE_TREE_LAMBDA;
+                self.entropy_weight = tree_defaults::DEFAULT_ENTROPY_WEIGHT;
+                self.min_gain = tree_defaults::DEFAULT_MIN_GAIN;
+            }
+        }
+        self
     }
 
     pub fn with_max_depth(mut self, max_depth: usize) -> Self {

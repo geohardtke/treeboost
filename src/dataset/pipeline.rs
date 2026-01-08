@@ -10,6 +10,7 @@
 
 use crate::dataset::binner::QuantileBinner;
 use crate::dataset::{BinnedDataset, FeatureInfo, FeatureType};
+use crate::defaults::{gbdt as gbdt_defaults, preprocessing as preprocessing_defaults};
 use crate::encoding::{CategoryFilter, CategoryMapping, EncodingMap, OrderedTargetEncoder};
 use crate::{Result, TreeBoostError};
 use polars::prelude::*;
@@ -34,11 +35,11 @@ pub struct PipelineConfig {
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
-            num_bins: 255,
-            cms_eps: 0.001,
-            cms_confidence: 0.99,
-            min_category_count: 5,
-            target_encoding_smoothing: 10.0,
+            num_bins: gbdt_defaults::DEFAULT_NUM_BINS,
+            cms_eps: preprocessing_defaults::CMS_EPSILON,
+            cms_confidence: preprocessing_defaults::CMS_CONFIDENCE,
+            min_category_count: preprocessing_defaults::MIN_CATEGORY_COUNT,
+            target_encoding_smoothing: preprocessing_defaults::TARGET_ENCODING_SMOOTHING,
         }
     }
 }

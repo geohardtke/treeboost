@@ -9,7 +9,9 @@ use std::collections::HashMap;
 
 use pyo3::prelude::*;
 
-use crate::tuner::{ModelFormat, ParamBounds, ParameterSpace, TunerConfig};
+use crate::tuner::{
+    ModelFormat, ParamBounds, ParameterSpace, SpacePreset, TunerConfig, TunerPreset,
+};
 
 use super::enums::{
     PyEvalStrategy, PyGridStrategy, PyModelFormat, PyOptimizationMetric, PyTaskType, PyTuningMode,
@@ -192,6 +194,8 @@ impl PyParameterSpace {
     /// Create default search space for regression
     ///
     /// Includes: max_depth, learning_rate, subsample, lambda, entropy_weight
+    ///
+    /// Deprecated: use `ParameterSpace.preset("regression")`.
     #[staticmethod]
     fn default_regression() -> Self {
         Self {
@@ -202,6 +206,8 @@ impl PyParameterSpace {
     /// Create default search space for classification
     ///
     /// Same parameters as regression but with different default centers.
+    ///
+    /// Deprecated: use `ParameterSpace.preset("classification")`.
     #[staticmethod]
     fn default_classification() -> Self {
         Self {
@@ -210,11 +216,35 @@ impl PyParameterSpace {
     }
 
     /// Create a minimal search space (learning_rate and max_depth only)
+    ///
+    /// Deprecated: use `ParameterSpace.preset("minimal")`.
     #[staticmethod]
     fn minimal() -> Self {
         Self {
             inner: ParameterSpace::minimal(),
         }
+    }
+
+    /// Create a preset search space.
+    ///
+    /// Valid presets: minimal, regression, classification, exhaustive, universal.
+    #[staticmethod]
+    fn preset(preset: &str) -> PyResult<Self> {
+        let preset = match preset.to_lowercase().as_str() {
+            "minimal" => SpacePreset::Minimal,
+            "regression" => SpacePreset::Regression,
+            "classification" => SpacePreset::Classification,
+            "exhaustive" => SpacePreset::Exhaustive,
+            "universal" => SpacePreset::Universal,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "unknown preset (use: minimal, regression, classification, exhaustive, universal)",
+                ));
+            }
+        };
+        Ok(Self {
+            inner: ParameterSpace::with_preset(preset),
+        })
     }
 
     /// Add or update a parameter in the search space
@@ -428,6 +458,8 @@ impl PyTunerConfig {
     }
 
     /// Create a quick tuning config (2 iterations, fewer rounds)
+    ///
+    /// Deprecated: use `TunerConfig.preset(\"quick\")`.
     #[staticmethod]
     fn quick() -> Self {
         Self {
@@ -436,11 +468,54 @@ impl PyTunerConfig {
     }
 
     /// Create a thorough tuning config (more iterations, stricter thresholds)
+    ///
+    /// Deprecated: use `TunerConfig.preset(\"thorough\")`.
     #[staticmethod]
     fn thorough() -> Self {
         Self {
             inner: TunerConfig::thorough(),
         }
+    }
+
+    /// Create a tuner config from a preset name.
+    ///
+    /// Valid presets: smoketest, quick, balanced, thorough.
+    #[staticmethod]
+    fn preset(preset: &str) -> PyResult<Self> {
+        let preset = match preset.to_lowercase().as_str() {
+            "smoketest" | "smoke_test" => TunerPreset::SmokeTest,
+            "quick" => TunerPreset::Quick,
+            "balanced" => TunerPreset::Balanced,
+            "thorough" => TunerPreset::Thorough,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "unknown preset (use: smoketest, quick, balanced, thorough)",
+                ));
+            }
+        };
+        Ok(Self {
+            inner: TunerConfig::default().with_preset(preset),
+        })
+    }
+
+    /// Return a new config with the given preset applied.
+    ///
+    /// Valid presets: smoketest, quick, balanced, thorough.
+    fn with_preset(&self, preset: &str) -> PyResult<Self> {
+        let preset = match preset.to_lowercase().as_str() {
+            "smoketest" | "smoke_test" => TunerPreset::SmokeTest,
+            "quick" => TunerPreset::Quick,
+            "balanced" => TunerPreset::Balanced,
+            "thorough" => TunerPreset::Thorough,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "unknown preset (use: smoketest, quick, balanced, thorough)",
+                ));
+            }
+        };
+        Ok(Self {
+            inner: self.inner.clone().with_preset(preset),
+        })
     }
 
     // Builder methods

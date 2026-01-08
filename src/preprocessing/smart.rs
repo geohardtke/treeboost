@@ -26,6 +26,7 @@
 //! ```
 
 use crate::analysis::profiler::{ColumnDataType, ColumnProfile, DataFrameProfile};
+use crate::defaults::preprocessing as preprocessing_defaults;
 use crate::preprocessing::{
     FrequencyEncoder, LabelEncoder, MinMaxScaler, OneHotEncoder, Preprocessor, RobustScaler,
     SimpleImputer, StandardScaler, YeoJohnsonTransform,
@@ -162,16 +163,51 @@ pub struct SmartPreprocessConfig {
     pub skip_columns: HashSet<String>,
 }
 
+/// Presets for smart preprocessing thresholds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmartPreprocessPreset {
+    /// Standard thresholds.
+    Standard,
+    /// Higher cardinality threshold, looser skewness.
+    Permissive,
+    /// Lower thresholds, more aggressive encoding.
+    Strict,
+}
+
 impl Default for SmartPreprocessConfig {
     fn default() -> Self {
         Self {
-            high_cardinality_threshold: 50,
-            skewness_threshold: 2.0,
-            missing_indicator_threshold: 0.05,
+            high_cardinality_threshold: preprocessing_defaults::HIGH_CARDINALITY_THRESHOLD,
+            skewness_threshold: preprocessing_defaults::SKEWNESS_THRESHOLD,
+            missing_indicator_threshold: preprocessing_defaults::MISSING_INDICATOR_THRESHOLD,
             force_encodings: HashMap::new(),
             force_scalers: HashMap::new(),
             skip_columns: HashSet::new(),
         }
+    }
+}
+
+impl SmartPreprocessConfig {
+    /// Apply a preset configuration.
+    pub fn with_preset(mut self, preset: SmartPreprocessPreset) -> Self {
+        match preset {
+            SmartPreprocessPreset::Standard => {}
+            SmartPreprocessPreset::Permissive => {
+                self.high_cardinality_threshold =
+                    preprocessing_defaults::PERMISSIVE_HIGH_CARDINALITY_THRESHOLD;
+                self.skewness_threshold = preprocessing_defaults::PERMISSIVE_SKEWNESS_THRESHOLD;
+                self.missing_indicator_threshold =
+                    preprocessing_defaults::PERMISSIVE_MISSING_INDICATOR_THRESHOLD;
+            }
+            SmartPreprocessPreset::Strict => {
+                self.high_cardinality_threshold =
+                    preprocessing_defaults::STRICT_HIGH_CARDINALITY_THRESHOLD;
+                self.skewness_threshold = preprocessing_defaults::STRICT_SKEWNESS_THRESHOLD;
+                self.missing_indicator_threshold =
+                    preprocessing_defaults::STRICT_MISSING_INDICATOR_THRESHOLD;
+            }
+        }
+        self
     }
 }
 
