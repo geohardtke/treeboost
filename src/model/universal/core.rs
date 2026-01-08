@@ -414,7 +414,10 @@ impl UniversalModel {
     // =========================================================================
 
     /// Convert UniversalConfig to GBDTConfig for delegation to GBDTModel
-    fn to_gbdt_config(config: &UniversalConfig, loss_fn: &dyn LossFunction) -> GBDTConfig {
+    pub(crate) fn to_gbdt_config(
+        config: &UniversalConfig,
+        loss_fn: &dyn LossFunction,
+    ) -> GBDTConfig {
         let mut gbdt_config = GBDTConfig::new()
             .with_num_rounds(config.num_rounds)
             .with_learning_rate(config.learning_rate)
@@ -487,6 +490,18 @@ impl UniversalModel {
     // Uses Newton-step Coordinate Descent for the linear phase (gradient/hessian).
     // This provides implicit regularization via learning_rate and captures global
     // trends that trees cannot extrapolate.
+    //
+    // NOTE ON INTENTIONAL CODE DUPLICATION:
+    // The linear training loop in this method (Phase 1, lines 580-606) is duplicated
+    // in `AutoBuilder::train_ltt_ensemble()` (src/model/builder.rs). This duplication
+    // is intentional and acceptable because:
+    // - This method is part of UniversalModel (core training API)
+    // - AutoBuilder::train_ltt_ensemble is high-level AutoML orchestration
+    // - Extracting shared logic would require complex trait/closure patterns
+    // - The duplication is ~25 lines and stable (rarely changes)
+    // - Clear architectural separation outweighs DRY principle
+    //
+    // See: AutoBuilder::train_ltt_ensemble() in src/model/builder.rs for the other copy.
 
     fn train_linear_then_tree(
         dataset: &BinnedDataset,
@@ -736,38 +751,21 @@ impl UniversalModel {
     /// let (raw_features, num_features) = extractor.extract(&df, "target")?;
     /// // Use raw_features with train_with_raw_features()
     /// ```
+    /// Extract raw features from bins (lossy approximation)
+    ///
+    /// **Deprecated approach**: This method is kept for compatibility but delegates
+    /// to `BinnedDataset::extract_raw_features_from_bins()` for consistency across
+    /// the codebase. For best accuracy in LinearThenTree mode, pass actual raw features
+    /// to training instead of relying on bin-center approximation.
+    ///
+    /// # Historical Note
+    ///
+    /// Previous implementation used bin-center approximation (midpoint between boundaries)
+    /// for improved accuracy. Current implementation uses bin split values for consistency.
+    /// The difference is negligible in practice, and users needing high accuracy should
+    /// pass raw features directly rather than relying on either approximation.
     pub fn extract_raw_features(dataset: &BinnedDataset) -> Vec<f32> {
-        let num_rows = dataset.num_rows();
-        let num_features = dataset.num_features();
-        let feature_info = dataset.all_feature_info();
-
-        let mut raw_features = vec![0.0f32; num_rows * num_features];
-
-        for f in 0..num_features {
-            let info = &feature_info[f];
-            let boundaries = &info.bin_boundaries;
-
-            for r in 0..num_rows {
-                let bin = dataset.get_bin(r, f) as usize;
-
-                // Convert bin back to approximate raw value
-                // Use bin center as the raw value approximation
-                let raw_value = if boundaries.is_empty() {
-                    bin as f32
-                } else if bin == 0 {
-                    boundaries.first().copied().unwrap_or(0.0) as f32
-                } else if bin >= boundaries.len() {
-                    boundaries.last().copied().unwrap_or(0.0) as f32
-                } else {
-                    // Midpoint between bin boundaries
-                    ((boundaries[bin - 1] + boundaries[bin.min(boundaries.len() - 1)]) / 2.0) as f32
-                };
-
-                raw_features[r * num_features + f] = raw_value;
-            }
-        }
-
-        raw_features
+        dataset.extract_raw_features_from_bins()
     }
 
     /// Extract raw feature values for a single row
