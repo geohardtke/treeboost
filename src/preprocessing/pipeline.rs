@@ -12,10 +12,10 @@
 //! use treeboost::preprocessing::{Preprocessor, StandardScaler, FrequencyEncoder};
 //!
 //! // Create a pipeline
-//! let pipeline = Preprocessor::Pipeline(vec![
+//! let pipeline = Preprocessor::Pipeline(Box::new(vec![
 //!     Preprocessor::Standard(StandardScaler::new()),
 //!     // FrequencyEncoder would be added for categorical columns
-//! ]);
+//! ]));
 //!
 //! // Serialize the entire pipeline
 //! let json = serde_json::to_string(&pipeline).unwrap();
