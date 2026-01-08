@@ -45,7 +45,7 @@ pub(super) fn tune_hyperparameters(
                 use crate::learner::{LinearConfig, TreeConfig};
                 // Use stronger regularization for stability
                 let linear_config = LinearConfig::ridge(1.0)
-                    .with_learning_rate(0.5)
+                    .with_shrinkage_factor(0.5)
                     .with_max_iter(200);
                 let tree_config = TreeConfig::default().with_max_depth(3);
                 let univ_config = UniversalConfig::default()

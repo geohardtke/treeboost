@@ -471,7 +471,7 @@ mod tests {
 
         let config = LinearConfig::default()
             .with_lambda(0.01)
-            .with_learning_rate(0.5)
+            .with_shrinkage_factor(0.5)
             .with_max_iter(100);
 
         let mut booster = Booster::linear(1, config);

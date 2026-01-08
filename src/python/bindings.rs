@@ -215,7 +215,7 @@ impl PyGBDTConfig {
         self.inner.num_rounds = value;
     }
 
-    /// Learning rate (shrinkage)
+    /// Learning rate (optimization step size for trees)
     #[getter]
     fn learning_rate(&self) -> f32 {
         self.inner.learning_rate

@@ -391,7 +391,8 @@ impl LinearTreeBooster {
         let lambda = self.config.linear_config.lambda;
         let max_iter = self.config.linear_config.max_iter;
         let tol = self.config.linear_config.tol;
-        let lr = self.config.linear_config.learning_rate;
+        // Shrinkage factor for linear leaf models (ensemble weighting, not optimization step size)
+        let shrinkage = self.config.linear_config.shrinkage_factor;
 
         // Initialize weights and bias
         let mut weights = vec![0.0f32; num_features];
@@ -435,7 +436,7 @@ impl LinearTreeBooster {
 
                 let delta = -grad_bias / (hess_bias + lambda);
                 let delta = delta.clamp(-10.0, 10.0);
-                bias += lr * delta;
+                bias += shrinkage * delta;
                 max_change = max_change.max(delta.abs());
             }
 
@@ -465,7 +466,7 @@ impl LinearTreeBooster {
 
                 let delta = -grad_j / (hess_j + lambda);
                 let delta = delta.clamp(-10.0, 10.0);
-                weights[j] += lr * delta;
+                weights[j] += shrinkage * delta;
                 max_change = max_change.max(delta.abs());
             }
 

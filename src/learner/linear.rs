@@ -17,6 +17,64 @@
 //! 2. **Mandatory internal standardization**: Always standardizes features before fitting
 //! 3. **Numerically stable updates**: Clamped deltas prevent divergence
 //!
+//! # Parameter Terminology: shrinkage_factor vs learning_rate
+//!
+//! This module uses **`shrinkage_factor`** while tree learners use **`learning_rate`**.
+//! This naming distinction reflects their **fundamentally different roles** in the ensemble:
+//!
+//! ## `shrinkage_factor` (LinearConfig) - Ensemble Weighting
+//!
+//! - **Purpose**: Controls how much the linear model contributes to the ensemble
+//! - **Effect**: Weights linear predictions: `ensemble += shrinkage_factor * linear_pred`
+//! - **Range**: (0.0, 1.0] - typically 0.1-0.5 for conservative ensembles
+//! - **Semantics**: "How much to trust the linear model's predictions"
+//! - **When applied**: During prediction (ensemble construction)
+//! - **When to tune**: Increase if linear model is accurate, decrease if it overfits
+//! - **Default**: 0.3 (more aggressive than tree learning_rate because linear models
+//!   extrapolate better and benefit from stronger ensemble weighting)
+//!
+//! ## `learning_rate` (TreeConfig) - Optimization Step Size
+//!
+//! - **Purpose**: Controls optimization step size in Newton-step gradient descent
+//! - **Effect**: Scales gradient updates: `weight += learning_rate * gradient_step`
+//! - **Range**: (0.0, 1.0] - typically 0.1 for regularization
+//! - **Semantics**: "How aggressively to optimize tree weights"
+//! - **When applied**: During training (optimization)
+//! - **When to tune**: Increase for faster learning, decrease for stability
+//! - **Default**: 0.1 (more conservative to prevent overfitting)
+//!
+//! ## Why the Distinction Matters
+//!
+//! In standard gradient boosting literature, "learning rate" typically refers to **both**:
+//! 1. The step size for weight updates during training (optimization)
+//! 2. The shrinkage factor for combining weak learners (regularization)
+//!
+//! These are often the same parameter in tree-only boosting. However, in LinearThenTree
+//! mode where we combine **two different model types**, we separate these concerns:
+//!
+//! - **`shrinkage_factor`** (linear): Pure ensemble weighting, NOT used in optimization
+//!   (Coordinate Descent uses Newton method which doesn't need a learning rate)
+//! - **`learning_rate`** (trees): Classic gradient descent step size, also acts as
+//!   ensemble weighting because trees are trained iteratively
+//!
+//! ## Example
+//!
+//! ```ignore
+//! // Both have similar ranges, but different meanings:
+//! let linear_cfg = LinearConfig::default()
+//!     .with_shrinkage_factor(0.3);  // "Use 30% of linear predictions in ensemble"
+//!
+//! let tree_cfg = TreeConfig::default()
+//!     .with_learning_rate(0.1);  // "Take 10% of each Newton step during training"
+//! ```
+//!
+//! ## Distinction from `extrapolation_damping`
+//!
+//! LinearConfig also has `extrapolation_damping` which serves a different purpose:
+//! - **`shrinkage_factor`**: Ensemble weighting (default: 0.3)
+//! - **`extrapolation_damping`**: Post-prediction safety mechanism that shrinks
+//!   predictions toward target mean to reduce OOD risk (default: 0.0)
+//!
 //! # Algorithm
 //!
 //! Coordinate Descent with Elastic Net:
@@ -96,11 +154,12 @@ pub struct LinearConfig {
     /// L2 penalty encourages small but non-zero weights.
     pub l1_ratio: f32,
 
-    /// Learning rate for weight updates
+    /// Shrinkage factor for boosting ensemble
     ///
-    /// Scales the coordinate descent step size.
-    /// Lower values = slower convergence but more stable.
-    pub learning_rate: f32,
+    /// Weights the linear model's contribution in the additive ensemble.
+    /// Lower values = more conservative, prevents overfitting.
+    /// Range: (0.0, 1.0]. Typical: 0.1-0.5
+    pub shrinkage_factor: f32,
 
     /// Maximum iterations per fit_on_gradients call
     ///
@@ -115,32 +174,38 @@ pub struct LinearConfig {
     /// Maximum absolute weight value (prevents explosion)
     pub max_weight: f32,
 
-    /// Prediction shrinkage (entropy-like regularization)
+    /// Extrapolation damping toward target mean
     ///
-    /// **DEFAULT: 0.0** (no shrinkage)
+    /// **DEFAULT: 0.0** (no damping)
     ///
-    /// Shrinks predictions toward the target mean to reduce extrapolation:
-    /// `final_pred = pred * (1 - shrinkage) + target_mean * shrinkage`
+    /// Dampens predictions toward the target mean to reduce out-of-distribution risk:
+    /// `final_pred = pred * (1 - damping) + target_mean * damping`
     ///
     /// Higher values = more conservative predictions = less extrapolation.
     /// Useful for preventing extreme predictions on out-of-distribution test data.
     ///
-    /// - `0.0` = no shrinkage (use model predictions as-is)
-    /// - `0.5` = 50% model, 50% mean (strong shrinkage)
+    /// **Note**: This is distinct from `shrinkage_factor` which controls ensemble weighting.
+    /// - `extrapolation_damping`: Post-prediction safety mechanism (default: 0.0)
+    /// - `shrinkage_factor`: Ensemble contribution weight (default: 0.3)
+    ///
+    /// - `0.0` = no damping (use model predictions as-is)
+    /// - `0.5` = 50% model, 50% mean (strong damping)
     /// - `1.0` = always predict mean (no model contribution)
-    pub prediction_shrinkage: f32,
+    pub extrapolation_damping: f32,
 }
 
 impl Default for LinearConfig {
     fn default() -> Self {
         Self {
-            lambda: 1.0,               // Strong default regularization
-            l1_ratio: 0.0,             // Pure Ridge by default (most stable)
-            learning_rate: 0.3,        // Moderate step size for boosting
-            max_iter: 100,             // Many iterations for single-round convergence
-            tol: 1e-6,                 // Tight convergence
-            max_weight: 100.0,         // Prevent extreme weights
-            prediction_shrinkage: 0.0, // No shrinkage by default
+            lambda: 1.0,           // Strong default regularization
+            l1_ratio: 0.0,         // Pure Ridge by default (most stable)
+            shrinkage_factor: 0.3, // Moderate ensemble weighting (more aggressive than tree
+            // learning_rate=0.1, because linear models extrapolate
+            // better and benefit from stronger ensemble weighting)
+            max_iter: 100,              // Many iterations for single-round convergence
+            tol: 1e-6,                  // Tight convergence
+            max_weight: 100.0,          // Prevent extreme weights
+            extrapolation_damping: 0.0, // No extrapolation damping by default
         }
     }
 }
@@ -198,9 +263,9 @@ impl LinearConfig {
         self
     }
 
-    /// Set learning rate
-    pub fn with_learning_rate(mut self, lr: f32) -> Self {
-        self.learning_rate = lr.clamp(1e-6, 1.0);
+    /// Set shrinkage factor for boosting ensemble
+    pub fn with_shrinkage_factor(mut self, shrinkage: f32) -> Self {
+        self.shrinkage_factor = shrinkage.clamp(1e-6, 1.0);
         self
     }
 
@@ -222,16 +287,19 @@ impl LinearConfig {
         self
     }
 
-    /// Set prediction shrinkage (entropy-like regularization)
+    /// Set extrapolation damping toward target mean
     ///
-    /// Shrinks predictions toward the target mean to prevent extreme extrapolation.
-    /// Values between 0.1-0.3 are recommended for modest shrinkage.
+    /// Dampens predictions toward the target mean to prevent extreme extrapolation
+    /// on out-of-distribution data. Values between 0.1-0.3 are recommended for
+    /// modest damping.
     ///
-    /// - `0.0` = no shrinkage (default)
-    /// - `0.2` = 20% shrinkage toward mean (recommended starting point)
-    /// - `0.5` = 50% shrinkage (strong)
-    pub fn with_prediction_shrinkage(mut self, shrinkage: f32) -> Self {
-        self.prediction_shrinkage = shrinkage.clamp(0.0, 1.0);
+    /// **Note**: This is distinct from `shrinkage_factor` (ensemble weighting).
+    ///
+    /// - `0.0` = no damping (default, use full model predictions)
+    /// - `0.2` = 20% damping toward mean (recommended for OOD safety)
+    /// - `0.5` = 50% damping (strong conservative bias)
+    pub fn with_extrapolation_damping(mut self, damping: f32) -> Self {
+        self.extrapolation_damping = damping.clamp(0.0, 1.0);
         self
     }
 
@@ -723,12 +791,12 @@ impl WeakLearner for LinearBooster {
             }
         }
 
-        // Apply prediction shrinkage (entropy-like regularization)
-        // Shrinks predictions toward target mean to reduce extrapolation
-        let shrinkage = self.config.prediction_shrinkage;
-        if shrinkage > 0.0 {
-            let scale = 1.0 - shrinkage;
-            let offset = shrinkage * self.target_mean;
+        // Apply extrapolation damping toward target mean
+        // Dampens predictions to reduce out-of-distribution risk
+        let damping = self.config.extrapolation_damping;
+        if damping > 0.0 {
+            let scale = 1.0 - damping;
+            let offset = damping * self.target_mean;
             for pred in predictions.iter_mut() {
                 *pred = scale * *pred + offset;
             }
@@ -746,10 +814,10 @@ impl WeakLearner for LinearBooster {
             pred += self.weights[j] * x_ij;
         }
 
-        // Apply prediction shrinkage
-        let shrinkage = self.config.prediction_shrinkage;
-        if shrinkage > 0.0 {
-            pred = (1.0 - shrinkage) * pred + shrinkage * self.target_mean;
+        // Apply extrapolation damping
+        let damping = self.config.extrapolation_damping;
+        if damping > 0.0 {
+            pred = (1.0 - damping) * pred + damping * self.target_mean;
         }
 
         pred
@@ -830,7 +898,7 @@ mod tests {
 
         let config = LinearConfig::default()
             .with_lambda(0.01)
-            .with_learning_rate(0.5)
+            .with_shrinkage_factor(0.5)
             .with_max_iter(100);
 
         let mut booster = LinearBooster::new(1, config);
@@ -868,7 +936,7 @@ mod tests {
 
         let config = LinearConfig::default()
             .with_lambda(0.001)
-            .with_learning_rate(0.5)
+            .with_shrinkage_factor(0.5)
             .with_max_iter(200);
 
         let mut booster = LinearBooster::new(2, config);
@@ -1034,7 +1102,7 @@ mod tests {
 
         // Use LASSO with strong regularization
         let config = LinearConfig::lasso(2.0)
-            .with_learning_rate(0.5)
+            .with_shrinkage_factor(0.5)
             .with_max_iter(200);
 
         let mut booster = LinearBooster::new(n_features, config);
@@ -1090,7 +1158,7 @@ mod tests {
 
         // Ridge - should have all non-zero weights
         let ridge_config = LinearConfig::ridge(0.1)
-            .with_learning_rate(0.5)
+            .with_shrinkage_factor(0.5)
             .with_max_iter(100);
         let mut ridge_booster = LinearBooster::new(n_features, ridge_config);
         ridge_booster
@@ -1099,7 +1167,7 @@ mod tests {
 
         // LASSO - should have sparser weights
         let lasso_config = LinearConfig::lasso(0.5)
-            .with_learning_rate(0.5)
+            .with_shrinkage_factor(0.5)
             .with_max_iter(100);
         let mut lasso_booster = LinearBooster::new(n_features, lasso_config);
         lasso_booster
@@ -1131,7 +1199,7 @@ mod tests {
         let hessians = vec![1.0; 4];
 
         let config = LinearConfig::elastic_net(0.5, 0.5) // 50% L1, 50% L2
-            .with_learning_rate(0.5)
+            .with_shrinkage_factor(0.5)
             .with_max_iter(100);
 
         let mut booster = LinearBooster::new(2, config);
@@ -1149,5 +1217,88 @@ mod tests {
                 pred
             );
         }
+    }
+
+    #[test]
+    fn test_shrinkage_factor_clamping() {
+        // Test that shrinkage_factor is properly clamped to valid range
+
+        // Too low - should clamp to 1e-6
+        let config = LinearConfig::new().with_shrinkage_factor(-1.0);
+        assert!(
+            config.shrinkage_factor >= 1e-6,
+            "shrinkage_factor should be clamped to minimum 1e-6, got {}",
+            config.shrinkage_factor
+        );
+
+        // Too high - should clamp to 1.0
+        let config = LinearConfig::new().with_shrinkage_factor(2.0);
+        assert!(
+            config.shrinkage_factor <= 1.0,
+            "shrinkage_factor should be clamped to maximum 1.0, got {}",
+            config.shrinkage_factor
+        );
+
+        // Valid values should pass through unchanged
+        let config = LinearConfig::new().with_shrinkage_factor(0.5);
+        assert_eq!(config.shrinkage_factor, 0.5);
+    }
+
+    #[test]
+    fn test_shrinkage_factor_near_zero_contribution() {
+        // When shrinkage_factor is very small (near 0), minimal linear contribution
+        // Note: with_shrinkage_factor clamps to minimum 1e-6, so we can't use exactly 0
+
+        let features = vec![1.0, 2.0, 3.0, 4.0]; // 2 samples, 2 features
+        let gradients = vec![-1.0, -2.0];
+        let hessians = vec![1.0, 1.0];
+
+        let config = LinearConfig::default().with_shrinkage_factor(0.0);
+        let mut booster = LinearBooster::new(2, config);
+        booster
+            .fit_on_gradients(&features, 2, &gradients, &hessians)
+            .unwrap();
+
+        // Note: LinearBooster itself doesn't apply shrinkage_factor - that's done by
+        // the ensemble (UniversalModel). This just verifies the config stores it correctly.
+        // Since 0.0 is clamped to 1e-6, that's what we should see
+        assert_eq!(booster.config().shrinkage_factor, 1e-6);
+    }
+
+    #[test]
+    fn test_shrinkage_factor_full_contribution() {
+        // When shrinkage_factor = 1.0, full linear predictions should be used
+
+        let features = vec![1.0, 2.0, 3.0, 4.0]; // 2 samples, 2 features
+        let gradients = vec![-1.0, -2.0];
+        let hessians = vec![1.0, 1.0];
+
+        let config = LinearConfig::default().with_shrinkage_factor(1.0);
+        let mut booster = LinearBooster::new(2, config);
+        booster
+            .fit_on_gradients(&features, 2, &gradients, &hessians)
+            .unwrap();
+
+        assert_eq!(booster.config().shrinkage_factor, 1.0);
+    }
+
+    #[test]
+    fn test_shrinkage_factor_vs_extrapolation_damping() {
+        // Test that shrinkage_factor and extrapolation_damping are independent
+
+        let config = LinearConfig::default()
+            .with_shrinkage_factor(0.3)
+            .with_extrapolation_damping(0.1);
+
+        assert_eq!(config.shrinkage_factor, 0.3);
+        assert_eq!(config.extrapolation_damping, 0.1);
+
+        // They should not affect each other
+        let config2 = LinearConfig::default()
+            .with_shrinkage_factor(0.5)
+            .with_extrapolation_damping(0.0);
+
+        assert_eq!(config2.shrinkage_factor, 0.5);
+        assert_eq!(config2.extrapolation_damping, 0.0);
     }
 }

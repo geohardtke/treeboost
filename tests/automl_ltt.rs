@@ -18,16 +18,20 @@ fn test_ltt_pure_linear_data() {
     .unwrap();
 
     println!("\n=== Test: Pure Linear Data (y = 2x + 3) ===");
-    println!("Input DataFrame: {} rows × {} cols", df.height(), df.width());
+    println!(
+        "Input DataFrame: {} rows × {} cols",
+        df.height(),
+        df.width()
+    );
 
     // Configure with good hyperparameters for linear regression
     let linear_config = LinearConfig::ridge(0.01) // Very light regularization for pure linear data
-        .with_learning_rate(1.0) // Full step size
+        .with_shrinkage_factor(1.0) // Full step size
         .with_max_iter(500); // Many iterations for convergence
 
     let tree_config = TreeConfig::default()
         .with_max_depth(3)
-        .with_min_samples_leaf(5);  // No auto-stopping, train completely
+        .with_min_samples_leaf(5); // No auto-stopping, train completely
 
     let univ_config = UniversalConfig::default()
         .with_mode(BoostingMode::LinearThenTree)
@@ -66,7 +70,11 @@ fn test_ltt_pure_linear_data() {
 
     // For pure linear data, LTT should fit well
     // With y ranging from 3 to 201, RMSE < 5 is good (< 2.5% error)
-    assert!(rmse < 5.0, "RMSE should be low for pure linear data, got {:.4}", rmse);
+    assert!(
+        rmse < 5.0,
+        "RMSE should be low for pure linear data, got {:.4}",
+        rmse
+    );
 }
 
 #[test]
@@ -82,17 +90,20 @@ fn test_ltt_linear_plus_residual() {
     .unwrap();
 
     println!("\n=== Test: Linear + Nonlinear (y = 2x + sin(x)) ===");
-    println!("Input DataFrame: {} rows × {} cols", df.height(), df.width());
+    println!(
+        "Input DataFrame: {} rows × {} cols",
+        df.height(),
+        df.width()
+    );
 
     // Configure with same good linear config as pure linear test
     // Linear should capture 2x just as well as test 1
     let linear_config = LinearConfig::ridge(0.01)
-        .with_learning_rate(1.0)
+        .with_shrinkage_factor(1.0)
         .with_max_iter(500);
 
     // Trees need to fit sin(x) residual - use appropriate depth
-    let tree_config = TreeConfig::default()
-        .with_max_depth(6);
+    let tree_config = TreeConfig::default().with_max_depth(6);
 
     let univ_config = UniversalConfig::default()
         .with_mode(BoostingMode::LinearThenTree)
@@ -159,7 +170,11 @@ fn test_ltt_with_categoricals() {
     .unwrap();
 
     println!("\n=== Test: LTT with Categoricals ===");
-    println!("Input DataFrame: {} rows × {} cols (1 numeric, 1 categorical)", df.height(), df.width());
+    println!(
+        "Input DataFrame: {} rows × {} cols (1 numeric, 1 categorical)",
+        df.height(),
+        df.width()
+    );
 
     let config = AutoConfig::new()
         .with_mode(BoostingMode::LinearThenTree)
@@ -218,7 +233,7 @@ fn test_ltt_with_id_like_columns() {
 
     // Use same good config as first test
     let linear_config = LinearConfig::ridge(0.01)
-        .with_learning_rate(1.0)
+        .with_shrinkage_factor(1.0)
         .with_max_iter(500);
 
     let tree_config = TreeConfig::default().with_max_depth(3);
@@ -389,7 +404,11 @@ fn test_ltt_with_pipeline_encoded_categoricals() {
     .unwrap();
 
     println!("\n=== Testing LTT with Pipeline-Encoded Categoricals ===");
-    println!("Original DataFrame: {} rows × {} cols", df.height(), df.width());
+    println!(
+        "Original DataFrame: {} rows × {} cols",
+        df.height(),
+        df.width()
+    );
     println!("Original dtypes:");
     for col in df.get_columns() {
         println!("  {} : {:?}", col.name(), col.dtype());
@@ -398,11 +417,10 @@ fn test_ltt_with_pipeline_encoded_categoricals() {
     // Use AutoBuilder which internally uses DataPipeline
     // CRITICAL: No auto-tuning to ensure complete training
     let linear_config = LinearConfig::ridge(0.01)
-        .with_learning_rate(1.0)
+        .with_shrinkage_factor(1.0)
         .with_max_iter(100);
 
-    let tree_config = TreeConfig::default()
-        .with_max_depth(6);
+    let tree_config = TreeConfig::default().with_max_depth(6);
 
     let univ_config = UniversalConfig::default()
         .with_mode(BoostingMode::LinearThenTree)

@@ -49,7 +49,21 @@ pub struct TreeConfig {
     /// Minimum gain to make a split
     pub min_gain: f32,
 
-    /// Learning rate (shrinkage applied to leaf weights)
+    /// Learning rate for gradient descent optimization
+    ///
+    /// Controls the step size for tree weight updates in Newton-step gradient descent.
+    /// Also acts as ensemble shrinkage because trees are trained iteratively.
+    ///
+    /// **Range**: (0.0, 1.0] - typically 0.1 for stable convergence
+    /// **Default**: 0.1 (conservative to prevent overfitting)
+    ///
+    /// **Note**: This is distinct from `LinearConfig::shrinkage_factor` which controls
+    /// ensemble weighting (not optimization step size). See `LinearConfig` module docs
+    /// for detailed explanation of the naming distinction.
+    ///
+    /// In LinearThenTree mode:
+    /// - `TreeConfig::learning_rate` = optimization step size (this field)
+    /// - `LinearConfig::shrinkage_factor` = ensemble weighting (different concept)
     pub learning_rate: f32,
 
     /// Column subsampling ratio (0.0-1.0)
@@ -176,6 +190,10 @@ impl TreeConfig {
             .with_min_hessian_leaf(self.min_hessian_leaf)
             .with_entropy_weight(self.entropy_weight)
             .with_min_gain(self.min_gain)
+            // IMPORTANT: TreeConfig.learning_rate controls optimization step size.
+            // TreeGrower calls it learning_rate (it's the same thing - gradient descent step size).
+            // This is distinct from LinearConfig.shrinkage_factor which controls ensemble weighting.
+            // See LinearConfig module docs for architectural details on this naming distinction.
             .with_learning_rate(self.learning_rate)
             .with_colsample(self.colsample)
             .with_monotonic_constraints(self.monotonic_constraints.clone())

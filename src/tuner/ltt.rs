@@ -46,9 +46,9 @@ pub struct LinearHyperparams {
     /// Range: [0.0, 1.0]
     pub l1_ratio: f32,
 
-    /// Prediction shrinkage for ensemble (how much to trust linear predictions)
+    /// Extrapolation damping toward target mean for OOD safety
     /// Range: [0.0, 0.5]
-    pub prediction_shrinkage: f32,
+    pub extrapolation_damping: f32,
 }
 
 impl Default for LinearHyperparams {
@@ -56,7 +56,7 @@ impl Default for LinearHyperparams {
         Self {
             lambda: 1.0,
             l1_ratio: 0.0, // Ridge by default
-            prediction_shrinkage: 0.0,
+            extrapolation_damping: 0.0,
         }
     }
 }
@@ -67,7 +67,7 @@ impl LinearHyperparams {
         Self {
             lambda: 1.0,
             l1_ratio: 0.0,
-            prediction_shrinkage: 0.0,
+            extrapolation_damping: 0.0,
         }
     }
 
@@ -76,7 +76,7 @@ impl LinearHyperparams {
         Self {
             lambda: 1.0,
             l1_ratio: 1.0,
-            prediction_shrinkage: 0.0,
+            extrapolation_damping: 0.0,
         }
     }
 
@@ -85,7 +85,7 @@ impl LinearHyperparams {
         Self {
             lambda: 1.0,
             l1_ratio: 0.5,
-            prediction_shrinkage: 0.0,
+            extrapolation_damping: 0.0,
         }
     }
 
@@ -94,7 +94,7 @@ impl LinearHyperparams {
         LinearConfig::default()
             .with_lambda(self.lambda)
             .with_l1_ratio(self.l1_ratio)
-            .with_prediction_shrinkage(self.prediction_shrinkage)
+            .with_extrapolation_damping(self.extrapolation_damping)
     }
 }
 
@@ -237,7 +237,7 @@ pub struct TreeTrial {
 /// Single joint refinement trial
 #[derive(Debug, Clone)]
 pub struct JointTrial {
-    pub prediction_shrinkage: f32,
+    pub extrapolation_damping: f32,
     pub combined_rmse: f32,
 }
 
@@ -511,7 +511,7 @@ impl LttTuner {
                     best_params = LinearHyperparams {
                         lambda,
                         l1_ratio,
-                        prediction_shrinkage: 0.0,
+                        extrapolation_damping: 0.0,
                     };
                     best_train_preds = train_preds;
                 }
@@ -603,7 +603,7 @@ impl LttTuner {
             let config = LinearConfig::default()
                 .with_lambda(linear_params.lambda)
                 .with_l1_ratio(linear_params.l1_ratio)
-                .with_prediction_shrinkage(shrinkage);
+                .with_extrapolation_damping(shrinkage);
 
             let mut booster = LinearBooster::new(num_features, config);
             booster.fit_direct(train_features, num_features, train_targets)?;
@@ -612,13 +612,13 @@ impl LttTuner {
             let (_, rmse) = Self::compute_regression_metrics(&val_preds, val_targets);
 
             history.joint_trials.push(JointTrial {
-                prediction_shrinkage: shrinkage,
+                extrapolation_damping: shrinkage,
                 combined_rmse: rmse,
             });
 
             if rmse < best_rmse {
                 best_rmse = rmse;
-                best_params.prediction_shrinkage = shrinkage;
+                best_params.extrapolation_damping = shrinkage;
             }
         }
 
@@ -690,7 +690,7 @@ mod tests {
         let params = LinearHyperparams::default();
         assert_eq!(params.lambda, 1.0);
         assert_eq!(params.l1_ratio, 0.0); // Ridge
-        assert_eq!(params.prediction_shrinkage, 0.0);
+        assert_eq!(params.extrapolation_damping, 0.0);
     }
 
     #[test]
@@ -783,13 +783,13 @@ mod tests {
         let params = LinearHyperparams {
             lambda: 0.5,
             l1_ratio: 0.3,
-            prediction_shrinkage: 0.1,
+            extrapolation_damping: 0.1,
         };
 
         let config = params.to_config();
 
         assert!((config.lambda - 0.5).abs() < 1e-6);
         assert!((config.l1_ratio - 0.3).abs() < 1e-6);
-        assert!((config.prediction_shrinkage - 0.1).abs() < 1e-6);
+        assert!((config.extrapolation_damping - 0.1).abs() < 1e-6);
     }
 }

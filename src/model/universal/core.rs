@@ -107,6 +107,45 @@ impl UniversalModel {
         self.feature_extractor.as_ref()
     }
 
+    /// Apply linear model shrinkage factor to predictions (batch)
+    ///
+    /// In LinearThenTree mode, the linear model's contribution to the ensemble
+    /// is weighted by `shrinkage_factor`:
+    ///
+    /// ```text
+    /// ensemble_pred = base + shrinkage_factor * linear_pred + tree_pred
+    /// ```
+    ///
+    /// This shrinkage factor controls ensemble weighting (not optimization step size).
+    /// See `LinearConfig::shrinkage_factor` for details.
+    ///
+    /// # Arguments
+    /// * `predictions` - Mutable slice of predictions to update
+    /// * `linear_preds` - Linear model predictions to add (with shrinkage applied)
+    #[inline]
+    fn apply_linear_shrinkage(&self, predictions: &mut [f32], linear_preds: &[f32]) {
+        let shrinkage = self.config.linear_config.shrinkage_factor;
+        let len = predictions.len().min(linear_preds.len());
+        for i in 0..len {
+            predictions[i] += shrinkage * linear_preds[i];
+        }
+    }
+
+    /// Apply linear model shrinkage factor to a single prediction
+    ///
+    /// Applies the same ensemble weighting logic as `apply_linear_shrinkage`
+    /// but for a single scalar value.
+    ///
+    /// # Arguments
+    /// * `linear_pred` - Raw linear prediction
+    ///
+    /// # Returns
+    /// Linear prediction scaled by shrinkage factor
+    #[inline]
+    fn apply_linear_shrinkage_scalar(&self, linear_pred: f32) -> f32 {
+        self.config.linear_config.shrinkage_factor * linear_pred
+    }
+
     /// Train a UniversalModel on binned data
     pub fn train(
         dataset: &BinnedDataset,
@@ -548,12 +587,12 @@ impl UniversalModel {
                 &hessians,
             )?;
 
-            // Update predictions with learning rate
-            let lr = config.linear_config.learning_rate;
+            // Update predictions with shrinkage factor (ensemble weighting)
+            let shrinkage = config.linear_config.shrinkage_factor;
             for (i, pred) in predictions.iter_mut().enumerate().take(num_rows) {
                 let linear_pred =
                     linear_booster.predict_row(&linear_features, num_linear_features, i);
-                *pred += lr * linear_pred;
+                *pred += shrinkage * linear_pred;
             }
         }
 
@@ -773,13 +812,11 @@ impl UniversalModel {
                 let num_rows = dataset.num_rows();
                 let mut predictions = vec![self.base_prediction; num_rows];
 
-                // Add linear contribution
+                // Add linear contribution with shrinkage
                 if let Some(ref linear) = self.linear_booster {
                     let raw_features = Self::extract_raw_features(dataset);
                     let linear_preds = linear.predict_batch(&raw_features, self.num_features);
-                    for i in 0..num_rows {
-                        predictions[i] += linear_preds[i];
-                    }
+                    self.apply_linear_shrinkage(&mut predictions, &linear_preds);
                 }
 
                 // Add tree contribution (GBDTModel was trained on residuals)
@@ -867,11 +904,8 @@ impl UniversalModel {
 
                     let linear_preds = linear.predict_batch(&linear_features, num_lin_feats);
 
-                    // Apply same learning rate as during training
-                    let lr = self.config.linear_config.learning_rate;
-                    for i in 0..num_rows.min(linear_preds.len()) {
-                        predictions[i] += lr * linear_preds[i];
-                    }
+                    // Apply shrinkage factor (ensemble weighting)
+                    self.apply_linear_shrinkage(&mut predictions, &linear_preds);
                 }
 
                 // Add tree contribution (trees use binned data)
@@ -932,7 +966,7 @@ impl UniversalModel {
             let linear_preds = linear.predict_batch(&linear_features, num_lin_feats);
 
             // NOTE: For linear-only, we return the full linear model prediction
-            // WITHOUT the boosting shrinkage (learning_rate). This shows the
+            // WITHOUT the boosting shrinkage (shrinkage_factor). This shows the
             // standalone linear model's performance for fair comparison.
             for i in 0..num_rows.min(linear_preds.len()) {
                 predictions[i] += linear_preds[i];
@@ -955,10 +989,11 @@ impl UniversalModel {
             BoostingMode::LinearThenTree => {
                 let mut pred = self.base_prediction;
 
-                // Add linear contribution
+                // Add linear contribution with shrinkage
                 if let Some(ref linear) = self.linear_booster {
                     let raw_features = Self::extract_raw_features_row(dataset, row_idx);
-                    pred += linear.predict_row(&raw_features, self.num_features, 0);
+                    let linear_pred = linear.predict_row(&raw_features, self.num_features, 0);
+                    pred += self.apply_linear_shrinkage_scalar(linear_pred);
                 }
 
                 // Add tree contribution from GBDTModel
