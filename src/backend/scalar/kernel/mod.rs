@@ -27,7 +27,9 @@ pub use x86::{unpack_4bit, unpack_4bit_scalar};
 
 // aarch64 exports
 #[cfg(target_arch = "aarch64")]
-pub use arm::{find_best_split_scalar, find_best_split_simd, SplitCandidate};
+pub use arm::{find_best_split_scalar, find_best_split_simd};
+#[cfg(target_arch = "aarch64")]
+pub use fallback::SplitCandidate;
 #[cfg(target_arch = "aarch64")]
 pub use fallback::{unpack_4bit, unpack_4bit_scalar};
 
