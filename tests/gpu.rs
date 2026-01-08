@@ -2,6 +2,7 @@
 //!
 //! These tests are conditional on the `gpu` feature flag
 
+#[cfg(feature = "gpu")]
 mod common;
 
 #[cfg(feature = "gpu")]

@@ -22,7 +22,8 @@ use std::time::Instant;
 use treeboost::booster::{GBDTConfig, GBDTModel};
 use treeboost::dataset::BinnedDataset;
 use treeboost::tuner::{
-    AutoTuner, EvalStrategy, GridStrategy, ModelFormat, ParamBounds, ParameterSpace, TunerConfig,
+    AutoTuner, EvalStrategy, GridStrategy, ModelFormat, ParamBounds, ParameterSpace, SpacePreset,
+    TunerConfig,
 };
 
 /// Generate a synthetic regression dataset for demonstration
@@ -88,7 +89,7 @@ fn main() {
 
     let mut tuner = AutoTuner::<GBDTModel>::new(base_config.clone())
         .with_config(tuner_config)
-        .with_space(ParameterSpace::default_regression())
+        .with_space(ParameterSpace::with_preset(SpacePreset::Regression))
         .with_seed(42);
 
     let start = Instant::now();
@@ -190,7 +191,7 @@ fn main() {
 
     let mut tuner = AutoTuner::<GBDTModel>::new(base_config.clone())
         .with_config(tuner_config)
-        .with_space(ParameterSpace::default_regression())
+        .with_space(ParameterSpace::with_preset(SpacePreset::Regression))
         .with_seed(777)
         .with_callback(move |trial, current, total| {
             let current_best = f32::from_bits(best_seen_clone.load(Ordering::SeqCst));
@@ -247,7 +248,7 @@ fn main() {
 
     let mut tuner = AutoTuner::<GBDTModel>::new(base_config_es)
         .with_config(tuner_config)
-        .with_space(ParameterSpace::default_regression())
+        .with_space(ParameterSpace::with_preset(SpacePreset::Regression))
         .with_seed(555);
 
     let start = Instant::now();
@@ -292,7 +293,7 @@ fn main() {
 
     let mut tuner = AutoTuner::<GBDTModel>::new(base_config.clone())
         .with_config(tuner_config)
-        .with_space(ParameterSpace::minimal()) // Just max_depth and learning_rate
+        .with_space(ParameterSpace::with_preset(SpacePreset::Minimal)) // Just max_depth and learning_rate
         .with_seed(12345);
 
     println!("Tuning with model saving enabled...");

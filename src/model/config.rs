@@ -346,33 +346,6 @@ impl TreeTunerConfig {
         }
     }
 
-    /// Quick tuning preset (minimal search, fast)
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use TreeTunerConfig::with_preset(TreeTunerPreset::Quick)"
-    )]
-    pub fn quick() -> Self {
-        Self::preset_quick()
-    }
-
-    /// Standard tuning preset (balanced search, moderate time)
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use TreeTunerConfig::with_preset(TreeTunerPreset::Standard)"
-    )]
-    pub fn standard() -> Self {
-        Self::preset_standard()
-    }
-
-    /// Thorough tuning preset (extensive search, production quality)
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use TreeTunerConfig::with_preset(TreeTunerPreset::Thorough)"
-    )]
-    pub fn thorough() -> Self {
-        Self::preset_thorough()
-    }
-
     /// Apply a preset configuration.
     pub fn with_preset(preset: TreeTunerPreset) -> Self {
         match preset {

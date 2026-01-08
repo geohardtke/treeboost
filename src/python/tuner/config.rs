@@ -199,7 +199,7 @@ impl PyParameterSpace {
     #[staticmethod]
     fn default_regression() -> Self {
         Self {
-            inner: ParameterSpace::default_regression(),
+            inner: ParameterSpace::with_preset(SpacePreset::Regression),
         }
     }
 
@@ -211,7 +211,7 @@ impl PyParameterSpace {
     #[staticmethod]
     fn default_classification() -> Self {
         Self {
-            inner: ParameterSpace::default_classification(),
+            inner: ParameterSpace::with_preset(SpacePreset::Classification),
         }
     }
 
@@ -221,7 +221,7 @@ impl PyParameterSpace {
     #[staticmethod]
     fn minimal() -> Self {
         Self {
-            inner: ParameterSpace::minimal(),
+            inner: ParameterSpace::with_preset(SpacePreset::Minimal),
         }
     }
 
@@ -463,7 +463,7 @@ impl PyTunerConfig {
     #[staticmethod]
     fn quick() -> Self {
         Self {
-            inner: TunerConfig::quick(),
+            inner: TunerConfig::default().with_preset(TunerPreset::Quick),
         }
     }
 
@@ -473,7 +473,7 @@ impl PyTunerConfig {
     #[staticmethod]
     fn thorough() -> Self {
         Self {
-            inner: TunerConfig::thorough(),
+            inner: TunerConfig::default().with_preset(TunerPreset::Thorough),
         }
     }
 

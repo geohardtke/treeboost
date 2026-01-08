@@ -65,8 +65,7 @@ pub struct UniversalConfig {
     /// Feature extractor for LinearThenTree mode
     ///
     /// Used to extract raw numeric features from DataFrame for the linear component.
-    /// If None, LinearThenTree will use the deprecated `train_with_linear_feature_selection()`
-    /// method that requires manual feature extraction.
+    /// If None, LinearThenTree expects pre-extracted raw features.
     #[rkyv(with = rkyv::with::Skip)]
     #[serde(skip)]
     pub feature_extractor: Option<FeatureExtractor>,

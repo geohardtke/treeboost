@@ -315,16 +315,23 @@ Low-level weak learners. Use these directly when building custom boosting loops.
 Ridge, LASSO, or Elastic Net via Coordinate Descent. Used internally by `LinearThenTree` mode.
 
 ```rust
-use treeboost::learner::{LinearBooster, LinearConfig, WeakLearner};
+use treeboost::learner::{LinearBooster, LinearConfig, LinearPreset, WeakLearner};
 
 // Ridge (L2) - default, most stable
-let config = LinearConfig::ridge(1.0);
+let config = LinearConfig::default()
+    .with_preset(LinearPreset::Ridge)
+    .with_lambda(1.0);
 
 // LASSO (L1) - sparse solutions, feature selection
-let config = LinearConfig::lasso(1.0);
+let config = LinearConfig::default()
+    .with_preset(LinearPreset::Lasso)
+    .with_lambda(1.0);
 
 // Elastic Net - mix of L1 + L2
-let config = LinearConfig::elastic_net(1.0, 0.5);  // 50% L1, 50% L2
+let config = LinearConfig::default()
+    .with_preset(LinearPreset::ElasticNet)
+    .with_lambda(1.0)
+    .with_l1_ratio(0.5);  // 50% L1, 50% L2
 
 let mut booster = LinearBooster::new(num_features, config);
 
@@ -348,7 +355,7 @@ booster.selected_features()    // Which feature indices
 Decision trees with Ridge regression in each leaf. Perfect for piecewise linear data.
 
 ```rust
-use treeboost::learner::{LinearTreeBooster, LinearTreeConfig, TreeConfig, LinearConfig};
+use treeboost::learner::{LinearTreeBooster, LinearTreeConfig, TreeConfig, LinearConfig, LinearPreset};
 
 let config = LinearTreeConfig::new()
     .with_tree_config(
@@ -357,7 +364,9 @@ let config = LinearTreeConfig::new()
             .with_min_samples_leaf(50)
     )
     .with_linear_config(
-        LinearConfig::ridge(0.1)
+        LinearConfig::default()
+            .with_preset(LinearPreset::Ridge)
+            .with_lambda(0.1)
     )
     .with_min_samples_for_linear(20);    // Below this, use constant leaf
 
@@ -888,7 +897,7 @@ Defines the hyperparameter search space.
 **Rust:**
 
 ```rust
-use treeboost::tuner::{ParameterSpace, ParamBounds};
+use treeboost::tuner::{ParameterSpace, ParamBounds, SpacePreset};
 
 let space = ParameterSpace::new()
     .with_param("max_depth", ParamBounds::discrete(3, 10), 6.0)
@@ -896,9 +905,9 @@ let space = ParameterSpace::new()
     .with_param("lambda", ParamBounds::continuous(0.0, 5.0), 1.0);
 
 // Or use presets
-let space = ParameterSpace::default_regression();    // Best for regression
-let space = ParameterSpace::default_classification(); // Best for classification
-let space = ParameterSpace::minimal();               // Quick tuning: depth + LR only
+let space = ParameterSpace::with_preset(SpacePreset::Regression);     // Best for regression
+let space = ParameterSpace::with_preset(SpacePreset::Classification); // Best for classification
+let space = ParameterSpace::with_preset(SpacePreset::Minimal);        // Quick tuning: depth + LR only
 ```
 
 **Python:**
@@ -912,8 +921,8 @@ space.add_continuous("learning_rate", 0.005, 0.5, scale="log")
 space.add_continuous("lambda", 0.0, 5.0)
 
 # Or presets
-space = ParameterSpace.default_regression()
-space = ParameterSpace.default_classification()
+space = ParameterSpace.preset("regression")
+space = ParameterSpace.preset("classification")
 ```
 
 ### AutoTuner Usage
@@ -1295,7 +1304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut tuner = AutoTuner::new(base_config)
         .with_config(tuner_config)
-        .with_space(ParameterSpace::default_regression())
+        .with_space(ParameterSpace::with_preset(SpacePreset::Regression))
         .with_seed(42);
 
     let (best_config, history) = tuner.tune(&dataset)?;
@@ -1338,7 +1347,7 @@ tuner.config = (
     .with_grid_strategy(GridStrategy.lhs(50))
     .with_eval_strategy(EvalStrategy.holdout(0.2).with_folds(5))
 )
-tuner.space = ParameterSpace.default_regression()
+tuner.space = ParameterSpace.preset("regression")
 
 best_config, history = tuner.tune(X, y)
 

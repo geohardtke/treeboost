@@ -383,7 +383,7 @@ model = GBDTModel.train(X, y, config)
 **Rust:**
 
 ```rust
-use treeboost::{AutoTuner, TunerConfig, GridStrategy, EvalStrategy, ParameterSpace};
+use treeboost::{AutoTuner, TunerConfig, GridStrategy, EvalStrategy, ParameterSpace, SpacePreset};
 
 let tuner_config = TunerConfig::new()
     .with_iterations(3)
@@ -393,7 +393,7 @@ let tuner_config = TunerConfig::new()
 
 let mut tuner = AutoTuner::new(GBDTConfig::new())
     .with_config(tuner_config)
-    .with_space(ParameterSpace::default_regression())
+    .with_space(ParameterSpace::with_preset(SpacePreset::Regression))
     .with_callback(|trial, current, total| {
         println!("Trial {}/{}: val_loss={:.4}", current, total, trial.val_metric);
     });
@@ -412,13 +412,13 @@ from treeboost import AutoTuner, TunerConfig, GridStrategy, EvalStrategy, Parame
 
 tuner = AutoTuner(GBDTConfig())
 tuner_config = (
-    TunerConfig.thorough()
+    TunerConfig.preset("thorough")
     .with_grid_strategy(GridStrategy.lhs(50))
     .with_eval_strategy(EvalStrategy.holdout(0.2).with_folds(5))
     .with_verbose(True)
 )
 tuner.config = tuner_config
-tuner.space = ParameterSpace.default_regression()
+tuner.space = ParameterSpace.preset("regression")
 
 best_config, history = tuner.tune(X, y)
 print(f"Best validation loss: {history.best().val_metric:.6f}")

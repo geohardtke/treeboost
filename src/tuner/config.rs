@@ -283,27 +283,6 @@ impl ParameterSpace {
         }
     }
 
-    /// Create default search space for regression
-    ///
-    /// Includes: max_depth, learning_rate, subsample, lambda, entropy_weight
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use ParameterSpace::with_preset(SpacePreset::Regression)"
-    )]
-    pub fn default_regression() -> Self {
-        Self::regression_space()
-    }
-
-    /// Create default search space for classification
-    ///
-    /// Same as regression but with different default centers optimized for classification
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use ParameterSpace::with_preset(SpacePreset::Classification)"
-    )]
-    pub fn default_classification() -> Self {
-        Self::classification_space()
-    }
 
     /// Create an exhaustive search space (adds GOSS and colsample).
     pub fn exhaustive() -> Self {
@@ -321,26 +300,6 @@ impl ParameterSpace {
         }
     }
 
-    /// Create a minimal search space (only learning_rate and max_depth)
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use ParameterSpace::with_preset(SpacePreset::Minimal)"
-    )]
-    pub fn minimal() -> Self {
-        Self::minimal_space()
-    }
-
-    /// Create search space for UniversalModel with mode selection
-    ///
-    /// Includes boosting mode (PureTree, LinearThenTree, RandomForest) and
-    /// parameters relevant to all modes.
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use ParameterSpace::with_preset(SpacePreset::Universal)"
-    )]
-    pub fn universal_model() -> Self {
-        Self::universal_space()
-    }
 
     /// Create search space for UniversalModel focusing on mode selection only
     ///
@@ -546,7 +505,7 @@ impl ParameterSpace {
     ///
     /// # Example
     /// ```ignore
-    /// let space = ParameterSpace::default_classification()
+    /// let space = ParameterSpace::with_preset(SpacePreset::Classification)
     ///     .constrain_from_history(
     ///         "results/run_20251228_143022",
     ///         0.2,  // Top 20%
@@ -1285,36 +1244,6 @@ impl TunerConfig {
         self
     }
 
-    /// Create a quick tuning config (2 iterations, fewer rounds)
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use TunerConfig::default().with_preset(TunerPreset::Quick)"
-    )]
-    pub fn quick() -> Self {
-        Self {
-            n_iterations: tuner_defaults::QUICK_N_ITERATIONS,
-            num_rounds: tuner_defaults::QUICK_TUNER_ROUNDS,
-            early_stopping_rounds: tuner_defaults::QUICK_TUNER_EARLY_STOP, // Faster inner stopping
-            improvement_threshold: tuner_defaults::QUICK_IMPROVEMENT_THRESHOLD, // More lenient outer stopping
-            ..Default::default()
-        }
-    }
-
-    /// Create a thorough tuning config (more iterations, stricter thresholds)
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use TunerConfig::default().with_preset(TunerPreset::Thorough)"
-    )]
-    pub fn thorough() -> Self {
-        Self {
-            n_iterations: tuner_defaults::THOROUGH_N_ITERATIONS,
-            num_rounds: tuner_defaults::THOROUGH_TUNER_ROUNDS,
-            early_stopping_rounds: tuner_defaults::THOROUGH_TUNER_EARLY_STOP, // More patience per model
-            improvement_threshold: tuner_defaults::THOROUGH_IMPROVEMENT_THRESHOLD, // Stricter outer threshold
-            ..Default::default()
-        }
-    }
-
     // Builder methods
 
     /// Set the parameter space
@@ -1612,7 +1541,7 @@ mod tests {
 
     #[test]
     fn test_parameter_space_default() {
-        let space = ParameterSpace::default_regression();
+        let space = ParameterSpace::with_preset(SpacePreset::Regression);
         assert_eq!(space.len(), 5);
         assert!(space.get("max_depth").is_some());
         assert!(space.get("learning_rate").is_some());
@@ -1623,7 +1552,7 @@ mod tests {
 
     #[test]
     fn test_parameter_space_with_param() {
-        let space = ParameterSpace::minimal().with_param(
+        let space = ParameterSpace::with_preset(SpacePreset::Minimal).with_param(
             "colsample",
             ParamBounds::continuous(0.5, 1.0),
             0.8,
@@ -1635,7 +1564,8 @@ mod tests {
 
     #[test]
     fn test_parameter_space_without_param() {
-        let space = ParameterSpace::default_regression().without_param("entropy_weight");
+        let space = ParameterSpace::with_preset(SpacePreset::Regression)
+            .without_param("entropy_weight");
 
         assert_eq!(space.len(), 4);
         assert!(space.get("entropy_weight").is_none());
@@ -1643,7 +1573,7 @@ mod tests {
 
     #[test]
     fn test_parameter_space_centers() {
-        let mut space = ParameterSpace::minimal();
+        let mut space = ParameterSpace::with_preset(SpacePreset::Minimal);
         let centers = space.centers();
         assert_eq!(centers.get("max_depth"), Some(&6.0));
         assert_eq!(centers.get("learning_rate"), Some(&0.1));
@@ -1656,7 +1586,7 @@ mod tests {
 
     #[test]
     fn test_parameter_space_validate() {
-        let valid = ParameterSpace::default_regression();
+        let valid = ParameterSpace::with_preset(SpacePreset::Regression);
         assert!(valid.validate().is_ok());
 
         let invalid = ParameterSpace::new().with_param(
@@ -1737,7 +1667,7 @@ mod tests {
 
     #[test]
     fn test_tuner_config_quick() {
-        let config = TunerConfig::quick();
+        let config = TunerConfig::default().with_preset(TunerPreset::Quick);
         assert_eq!(config.n_iterations, 2);
         assert_eq!(config.num_rounds, 50);
         assert_eq!(config.early_stopping_rounds, 5);
@@ -1746,7 +1676,7 @@ mod tests {
 
     #[test]
     fn test_tuner_config_thorough() {
-        let config = TunerConfig::thorough();
+        let config = TunerConfig::default().with_preset(TunerPreset::Thorough);
         assert_eq!(config.n_iterations, 7);
         assert_eq!(config.num_rounds, 200);
         assert_eq!(config.early_stopping_rounds, 20);

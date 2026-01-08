@@ -85,48 +85,6 @@ impl Default for LinearHyperparams {
 }
 
 impl LinearHyperparams {
-    /// Create default Ridge regression params
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use LinearHyperparams::default().with_preset(LinearHyperparamsPreset::Ridge)"
-    )]
-    pub fn ridge() -> Self {
-        Self {
-            lambda: linear_defaults::DEFAULT_LAMBDA,
-            l1_ratio: linear_defaults::DEFAULT_L1_RATIO,
-            shrinkage_factor: ltt_defaults::DEFAULT_LTT_SHRINKAGE,
-            extrapolation_damping: linear_defaults::DEFAULT_EXTRAPOLATION_DAMPING,
-        }
-    }
-
-    /// Create LASSO params
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use LinearHyperparams::default().with_preset(LinearHyperparamsPreset::Lasso)"
-    )]
-    pub fn lasso() -> Self {
-        Self {
-            lambda: linear_defaults::DEFAULT_LAMBDA,
-            l1_ratio: linear_defaults::LASSO_L1_RATIO,
-            shrinkage_factor: ltt_defaults::DEFAULT_LTT_SHRINKAGE,
-            extrapolation_damping: linear_defaults::DEFAULT_EXTRAPOLATION_DAMPING,
-        }
-    }
-
-    /// Create ElasticNet params
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use LinearHyperparams::default().with_preset(LinearHyperparamsPreset::ElasticNet)"
-    )]
-    pub fn elastic_net() -> Self {
-        Self {
-            lambda: linear_defaults::DEFAULT_LAMBDA,
-            l1_ratio: linear_defaults::ELASTIC_NET_L1_RATIO,
-            shrinkage_factor: ltt_defaults::DEFAULT_LTT_SHRINKAGE,
-            extrapolation_damping: linear_defaults::DEFAULT_EXTRAPOLATION_DAMPING,
-        }
-    }
-
     /// Convert to LinearConfig
     pub fn to_config(&self) -> LinearConfig {
         LinearConfig::default()
@@ -204,38 +162,6 @@ impl Default for TreeHyperparams {
 }
 
 impl TreeHyperparams {
-    /// Conservative params (less overfitting)
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use TreeHyperparams::default().with_preset(TreeHyperparamsPreset::Conservative)"
-    )]
-    pub fn conservative() -> Self {
-        Self {
-            max_depth: 4,
-            learning_rate: 0.05,
-            num_rounds: 1000,
-            min_child_weight: 3.0,
-            subsample: 0.8,
-            colsample_bytree: 0.8,
-        }
-    }
-
-    /// Aggressive params (more fitting power)
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use TreeHyperparams::default().with_preset(TreeHyperparamsPreset::Aggressive)"
-    )]
-    pub fn aggressive() -> Self {
-        Self {
-            max_depth: 8,
-            learning_rate: 0.15,
-            num_rounds: 500,
-            min_child_weight: 1.0,
-            subsample: 1.0,
-            colsample_bytree: 1.0,
-        }
-    }
-
     /// Apply a preset configuration.
     pub fn with_preset(mut self, preset: TreeHyperparamsPreset) -> Self {
         match preset {
@@ -452,24 +378,6 @@ impl Default for LttTunerConfig {
 }
 
 impl LttTunerConfig {
-    /// Create a quick tuning config (fewer trials)
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use LttTunerConfig::default().with_preset(LttTunerPreset::Quick)"
-    )]
-    pub fn quick() -> Self {
-        Self::default().with_preset(LttTunerPreset::Quick)
-    }
-
-    /// Create a thorough tuning config (more trials)
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use LttTunerConfig::default().with_preset(LttTunerPreset::Thorough)"
-    )]
-    pub fn thorough() -> Self {
-        Self::default().with_preset(LttTunerPreset::Thorough)
-    }
-
     /// Apply a preset configuration.
     pub fn with_preset(self, preset: LttTunerPreset) -> Self {
         match preset {
@@ -1154,8 +1062,8 @@ mod tests {
 
     #[test]
     fn test_ltt_tuner_config_presets() {
-        let quick = LttTunerConfig::quick();
-        let thorough = LttTunerConfig::thorough();
+        let quick = LttTunerConfig::default().with_preset(LttTunerPreset::Quick);
+        let thorough = LttTunerConfig::default().with_preset(LttTunerPreset::Thorough);
 
         assert!(quick.lambda_values.len() < thorough.lambda_values.len());
         assert!(quick.max_depth_values.len() < thorough.max_depth_values.len());
@@ -1246,7 +1154,7 @@ mod tests {
             targets.push(2.0 * x + 1.0 + (i as f32 % 3.0) * 0.1); // y = 2x + 1 + small noise
         }
 
-        let config = LttTunerConfig::quick();
+        let config = LttTunerConfig::default().with_preset(LttTunerPreset::Quick);
         let tuner = LttTuner::new(config);
 
         let result = tuner

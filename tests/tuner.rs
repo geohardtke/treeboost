@@ -1,14 +1,57 @@
 //! Integration tests for AutoTuner
 
-mod common;
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use treeboost::booster::{GBDTConfig, GBDTModel};
-use treeboost::tuner::{AutoTuner, EvalStrategy, GridStrategy, ParameterSpace, TunerConfig};
+mod common;
 
-use common::{create_binary_classification_dataset, create_synthetic_dataset};
+use treeboost::booster::{GBDTConfig, GBDTModel};
+use treeboost::dataset::{BinnedDataset, FeatureInfo, FeatureType};
+use treeboost::tuner::{
+    AutoTuner, EvalStrategy, GridStrategy, ParameterSpace, SpacePreset, TunerConfig,
+};
+
+use common::create_synthetic_dataset;
+
+fn create_binary_classification_dataset(n: usize, seed: u64) -> BinnedDataset {
+    let num_features = 5;
+
+    let mut state = seed;
+    let mut next_rand = || -> f32 {
+        state = state.wrapping_mul(1103515245).wrapping_add(12345);
+        ((state >> 16) & 0x7FFF) as f32 / 32767.0
+    };
+
+    let mut features = Vec::with_capacity(n * num_features);
+    for _f in 0..num_features {
+        for _r in 0..n {
+            features.push((next_rand() * 255.0) as u8);
+        }
+    }
+
+    let targets: Vec<f32> = (0..n)
+        .map(|i| {
+            let f0 = features[i] as f32 / 255.0;
+            let f1 = features[n + i] as f32 / 255.0;
+            if f0 + f1 > 1.0 {
+                1.0
+            } else {
+                0.0
+            }
+        })
+        .collect();
+
+    let feature_info: Vec<FeatureInfo> = (0..num_features)
+        .map(|i| FeatureInfo {
+            name: format!("feature_{}", i),
+            feature_type: FeatureType::Numeric,
+            num_bins: 255,
+            bin_boundaries: vec![],
+        })
+        .collect();
+
+    BinnedDataset::new(n, features, targets, feature_info)
+}
 
 /// Test full tuning loop on synthetic regression data
 #[test]
@@ -25,7 +68,7 @@ fn test_autotuner_regression() {
 
     let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
-        .with_space(ParameterSpace::default_regression())
+        .with_space(ParameterSpace::with_preset(SpacePreset::Regression))
         .with_seed(123);
 
     let (best_config, history) = tuner.tune(&dataset).expect("Tuning should succeed");
@@ -71,7 +114,7 @@ fn test_autotuner_binary_classification() {
 
     let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
-        .with_space(ParameterSpace::default_classification())
+        .with_space(ParameterSpace::with_preset(SpacePreset::Classification))
         .with_seed(789);
 
     let (best_config, history) = tuner.tune(&dataset).expect("Tuning should succeed");
@@ -106,7 +149,7 @@ fn test_autotuner_kfold() {
 
     let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
-        .with_space(ParameterSpace::default_regression())
+        .with_space(ParameterSpace::with_preset(SpacePreset::Regression))
         .with_seed(654);
 
     let (best_config, history) = tuner.tune(&dataset).expect("K-fold tuning should succeed");
@@ -137,7 +180,7 @@ fn test_autotuner_lhs() {
 
     let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
-        .with_space(ParameterSpace::default_regression())
+        .with_space(ParameterSpace::with_preset(SpacePreset::Regression))
         .with_seed(222);
 
     let (_, history) = tuner.tune(&dataset).expect("LHS tuning should succeed");
@@ -164,7 +207,7 @@ fn test_autotuner_random() {
 
     let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
-        .with_space(ParameterSpace::default_regression())
+        .with_space(ParameterSpace::with_preset(SpacePreset::Regression))
         .with_seed(444);
 
     let (_, history) = tuner.tune(&dataset).expect("Random tuning should succeed");
@@ -199,7 +242,7 @@ fn test_autotuner_reproducibility() {
     // Run 1
     let mut tuner1 = AutoTuner::<GBDTModel>::new(base_config.clone())
         .with_config(tuner_config.clone())
-        .with_space(ParameterSpace::default_regression())
+        .with_space(ParameterSpace::with_preset(SpacePreset::Regression))
         .with_seed(999);
 
     let (_, history1) = tuner1.tune(&dataset).expect("Run 1 should succeed");
@@ -207,7 +250,7 @@ fn test_autotuner_reproducibility() {
     // Run 2 with same seed
     let mut tuner2 = AutoTuner::<GBDTModel>::new(base_config.clone())
         .with_config(tuner_config.clone())
-        .with_space(ParameterSpace::default_regression())
+        .with_space(ParameterSpace::with_preset(SpacePreset::Regression))
         .with_seed(999);
 
     let (_, history2) = tuner2.tune(&dataset).expect("Run 2 should succeed");
@@ -263,7 +306,7 @@ fn test_autotuner_early_stopping() {
 
     let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
-        .with_space(ParameterSpace::default_regression())
+        .with_space(ParameterSpace::with_preset(SpacePreset::Regression))
         .with_seed(777);
 
     let (best_config, history) = tuner
@@ -302,7 +345,7 @@ fn test_autotuner_callback() {
 
     let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
-        .with_space(ParameterSpace::default_regression())
+        .with_space(ParameterSpace::with_preset(SpacePreset::Regression))
         .with_seed(999)
         .with_callback(move |_trial, _current, _total| {
             callback_count_clone.fetch_add(1, Ordering::SeqCst);
@@ -333,7 +376,7 @@ fn test_autotuner_history_json() {
 
     let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
-        .with_space(ParameterSpace::default_regression())
+        .with_space(ParameterSpace::with_preset(SpacePreset::Regression))
         .with_seed(202);
 
     let (_, history) = tuner.tune(&dataset).expect("Tuning should succeed");

@@ -264,46 +264,6 @@ impl LinearConfig {
         self
     }
 
-    /// Create a Ridge (L2) config
-    ///
-    /// Pure L2 regularization - smooth weights, handles correlated features well.
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use LinearConfig::default().with_preset(LinearPreset::Ridge).with_lambda(lambda)"
-    )]
-    pub fn ridge(lambda: f32) -> Self {
-        Self::default().with_lambda(lambda).with_l1_ratio(0.0)
-    }
-
-    /// Create a LASSO (L1) config
-    ///
-    /// Pure L1 regularization - encourages sparse solutions (zero weights).
-    /// Good for feature selection.
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use LinearConfig::default().with_preset(LinearPreset::Lasso).with_lambda(lambda)"
-    )]
-    pub fn lasso(lambda: f32) -> Self {
-        Self::default().with_lambda(lambda).with_l1_ratio(1.0)
-    }
-
-    /// Create an Elastic Net config
-    ///
-    /// Mix of L1 and L2 regularization.
-    /// - Sparse like LASSO (feature selection)
-    /// - Stable like Ridge (handles correlation)
-    ///
-    /// # Arguments
-    /// - `lambda`: Overall regularization strength
-    /// - `l1_ratio`: Balance between L1 and L2 (0.0 = Ridge, 1.0 = LASSO)
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use LinearConfig::default().with_preset(LinearPreset::ElasticNet).with_lambda(lambda)"
-    )]
-    pub fn elastic_net(lambda: f32, l1_ratio: f32) -> Self {
-        Self::default().with_lambda(lambda).with_l1_ratio(l1_ratio)
-    }
-
     /// Set overall regularization strength
     ///
     /// **CRITICAL**: Minimum value is 1e-6 to prevent numerical instability.
@@ -1161,7 +1121,9 @@ mod tests {
         let hessians = vec![1.0; n_samples];
 
         // Use LASSO with strong regularization
-        let config = LinearConfig::lasso(2.0)
+        let config = LinearConfig::default()
+            .with_preset(LinearPreset::Lasso)
+            .with_lambda(2.0)
             .with_shrinkage_factor(0.5)
             .with_max_iter(200);
 
@@ -1189,7 +1151,10 @@ mod tests {
 
     #[test]
     fn test_elastic_net_config() {
-        let config = LinearConfig::elastic_net(1.0, 0.5);
+        let config = LinearConfig::default()
+            .with_preset(LinearPreset::ElasticNet)
+            .with_lambda(1.0)
+            .with_l1_ratio(0.5);
         assert!((config.lambda - 1.0).abs() < 1e-6);
         assert!((config.l1_ratio - 0.5).abs() < 1e-6);
         assert!((config.l1_penalty() - 0.5).abs() < 1e-6);
@@ -1217,7 +1182,9 @@ mod tests {
         let hessians = vec![1.0; n_samples];
 
         // Ridge - should have all non-zero weights
-        let ridge_config = LinearConfig::ridge(0.1)
+        let ridge_config = LinearConfig::default()
+            .with_preset(LinearPreset::Ridge)
+            .with_lambda(0.1)
             .with_shrinkage_factor(0.5)
             .with_max_iter(100);
         let mut ridge_booster = LinearBooster::new(n_features, ridge_config);
@@ -1226,7 +1193,9 @@ mod tests {
             .unwrap();
 
         // LASSO - should have sparser weights
-        let lasso_config = LinearConfig::lasso(0.5)
+        let lasso_config = LinearConfig::default()
+            .with_preset(LinearPreset::Lasso)
+            .with_lambda(0.5)
             .with_shrinkage_factor(0.5)
             .with_max_iter(100);
         let mut lasso_booster = LinearBooster::new(n_features, lasso_config);
@@ -1258,7 +1227,10 @@ mod tests {
         let gradients = vec![-1.0, -2.0, -3.0, -4.0];
         let hessians = vec![1.0; 4];
 
-        let config = LinearConfig::elastic_net(0.5, 0.5) // 50% L1, 50% L2
+        let config = LinearConfig::default()
+            .with_preset(LinearPreset::ElasticNet)
+            .with_lambda(0.5)
+            .with_l1_ratio(0.5) // 50% L1, 50% L2
             .with_shrinkage_factor(0.5)
             .with_max_iter(100);
 

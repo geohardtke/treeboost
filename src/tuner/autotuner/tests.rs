@@ -4,7 +4,9 @@ use std::collections::HashMap;
 
 use crate::backend::BackendType;
 use crate::booster::{GBDTConfig, GBDTModel};
-use crate::tuner::config::{ParamBounds, ParamDef, ParameterSpace, TunerConfig, TuningMode};
+use crate::tuner::config::{
+    ParamBounds, ParamDef, ParameterSpace, SpacePreset, TunerConfig, TuningMode,
+};
 use crate::tuner::history::SearchHistory;
 use crate::tuner::trial::TrialResult;
 
@@ -121,7 +123,8 @@ fn test_autotuner_generate_param_values() {
 #[test]
 fn test_autotuner_generate_cartesian_grid() {
     let tuner =
-        AutoTuner::<GBDTModel>::new(GBDTConfig::default()).with_space(ParameterSpace::minimal());
+        AutoTuner::<GBDTModel>::new(GBDTConfig::default())
+            .with_space(ParameterSpace::with_preset(SpacePreset::Minimal));
 
     let grid = tuner.generate_cartesian_grid(0.5, 3);
     // 2 parameters, 3 points each = 9 candidates
@@ -335,7 +338,7 @@ fn test_random_determinism() {
 
 #[test]
 fn test_random_sample_count() {
-    let space = ParameterSpace::minimal();
+    let space = ParameterSpace::with_preset(SpacePreset::Minimal);
     let tuner = AutoTuner::<GBDTModel>::new(GBDTConfig::default())
         .with_space(space)
         .with_seed(777);
@@ -378,7 +381,7 @@ fn test_random_bounds_respected() {
 
 #[test]
 fn test_different_seeds_produce_different_results() {
-    let space = ParameterSpace::minimal();
+    let space = ParameterSpace::with_preset(SpacePreset::Minimal);
 
     let tuner1 = AutoTuner::<GBDTModel>::new(GBDTConfig::default())
         .with_space(space.clone())

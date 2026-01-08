@@ -20,7 +20,9 @@ fn test_shrinkage_factor_applied() {
 
     // Test different shrinkage values are stored and affect predictions
     for &shrinkage in &[0.1f32, 0.5, 1.0] {
-        let linear_config = LinearConfig::ridge(0.01)
+        let linear_config = LinearConfig::default()
+            .with_preset(treeboost::LinearPreset::Ridge)
+            .with_lambda(0.01)
             .with_shrinkage_factor(shrinkage)
             .with_max_iter(500);
 
@@ -76,7 +78,9 @@ fn test_ltt_pure_linear_data() {
     );
 
     // Configure with good hyperparameters for linear regression
-    let linear_config = LinearConfig::ridge(0.01) // Very light regularization for pure linear data
+    let linear_config = LinearConfig::default()
+        .with_preset(treeboost::LinearPreset::Ridge)
+        .with_lambda(0.01) // Very light regularization for pure linear data
         .with_shrinkage_factor(1.0) // Full step size
         .with_max_iter(500); // Many iterations for convergence
 
@@ -149,7 +153,9 @@ fn test_ltt_linear_plus_residual() {
 
     // Configure with same good linear config as pure linear test
     // Linear should capture 2x just as well as test 1
-    let linear_config = LinearConfig::ridge(0.01)
+    let linear_config = LinearConfig::default()
+        .with_preset(treeboost::LinearPreset::Ridge)
+        .with_lambda(0.01)
         .with_shrinkage_factor(1.0)
         .with_max_iter(500);
 
@@ -283,7 +289,9 @@ fn test_ltt_with_id_like_columns() {
     .unwrap();
 
     // Use same good config as first test
-    let linear_config = LinearConfig::ridge(0.01)
+    let linear_config = LinearConfig::default()
+        .with_preset(treeboost::LinearPreset::Ridge)
+        .with_lambda(0.01)
         .with_shrinkage_factor(1.0)
         .with_max_iter(500);
 
@@ -465,7 +473,9 @@ fn test_ltt_with_pipeline_encoded_categoricals() {
 
     // Use AutoBuilder which internally uses DataPipeline
     // CRITICAL: No auto-tuning to ensure complete training
-    let linear_config = LinearConfig::ridge(0.01)
+    let linear_config = LinearConfig::default()
+        .with_preset(treeboost::LinearPreset::Ridge)
+        .with_lambda(0.01)
         .with_shrinkage_factor(1.0)
         .with_max_iter(100);
 
