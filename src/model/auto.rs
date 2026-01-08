@@ -38,8 +38,8 @@ use crate::analysis::{Confidence, DataFrameProfile, DatasetAnalysis};
 use crate::dataset::{BinnedDataset, DataPipeline};
 use crate::features::FeaturePlan;
 use crate::model::{
-    AutoBuilder, AutoConfig, BoostingMode, BuildPhaseTimes, BuildResult, TreeTuningResult,
-    TuningLevel, UniversalModel,
+    AutoBuilder, AutoConfig, AutoTrainedModel, BoostingMode, BuildPhaseTimes, BuildResult,
+    TreeTuningResult, TuningLevel, UniversalModel,
 };
 use crate::preprocessing::PreprocessingPlan;
 use crate::tuner::ltt::LttTuningResult;
@@ -53,7 +53,7 @@ use std::time::Duration;
 /// `UniversalModel` along with all the metadata from the training process.
 pub struct AutoModel {
     /// The underlying trained model
-    model: UniversalModel,
+    model: AutoTrainedModel,
 
     /// Boosting mode that was used
     mode: BoostingMode,
@@ -164,21 +164,32 @@ impl AutoModel {
         // Also get preprocessed DataFrame with encoded categoricals
         let (preprocessed_df, dataset) = self.prepare_dataset_for_prediction(df)?;
 
-        // For LinearThenTree, use dual-representation inference if FeatureExtractor is stored
-        if matches!(self.mode, crate::model::BoostingMode::LinearThenTree) {
-            if let Some(ref extractor) = self.model.feature_extractor() {
-                // CRITICAL: Extract from preprocessed_df (with encoded categoricals),
-                // NOT from original df (with String categoricals)
-                let (raw_features, _num_features) =
-                    extractor.extract(&preprocessed_df, &self.target_column)?;
+        match &self.model {
+            AutoTrainedModel::Universal(model) => {
+                // For LinearThenTree, use dual-representation inference if FeatureExtractor is stored
+                if matches!(self.mode, crate::model::BoostingMode::LinearThenTree) {
+                    if let Some(ref extractor) = model.feature_extractor() {
+                        // CRITICAL: Extract from preprocessed_df (with encoded categoricals),
+                        // NOT from original df (with String categoricals)
+                        let (raw_features, _num_features) =
+                            extractor.extract(&preprocessed_df, &self.target_column)?;
 
-                return Ok(self
-                    .model
-                    .predict_with_raw_features(&dataset, &raw_features));
+                        return Ok(model.predict_with_raw_features(&dataset, &raw_features));
+                    }
+                }
+
+                Ok(model.predict(&dataset))
+            }
+            AutoTrainedModel::Ensemble(ensemble) => Ok(ensemble.predict(&dataset)),
+            AutoTrainedModel::LttEnsemble(ltt) => {
+                if let Some(ref extractor) = ltt.feature_extractor() {
+                    let (raw_features, _) = extractor.extract(&preprocessed_df, &self.target_column)?;
+                    Ok(ltt.predict_with_raw_features(&dataset, &raw_features))
+                } else {
+                    Ok(ltt.predict(&dataset))
+                }
             }
         }
-
-        Ok(self.model.predict(&dataset))
     }
 
     /// Predict using only the linear component (LinearThenTree mode only)
@@ -199,23 +210,50 @@ impl AutoModel {
         // Use same preprocessing as full prediction
         let (preprocessed_df, dataset) = self.prepare_dataset_for_prediction(df)?;
 
-        // Extract features using FeatureExtractor
-        if let Some(ref extractor) = self.model.feature_extractor() {
-            let (raw_features, _num_features) =
-                extractor.extract(&preprocessed_df, &self.target_column)?;
+        match &self.model {
+            AutoTrainedModel::Universal(model) => {
+                // Extract features using FeatureExtractor
+                if let Some(ref extractor) = model.feature_extractor() {
+                    let (raw_features, _num_features) =
+                        extractor.extract(&preprocessed_df, &self.target_column)?;
 
-            // Get linear-only predictions from the model
-            return Ok(self.model.predict_linear_only(&dataset, &raw_features)?);
+                    // Get linear-only predictions from the model
+                    return Ok(model.predict_linear_only(&dataset, &raw_features)?);
+                }
+
+                Err(TreeBoostError::Config(
+                    "LinearThenTree model missing FeatureExtractor - cannot predict".to_string(),
+                ))
+            }
+            AutoTrainedModel::Ensemble(_) => {
+                Err(TreeBoostError::Config(
+                    "predict_linear_only() not available for ensemble models".to_string(),
+                ))
+            }
+            AutoTrainedModel::LttEnsemble(ltt) => {
+                // For LTT Ensemble, compute base + shrinkage * linear predictions
+                if let Some(ref extractor) = ltt.feature_extractor() {
+                    let (raw_features, _num_features) =
+                        extractor.extract(&preprocessed_df, &self.target_column)?;
+
+                    // Use LTT's predict_linear_only (base + linear with shrinkage)
+                    return Ok(ltt.predict_linear_only(&dataset, &raw_features));
+                }
+
+                Err(TreeBoostError::Config(
+                    "LTT Ensemble model missing FeatureExtractor - cannot predict".to_string(),
+                ))
+            }
         }
-
-        Err(TreeBoostError::Config(
-            "LinearThenTree model missing FeatureExtractor - cannot predict".to_string(),
-        ))
     }
 
     /// Predict on a BinnedDataset (for advanced users)
     pub fn predict_binned(&self, dataset: &BinnedDataset) -> Vec<f32> {
-        self.model.predict(dataset)
+        match &self.model {
+            AutoTrainedModel::Universal(model) => model.predict(dataset),
+            AutoTrainedModel::Ensemble(ensemble) => ensemble.predict(dataset),
+            AutoTrainedModel::LttEnsemble(ltt) => ltt.predict(dataset),
+        }
     }
 
     /// Get the boosting mode that was used
@@ -268,9 +306,13 @@ impl AutoModel {
         self.tree_tuning.as_ref()
     }
 
-    /// Get the underlying UniversalModel
-    pub fn inner(&self) -> &UniversalModel {
-        &self.model
+    /// Get the underlying UniversalModel (if available)
+    pub fn inner(&self) -> Option<&UniversalModel> {
+        match &self.model {
+            AutoTrainedModel::Universal(model) => Some(model),
+            AutoTrainedModel::Ensemble(_) => None,
+            AutoTrainedModel::LttEnsemble(_) => None,
+        }
     }
 
     /// Get a comprehensive summary of the training process

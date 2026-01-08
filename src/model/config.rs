@@ -6,6 +6,7 @@
 use crate::analysis::{Confidence, DataFrameProfile, DatasetAnalysis};
 use crate::dataset::feature_extractor::LinearFeatureConfig;
 use crate::defaults::{auto as auto_defaults, seeds as seeds_defaults};
+use crate::ensemble::{MultiSeedConfig, SelectionConfig, StackingConfig, StackedEnsemble};
 use crate::features::FeaturePlan;
 use crate::model::progress::{ProgressCallback, QuietProgress};
 use crate::model::{BoostingMode, UniversalModel};
@@ -32,6 +33,61 @@ pub enum TuningLevel {
 
     /// No tuning - use provided hyperparameters
     None,
+}
+
+/// Ensemble strategy for AutoBuilder (PureTree only)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoEnsembleMethod {
+    /// Simple average of selected models
+    SimpleAverage,
+    /// Ridge stacking of selected models (default)
+    RidgeStacking,
+}
+
+/// Ensemble configuration for AutoBuilder
+#[derive(Debug, Clone)]
+pub struct AutoEnsembleConfig {
+    pub method: AutoEnsembleMethod,
+    pub multi_seed: MultiSeedConfig,
+    pub selection: SelectionConfig,
+    pub stacking: StackingConfig,
+}
+
+impl Default for AutoEnsembleConfig {
+    fn default() -> Self {
+        Self {
+            method: AutoEnsembleMethod::RidgeStacking,
+            multi_seed: MultiSeedConfig::default(),
+            selection: SelectionConfig::default(),
+            stacking: StackingConfig::default(),
+        }
+    }
+}
+
+impl AutoEnsembleConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_method(mut self, method: AutoEnsembleMethod) -> Self {
+        self.method = method;
+        self
+    }
+
+    pub fn with_multi_seed_config(mut self, config: MultiSeedConfig) -> Self {
+        self.multi_seed = config;
+        self
+    }
+
+    pub fn with_selection_config(mut self, config: SelectionConfig) -> Self {
+        self.selection = config;
+        self
+    }
+
+    pub fn with_stacking_config(mut self, config: StackingConfig) -> Self {
+        self.stacking = config;
+        self
+    }
 }
 
 /// AutoBuilder configuration
@@ -75,6 +131,9 @@ pub struct AutoConfig {
 
     /// Custom UniversalConfig to use (bypasses tuning if provided with TuningLevel::None)
     pub custom_config: Option<crate::model::UniversalConfig>,
+
+    /// Optional ensemble configuration (PureTree only)
+    pub ensemble: Option<AutoEnsembleConfig>,
 }
 
 impl Clone for AutoConfig {
@@ -93,6 +152,7 @@ impl Clone for AutoConfig {
             progress_callback: Arc::clone(&self.progress_callback),
             linear_feature_config: self.linear_feature_config.clone(),
             custom_config: self.custom_config.clone(),
+            ensemble: self.ensemble.clone(),
         }
     }
 }
@@ -112,6 +172,7 @@ impl std::fmt::Debug for AutoConfig {
             .field("time_budget", &self.time_budget)
             .field("progress_callback", &"<callback>")
             .field("linear_feature_config", &self.linear_feature_config)
+            .field("ensemble", &self.ensemble)
             .finish()
     }
 }
@@ -132,6 +193,7 @@ impl Default for AutoConfig {
             progress_callback: Arc::new(QuietProgress),
             linear_feature_config: LinearFeatureConfig::default(),
             custom_config: None,
+            ensemble: None,
         }
     }
 }
@@ -176,6 +238,24 @@ impl AutoConfig {
     pub fn with_mode(mut self, mode: BoostingMode) -> Self {
         self.force_mode = Some(mode);
         self.auto_mode = false;
+        self
+    }
+
+    /// Enable ensemble training with default settings (PureTree only)
+    pub fn with_ensemble(mut self) -> Self {
+        self.ensemble = Some(AutoEnsembleConfig::default());
+        self
+    }
+
+    /// Enable ensemble training with a specific method (PureTree only)
+    pub fn with_ensemble_method(mut self, method: AutoEnsembleMethod) -> Self {
+        self.ensemble = Some(AutoEnsembleConfig::default().with_method(method));
+        self
+    }
+
+    /// Set full ensemble configuration (PureTree only)
+    pub fn with_ensemble_config(mut self, config: AutoEnsembleConfig) -> Self {
+        self.ensemble = Some(config);
         self
     }
 
@@ -360,7 +440,7 @@ impl TreeTunerConfig {
 #[derive(Debug)]
 pub struct BuildResult {
     /// The trained model
-    pub model: UniversalModel,
+    pub model: AutoTrainedModel,
 
     /// The boosting mode used
     pub mode: BoostingMode,
@@ -397,6 +477,23 @@ pub struct BuildResult {
 
     /// Time breakdown by phase
     pub phase_times: BuildPhaseTimes,
+}
+
+/// Trained model produced by AutoBuilder
+pub enum AutoTrainedModel {
+    Universal(UniversalModel),
+    Ensemble(StackedEnsemble),
+    LttEnsemble(crate::ensemble::LttEnsemble),
+}
+
+impl std::fmt::Debug for AutoTrainedModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AutoTrainedModel::Universal(_) => f.debug_tuple("Universal").finish(),
+            AutoTrainedModel::Ensemble(_) => f.debug_tuple("Ensemble").finish(),
+            AutoTrainedModel::LttEnsemble(_) => f.debug_tuple("LttEnsemble").finish(),
+        }
+    }
 }
 
 /// Time breakdown for build phases
