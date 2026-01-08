@@ -63,6 +63,18 @@ println!("Confidence: {:?}", model.selection_confidence());
 
 This analysis uses fast linear/tree probes and produces a full report you can log or inspect.
 
+**Optional: Ensembling for PureTree**
+
+```rust
+use treeboost::{AutoConfig, AutoModel, AutoEnsembleMethod, MultiSeedConfig};
+
+let ensemble_config = AutoConfig::new()
+    .with_ensemble_method(AutoEnsembleMethod::RidgeStacking)
+    .with_seed(42);
+
+let model = AutoModel::train_with_config(&df, "target", ensemble_config)?;
+```
+
 ## Quick Start
 
 ### Rust (Native)
