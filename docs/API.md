@@ -43,7 +43,7 @@ BoostingMode::RandomForest    // Parallel independent trees with averaging
 ### UniversalConfig
 
 ```rust
-use treeboost::{UniversalConfig, BoostingMode};
+use treeboost::{UniversalConfig, BoostingMode, StackingStrategy};
 use treeboost::learner::{TreeConfig, LinearConfig};
 
 let config = UniversalConfig::new()
@@ -70,6 +70,16 @@ let config = config.with_linear_config(
         .with_lambda(1.0)           // Regularization strength
         .with_l1_ratio(0.0)         // 0.0 = Ridge, 1.0 = LASSO, between = ElasticNet
 );
+
+// Optional: Multi-seed ensemble training
+let config = config
+    .with_ensemble_seeds(vec![1, 2, 3, 4, 5])  // Train 5 models with different seeds
+    .with_stacking_strategy(StackingStrategy::Ridge {
+        alpha: 0.01,
+        rank_transform: false,
+        fit_intercept: true,
+        min_weight: 0.01,
+    });
 ```
 
 **Python:**
@@ -201,6 +211,40 @@ println!("{}", model.analysis_summary().unwrap());
 - ✅ **Documentation** - Report explains the decision
 - ❌ **Benchmarking** - Use fixed mode for reproducibility
 - ❌ **Known best mode** - Skip analysis overhead
+
+### Serialization
+
+UniversalModel supports zero-copy serialization via rkyv, making it perfect for production deployment.
+
+```rust
+// Save model for inference
+model.save("model.rkyv")?;
+
+// Load model for inference
+let loaded = UniversalModel::load("model.rkyv")?;
+
+// Get config for inspection/reuse
+let config = model.config();  // &UniversalConfig
+let config_json = serde_json::to_string_pretty(config)?;
+std::fs::write("config.json", config_json)?;
+```
+
+**Typical workflow:**
+
+```rust
+// 1. Train with AutoML
+let auto = AutoModel::train(&df, "target")?;
+
+// 2. Export discovered configuration to JSON (useful for inspection and reuse)
+auto.save_config("best_config.json")?;
+
+// 3. Save trained model for inference
+auto.save("model.rkyv")?;
+
+// 4. Later: Load model for predictions (no need to retrain)
+let loaded = UniversalModel::load("model.rkyv")?;
+let predictions = loaded.predict(&dataset);
+```
 
 ### Prediction
 

@@ -63,16 +63,42 @@ println!("Confidence: {:?}", model.selection_confidence());
 
 This analysis uses fast linear/tree probes and produces a full report you can log or inspect.
 
-**Optional: Ensembling for PureTree**
+**Multi-Seed Ensemble Training**
+
+Combine predictions from multiple models trained with different random seeds:
 
 ```rust
-use treeboost::{AutoConfig, AutoModel, AutoEnsembleMethod, MultiSeedConfig};
+use treeboost::{UniversalConfig, UniversalModel, BoostingMode, StackingStrategy};
+use treeboost::loss::MseLoss;
 
-let ensemble_config = AutoConfig::new()
-    .with_ensemble_method(AutoEnsembleMethod::RidgeStacking)
-    .with_seed(42);
+// Train with 5 ensemble members, Ridge stacking
+let config = UniversalConfig::new()
+    .with_mode(BoostingMode::PureTree)
+    .with_ensemble_seeds(vec![1, 2, 3, 4, 5])
+    .with_stacking_strategy(StackingStrategy::Ridge {
+        alpha: 0.01,
+        rank_transform: false,
+        fit_intercept: true,
+        min_weight: 0.01,
+    });
 
-let model = AutoModel::train_with_config(&df, "target", ensemble_config)?;
+let model = UniversalModel::train(&dataset, config, &MseLoss)?;
+let predictions = model.predict(&dataset);
+```
+
+**Stacking strategies:**
+
+- **Ridge**: Learns optimal weights via Ridge regression on out-of-fold predictions. Recommended for diverse ensembles.
+- **Average**: Simple equal-weight averaging. Fast and effective for homogeneous ensembles.
+
+```rust
+// Simple averaging
+let config = UniversalConfig::new()
+    .with_mode(BoostingMode::LinearThenTree)
+    .with_ensemble_seeds(vec![42, 43, 44])
+    .with_stacking_strategy(StackingStrategy::Average);
+
+let model = UniversalModel::train(&dataset, config, &MseLoss)?;
 ```
 
 ## Quick Start
@@ -339,29 +365,39 @@ pip install maturin && maturin develop --release
 
 ## More Examples
 
-### Rust: Train and Save
+### Rust: Train, Save Config, and Save Model
 
 ```rust
-use treeboost::{GBDTConfig, GBDTModel};
-use treeboost::dataset::DatasetLoader;
+use treeboost::{AutoModel, UniversalModel};
 
-// Load data
-let loader = DatasetLoader::new(255);
-let dataset = loader.load_parquet("train.parquet", "target", None)?;
+// Train with AutoML (discovers best mode and hyperparameters)
+let auto = AutoModel::train(&df, "target")?;
 
-// Configure and train
-let config = GBDTConfig::new()
-    .with_num_rounds(200)
-    .with_max_depth(8)
-    .with_learning_rate(0.05)
-    .with_entropy_weight(0.1);  // Regularize for drift
+// Save the discovered configuration to JSON (useful for inspection and reuse)
+auto.save_config("best_config.json")?;
 
-let model = GBDTModel::train_binned(&dataset, config)?;
-treeboost::serialize::save_model(&model, "model.rkyv")?;
+// Save the trained model for inference
+auto.save("model.rkyv")?;
 
-// Load and predict
-let predictions = model.predict(&dataset);
-let importances = model.feature_importance();
+// Later: Load and predict (no need to retrain)
+let loaded = UniversalModel::load("model.rkyv")?;
+let predictions = loaded.predict(&dataset);
+let importances = loaded.feature_importance();
+```
+
+**Export config to inspect discovered hyperparameters:**
+
+```rust
+// After training with AutoML
+let auto = AutoModel::train(&df, "target")?;
+
+// Export to JSON
+let config_json = serde_json::to_string_pretty(auto.config())?;
+std::fs::write("config.json", config_json)?;
+
+// Inspect the JSON to see what mode was chosen,
+// learning rates, ensemble seeds, etc.
+// Then manually adjust and retrain if needed
 ```
 
 ### Python: Conformal Prediction
