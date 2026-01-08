@@ -29,7 +29,7 @@ use crate::python::dataset::PyBinnedDataset;
 /// # Configure tuning
 /// tuner = (
 ///     tuner
-///     .with_config(TunerConfig.quick())
+///     .with_config(TunerConfig.preset("quick"))
 ///     .with_callback(lambda trial, curr, total: print(f"{curr}/{total}"))
 ///     .with_seed(42)
 /// )

@@ -191,40 +191,6 @@ impl PyParameterSpace {
         }
     }
 
-    /// Create default search space for regression
-    ///
-    /// Includes: max_depth, learning_rate, subsample, lambda, entropy_weight
-    ///
-    /// Deprecated: use `ParameterSpace.preset("regression")`.
-    #[staticmethod]
-    fn default_regression() -> Self {
-        Self {
-            inner: ParameterSpace::with_preset(SpacePreset::Regression),
-        }
-    }
-
-    /// Create default search space for classification
-    ///
-    /// Same parameters as regression but with different default centers.
-    ///
-    /// Deprecated: use `ParameterSpace.preset("classification")`.
-    #[staticmethod]
-    fn default_classification() -> Self {
-        Self {
-            inner: ParameterSpace::with_preset(SpacePreset::Classification),
-        }
-    }
-
-    /// Create a minimal search space (learning_rate and max_depth only)
-    ///
-    /// Deprecated: use `ParameterSpace.preset("minimal")`.
-    #[staticmethod]
-    fn minimal() -> Self {
-        Self {
-            inner: ParameterSpace::with_preset(SpacePreset::Minimal),
-        }
-    }
-
     /// Create a preset search space.
     ///
     /// Valid presets: minimal, regression, classification, exhaustive, universal.
@@ -454,26 +420,6 @@ impl PyTunerConfig {
     fn new() -> Self {
         Self {
             inner: TunerConfig::default(),
-        }
-    }
-
-    /// Create a quick tuning config (2 iterations, fewer rounds)
-    ///
-    /// Deprecated: use `TunerConfig.preset(\"quick\")`.
-    #[staticmethod]
-    fn quick() -> Self {
-        Self {
-            inner: TunerConfig::default().with_preset(TunerPreset::Quick),
-        }
-    }
-
-    /// Create a thorough tuning config (more iterations, stricter thresholds)
-    ///
-    /// Deprecated: use `TunerConfig.preset(\"thorough\")`.
-    #[staticmethod]
-    fn thorough() -> Self {
-        Self {
-            inner: TunerConfig::default().with_preset(TunerPreset::Thorough),
         }
     }
 

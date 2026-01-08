@@ -827,12 +827,12 @@ let config = TunerConfig::new()
 from treeboost import TunerConfig, GridStrategy, EvalStrategy
 
 config = (
-    TunerConfig.quick()  # Preset: 2 iterations, simple space
+    TunerConfig.preset("quick")  # Preset: 2 iterations, simple space
     .with_grid_strategy(GridStrategy.lhs(50))
     .with_eval_strategy(EvalStrategy.holdout(0.2))
     .with_verbose(True)
 )
-# Other presets: TunerConfig.thorough(), TunerConfig.custom()
+# Other presets: "smoketest", "balanced", "thorough"
 ```
 
 ### GridStrategy
@@ -1343,7 +1343,7 @@ base_config = GBDTConfig().with_num_rounds(100).with_seed(42)
 
 tuner = AutoTuner(base_config)
 tuner.config = (
-    TunerConfig.thorough()
+    TunerConfig.preset("thorough")
     .with_grid_strategy(GridStrategy.lhs(50))
     .with_eval_strategy(EvalStrategy.holdout(0.2).with_folds(5))
 )

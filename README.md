@@ -35,8 +35,9 @@ Most tabular problems are solved by Linear, Tree, or their combination. Other li
 
 **What You Get:**
 
+- **AutoML mode selection** — instant data analysis picks `PureTree`, `LinearThenTree`, or `RandomForest` without expensive training trials.
 - **Hybrid Linear+Tree architecture** — `LinearThenTree` mode captures global trends with linear models, then trees learn the residuals. Extrapolates beyond training range.
-- **Built-in preprocessing pipeline** — Scalers, encoders, imputers that serialize *with* the model. No train/test skew.
+- **Built-in preprocessing pipeline** — Scalers, encoders, imputers that serialize _with_ the model. No train/test skew.
 - **Linear Trees** — Decision trees with Ridge regression in leaves. 10-100x fewer trees for piecewise linear data.
 - **Automatic hyperparameter tuning** — AutoTuner with Latin Hypercube Sampling, k-fold CV, parallel evaluation. Tries all three modes automatically.
 - **GPU acceleration** — WGPU (all GPUs), CUDA (NVIDIA), with AVX-512/SVE2/scalar fallback
@@ -47,6 +48,20 @@ Most tabular problems are solved by Linear, Tree, or their combination. Other li
 TreeBoost includes a production-ready **AutoTuner** that finds optimal hyperparameters automatically, eliminating manual tuning:
 
 See `examples/autotuner.rs` for comprehensive examples.
+
+## AutoML Mode Selection
+
+TreeBoost can **analyze your dataset and pick the best boosting mode** without a full training sweep.
+
+```rust
+use treeboost::{UniversalModel, MseLoss};
+
+let model = UniversalModel::auto(&dataset, &MseLoss)?;
+println!("Selected mode: {:?}", model.mode());
+println!("Confidence: {:?}", model.selection_confidence());
+```
+
+This analysis uses fast linear/tree probes and produces a full report you can log or inspect.
 
 ## Quick Start
 
@@ -73,11 +88,11 @@ let predictions = model.predict(&dataset);
 
 **Quick mode selection:**
 
-| Your Data | Use This Mode |
-|-----------|---------------|
-| General tabular, categoricals | `BoostingMode::PureTree` |
+| Your Data                                  | Use This Mode                  |
+| ------------------------------------------ | ------------------------------ |
+| General tabular, categoricals              | `BoostingMode::PureTree`       |
 | Time-series, trending, needs extrapolation | `BoostingMode::LinearThenTree` |
-| Noisy data, want robustness | `BoostingMode::RandomForest` |
+| Noisy data, want robustness                | `BoostingMode::RandomForest`   |
 
 ### Python (via PyO3)
 
@@ -253,11 +268,11 @@ This is powerful for data with underlying trends (time-series, pricing, growth c
 
 Don't confuse `LinearThenTree` mode with `LinearTreeBooster`. They solve different problems:
 
-| | LinearThenTree (Mode) | LinearTreeBooster (Learner) |
-|---|---|---|
-| **Structure** | 1 global linear + many standard trees | Trees with linear models *in each leaf* |
-| **Best for** | Global trends + local non-linearities | Piecewise linear data (tax brackets, physics) |
-| **Trees needed** | Normal (50-200) | Very few (5-20) |
+|                  | LinearThenTree (Mode)                 | LinearTreeBooster (Learner)                   |
+| ---------------- | ------------------------------------- | --------------------------------------------- |
+| **Structure**    | 1 global linear + many standard trees | Trees with linear models _in each leaf_       |
+| **Best for**     | Global trends + local non-linearities | Piecewise linear data (tax brackets, physics) |
+| **Trees needed** | Normal (50-200)                       | Very few (5-20)                               |
 
 Use `LinearTreeBooster` when your data looks like segments with different slopes—the tree finds the breakpoints, Ridge fits each segment.
 
