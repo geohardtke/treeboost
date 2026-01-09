@@ -77,6 +77,7 @@ pub mod polars_ext;
 pub mod scaler;
 pub mod smart;
 pub mod timeseries;
+pub mod timeseries_grouped;
 pub mod transforms;
 
 pub use encoding::{FrequencyEncoder, LabelEncoder, OneHotEncoder, UnknownStrategy};
@@ -99,4 +100,5 @@ pub use timeseries::{
     EwmaGenerator, LagGenerator, NaNStrategy, RollingGenerator, RollingStat, SeasonalComponent,
     SeasonalGenerator,
 };
+pub use timeseries_grouped::{GroupedTimeSeriesConfig, GroupedTimeSeriesGenerator};
 pub use transforms::YeoJohnsonTransform;
