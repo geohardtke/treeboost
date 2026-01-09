@@ -610,16 +610,23 @@ impl AutoModel {
     /// // Save the updated model
     /// model.save_trb("model.trb")?;
     /// ```
-    pub fn update(&mut self, df: &DataFrame, additional_rounds: usize) -> Result<AutoModelUpdateReport> {
+    pub fn update(
+        &mut self,
+        df: &DataFrame,
+        additional_rounds: usize,
+    ) -> Result<AutoModelUpdateReport> {
         let rows_before = df.height();
 
         // Convert DataFrame to BinnedDataset using existing pipeline
         let (_preprocessed_df, dataset) = self.prepare_dataset_for_prediction(df)?;
 
         // Get targets from the dataframe
-        let target_series = df
-            .column(&self.target_column)
-            .map_err(|e| TreeBoostError::Data(format!("Target column '{}' not found: {}", self.target_column, e)))?;
+        let target_series = df.column(&self.target_column).map_err(|e| {
+            TreeBoostError::Data(format!(
+                "Target column '{}' not found: {}",
+                self.target_column, e
+            ))
+        })?;
 
         let targets: Vec<f32> = target_series
             .cast(&polars::datatypes::DataType::Float32)
@@ -634,7 +641,9 @@ impl AutoModel {
 
         // Update the model (uses MSE loss by default, same as AutoBuilder)
         let loss_fn = MseLoss::new();
-        let model_report = self.model.update(&update_dataset, &loss_fn, additional_rounds)?;
+        let model_report = self
+            .model
+            .update(&update_dataset, &loss_fn, additional_rounds)?;
 
         Ok(AutoModelUpdateReport {
             rows_trained: rows_before,

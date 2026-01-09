@@ -1893,7 +1893,12 @@ impl UniversalModel {
                 .unzip();
 
             // Warm fit linear booster
-            linear_booster.warm_fit(&linear_features, num_linear_features, &gradients, &hessians)?;
+            linear_booster.warm_fit(
+                &linear_features,
+                num_linear_features,
+                &gradients,
+                &hessians,
+            )?;
         }
 
         // Now update trees on residuals from full ensemble
@@ -1954,7 +1959,7 @@ impl UniversalModel {
             .into_par_iter()
             .filter_map(|i| {
                 let mut rng = rand::rngs::StdRng::seed_from_u64(
-                    self.config.seed + seed_offset_start + i as u64
+                    self.config.seed + seed_offset_start + i as u64,
                 );
 
                 // Bootstrap sample
@@ -2098,19 +2103,25 @@ impl UniversalModel {
         for segment in segments {
             match segment {
                 TrbSegment::Base { blob, .. } => {
-                    model = Some(crate::serialize::rkyv_io::deserialize_universal_model(&blob)?);
+                    model = Some(crate::serialize::rkyv_io::deserialize_universal_model(
+                        &blob,
+                    )?);
                 }
                 TrbSegment::Update { header, blob } => {
                     match header.update_type {
                         UpdateType::Snapshot => {
                             // Replace with snapshot
-                            model = Some(crate::serialize::rkyv_io::deserialize_universal_model(&blob)?);
+                            model = Some(crate::serialize::rkyv_io::deserialize_universal_model(
+                                &blob,
+                            )?);
                         }
                         UpdateType::Trees => {
                             // For trees-only updates, we'd need to deserialize and merge
                             // For now, we just use snapshots for simplicity
                             if model.is_none() {
-                                model = Some(crate::serialize::rkyv_io::deserialize_universal_model(&blob)?);
+                                model = Some(
+                                    crate::serialize::rkyv_io::deserialize_universal_model(&blob)?,
+                                );
                             }
                         }
                         UpdateType::Linear | UpdateType::Preprocessor => {
@@ -2884,7 +2895,10 @@ mod tests {
         // Update with mismatched features should fail
         let result = model.update(&dataset2, &loss, 5);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Feature count mismatch"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Feature count mismatch"));
     }
 
     #[test]
@@ -2960,7 +2974,10 @@ mod tests {
 
         // File should be larger
         let updated_size = std::fs::metadata(&path).unwrap().len();
-        assert!(updated_size > initial_size, "TRB file should grow after update");
+        assert!(
+            updated_size > initial_size,
+            "TRB file should grow after update"
+        );
 
         // Load and verify
         let loaded = UniversalModel::load_trb(&path).unwrap();

@@ -147,8 +147,7 @@ pub struct IncrementalDriftDetector {
 impl IncrementalDriftDetector {
     /// Create from initial training dataset
     pub fn from_dataset(dataset: &BinnedDataset) -> Self {
-        let detector = ShiftDetector::from_dataset(dataset)
-            .with_metric(PSI::default());
+        let detector = ShiftDetector::from_dataset(dataset).with_metric(PSI::default());
 
         Self {
             detector,
@@ -296,8 +295,7 @@ impl DriftHistory {
             {
                 entry.1 += 1;
             } else {
-                self.frequently_drifted_features
-                    .push((feature.clone(), 1));
+                self.frequently_drifted_features.push((feature.clone(), 1));
             }
         }
 
@@ -355,11 +353,7 @@ mod tests {
     use super::*;
     use crate::dataset::{FeatureInfo, FeatureType};
 
-    fn create_test_dataset(
-        num_rows: usize,
-        num_features: usize,
-        offset: u8,
-    ) -> BinnedDataset {
+    fn create_test_dataset(num_rows: usize, num_features: usize, offset: u8) -> BinnedDataset {
         let mut features = Vec::with_capacity(num_rows * num_features);
         for f in 0..num_features {
             for r in 0..num_rows {

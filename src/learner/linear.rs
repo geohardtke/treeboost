@@ -1433,9 +1433,7 @@ mod tests {
         let gradients_a: Vec<f32> = targets_a.iter().map(|&t| -t).collect();
         let hessians_a = vec![1.0; 5];
 
-        let config = LinearConfig::default()
-            .with_lambda(0.01)
-            .with_max_iter(100);
+        let config = LinearConfig::default().with_lambda(0.01).with_max_iter(100);
         let mut booster = LinearBooster::new(1, config);
 
         // Initial fit

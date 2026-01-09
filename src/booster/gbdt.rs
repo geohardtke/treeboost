@@ -2023,7 +2023,11 @@ impl GBDTModel {
     /// # Multi-class Note
     /// Truncates to `num_rounds * num_classes` trees for multi-class models.
     pub fn truncate_to_rounds(&mut self, num_rounds: usize) {
-        let trees_per_round = if self.num_classes == 0 { 1 } else { self.num_classes };
+        let trees_per_round = if self.num_classes == 0 {
+            1
+        } else {
+            self.num_classes
+        };
         let target_trees = num_rounds * trees_per_round;
         if target_trees < self.trees.len() {
             self.trees.truncate(target_trees);
@@ -2827,9 +2831,7 @@ mod tests {
         let dataset = create_regression_dataset(100, 0.1);
 
         // Train with 5 trees
-        let config = GBDTConfig::new()
-            .with_num_rounds(5)
-            .with_max_depth(3);
+        let config = GBDTConfig::new().with_num_rounds(5).with_max_depth(3);
 
         let mut model = GBDTModel::train_binned(&dataset, config.clone()).unwrap();
         assert_eq!(model.num_trees(), 5);
@@ -2852,9 +2854,7 @@ mod tests {
     fn test_append_single_tree() {
         let dataset = create_regression_dataset(100, 0.1);
 
-        let config = GBDTConfig::new()
-            .with_num_rounds(1)
-            .with_max_depth(3);
+        let config = GBDTConfig::new().with_num_rounds(1).with_max_depth(3);
 
         let mut model = GBDTModel::train_binned(&dataset, config.clone()).unwrap();
         assert_eq!(model.num_trees(), 1);
@@ -2870,9 +2870,7 @@ mod tests {
     fn test_compute_residuals_correctness() {
         let dataset = create_regression_dataset(50, 0.1);
 
-        let config = GBDTConfig::new()
-            .with_num_rounds(5)
-            .with_max_depth(3);
+        let config = GBDTConfig::new().with_num_rounds(5).with_max_depth(3);
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
@@ -2900,9 +2898,7 @@ mod tests {
     fn test_truncate_to_rounds() {
         let dataset = create_regression_dataset(100, 0.1);
 
-        let config = GBDTConfig::new()
-            .with_num_rounds(10)
-            .with_max_depth(3);
+        let config = GBDTConfig::new().with_num_rounds(10).with_max_depth(3);
 
         let mut model = GBDTModel::train_binned(&dataset, config).unwrap();
         assert_eq!(model.num_trees(), 10);

@@ -205,10 +205,7 @@ impl StandardScaler {
     }
 
     /// Compute mean and variance for a batch (helper for EMA updates)
-    fn compute_batch_stats(
-        data: &[f32],
-        num_features: usize,
-    ) -> Vec<(f64, f64)> {
+    fn compute_batch_stats(data: &[f32], num_features: usize) -> Vec<(f64, f64)> {
         let num_rows = data.len() / num_features;
         let mut stats = vec![(0.0f64, 0.0f64); num_features];
 
@@ -246,12 +243,7 @@ impl StandardScaler {
     /// new_var = (1 - alpha) * old_var + alpha * batch_var
     ///
     /// This allows the scaler to adapt to distribution drift over time.
-    fn partial_fit_ema(
-        &mut self,
-        data: &[f32],
-        num_features: usize,
-        alpha: f32,
-    ) -> Result<()> {
+    fn partial_fit_ema(&mut self, data: &[f32], num_features: usize, alpha: f32) -> Result<()> {
         let num_rows = data.len() / num_features;
         if num_rows == 0 {
             return Ok(());
@@ -1338,7 +1330,10 @@ mod tests {
 
         scaler.partial_fit(&batch1, num_features).unwrap();
         let std_after_batch1 = scaler.stds()[0];
-        assert!(std_after_batch1 < 1.0, "Std should be small after low-variance batch");
+        assert!(
+            std_after_batch1 < 1.0,
+            "Std should be small after low-variance batch"
+        );
 
         scaler.partial_fit(&batch2, num_features).unwrap();
         let std_after_batch2 = scaler.stds()[0];

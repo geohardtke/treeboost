@@ -421,9 +421,13 @@ fn test_auto_model_incremental_update() {
     let df1 = create_linear_regression_dataset(200);
 
     // Train initial model with quick settings
-    let mut model = AutoModel::train_quick(&df1, "target").expect("Initial training should succeed");
+    let mut model =
+        AutoModel::train_quick(&df1, "target").expect("Initial training should succeed");
     let trees_before = model.num_trees();
-    assert!(trees_before > 0, "Model should have trees after initial training");
+    assert!(
+        trees_before > 0,
+        "Model should have trees after initial training"
+    );
 
     // Create update data (same schema)
     let df2 = create_linear_regression_dataset(100);
@@ -438,7 +442,9 @@ fn test_auto_model_incremental_update() {
     assert_eq!(report.target_column, "target");
 
     // Verify model still works
-    let predictions = model.predict(&df1).expect("Prediction should work after update");
+    let predictions = model
+        .predict(&df1)
+        .expect("Prediction should work after update");
     assert_eq!(predictions.len(), 200);
 
     println!("Incremental update report: {}", report);
@@ -458,15 +464,25 @@ fn test_auto_model_trb_save_load() {
     let dir = tempfile::tempdir().expect("Failed to create temp dir");
     let path = dir.path().join("model.trb");
 
-    model.save_trb(&path, "Test model").expect("Save should succeed");
+    model
+        .save_trb(&path, "Test model")
+        .expect("Save should succeed");
     assert!(path.exists(), "TRB file should exist");
 
     // Load from TRB
     let loaded = AutoModel::load_trb(&path, "target").expect("Load should succeed");
 
     // Verify tree count matches
-    assert_eq!(loaded.num_trees(), trees_before, "Loaded model should have same number of trees");
-    assert_eq!(loaded.mode(), model.mode(), "Loaded model should have same mode");
+    assert_eq!(
+        loaded.num_trees(),
+        trees_before,
+        "Loaded model should have same number of trees"
+    );
+    assert_eq!(
+        loaded.mode(),
+        model.mode(),
+        "Loaded model should have same mode"
+    );
 
     // Note: predict() on DataFrame requires pipeline_state which isn't preserved in TRB format
     // Use predict_binned() with a BinnedDataset for TRB-loaded models, or reload the original model
@@ -490,7 +506,9 @@ fn test_auto_model_trb_update_cycle() {
     // Save to TRB
     let dir = tempfile::tempdir().expect("Failed to create temp dir");
     let path = dir.path().join("model.trb");
-    model.save_trb(&path, "Initial training").expect("Save should succeed");
+    model
+        .save_trb(&path, "Initial training")
+        .expect("Save should succeed");
 
     let initial_size = std::fs::metadata(&path).unwrap().len();
 
@@ -500,7 +518,9 @@ fn test_auto_model_trb_update_cycle() {
     assert_eq!(trees_after_update, trees_after_initial + 5);
 
     // Verify updated model still works for prediction
-    let updated_preds = model.predict(&df1).expect("Updated model prediction should work");
+    let updated_preds = model
+        .predict(&df1)
+        .expect("Updated model prediction should work");
     assert_eq!(updated_preds.len(), 200);
 
     // Save update
@@ -549,13 +569,17 @@ fn test_auto_model_config_preserved_across_updates() {
     let df = create_linear_regression_dataset(200);
 
     // Train with specific mode
-    let mut model =
-        AutoModel::train_with_mode(&df, "target", BoostingMode::PureTree).expect("Training should succeed");
+    let mut model = AutoModel::train_with_mode(&df, "target", BoostingMode::PureTree)
+        .expect("Training should succeed");
 
     let original_mode = model.mode();
     assert_eq!(original_mode, BoostingMode::PureTree);
 
     // Update should preserve mode
     model.update(&df, 5).expect("Update should succeed");
-    assert_eq!(model.mode(), original_mode, "Mode should be preserved after update");
+    assert_eq!(
+        model.mode(),
+        original_mode,
+        "Mode should be preserved after update"
+    );
 }

@@ -206,12 +206,16 @@ fn tune_ltt(
 
     // Create tuner config based on tuning level
     let tuner_config = match config.tuning_level {
-        TuningLevel::Quick => LttTunerConfig::default().with_preset(crate::tuner::ltt::LttTunerPreset::Quick),
+        TuningLevel::Quick => {
+            LttTunerConfig::default().with_preset(crate::tuner::ltt::LttTunerPreset::Quick)
+        }
         TuningLevel::Standard => LttTunerConfig::default(),
         TuningLevel::Thorough => {
             LttTunerConfig::default().with_preset(crate::tuner::ltt::LttTunerPreset::Thorough)
         }
-        TuningLevel::None => LttTunerConfig::default().with_preset(crate::tuner::ltt::LttTunerPreset::Quick), // Should not reach here
+        TuningLevel::None => {
+            LttTunerConfig::default().with_preset(crate::tuner::ltt::LttTunerPreset::Quick)
+        } // Should not reach here
     };
 
     let tuner = LttTuner::new(tuner_config);

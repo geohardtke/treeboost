@@ -6,9 +6,9 @@
 //! - Exported configs can be inspected and reused
 
 use polars::prelude::*;
-use treeboost::model::{AutoModel, UniversalConfig, UniversalModel, BoostingMode};
 use std::fs;
 use tempfile::NamedTempFile;
+use treeboost::model::{AutoModel, BoostingMode, UniversalConfig, UniversalModel};
 
 fn create_test_dataframe() -> DataFrame {
     df!(
@@ -63,11 +63,14 @@ fn test_auto_model_save_config_json() {
 
     // Read and verify it's valid JSON
     let json_content = fs::read_to_string(path).unwrap();
-    let json: serde_json::Value = serde_json::from_str(&json_content)
-        .expect("Config should be valid JSON");
+    let json: serde_json::Value =
+        serde_json::from_str(&json_content).expect("Config should be valid JSON");
 
     // Verify expected fields exist
-    assert!(json.get("mode").is_some(), "Config should have 'mode' field");
+    assert!(
+        json.get("mode").is_some(),
+        "Config should have 'mode' field"
+    );
     // Config contains various sub-fields like tree_config, linear_config, etc.
     // Just verify the JSON is non-empty and has expected structure
     assert!(!json.is_null(), "Config should be a valid JSON object");
@@ -85,12 +88,12 @@ fn test_config_roundtrip_puretree() {
     let original_config = auto.config().clone();
 
     // Export to JSON
-    let config_json = serde_json::to_string_pretty(&original_config)
-        .expect("Config should serialize to JSON");
+    let config_json =
+        serde_json::to_string_pretty(&original_config).expect("Config should serialize to JSON");
 
     // Re-import from JSON
-    let reimported: UniversalConfig = serde_json::from_str(&config_json)
-        .expect("Config should deserialize from JSON");
+    let reimported: UniversalConfig =
+        serde_json::from_str(&config_json).expect("Config should deserialize from JSON");
 
     // Verify mode matches (TreeConfig doesn't implement PartialEq, so only check mode)
     assert_eq!(reimported.mode, original_config.mode);
@@ -111,12 +114,11 @@ fn test_ensemble_config_serialization() {
         });
 
     // Serialize to JSON
-    let json = serde_json::to_string_pretty(&config)
-        .expect("Config with ensemble should serialize");
+    let json =
+        serde_json::to_string_pretty(&config).expect("Config with ensemble should serialize");
 
     // Deserialize back
-    let loaded: UniversalConfig = serde_json::from_str(&json)
-        .expect("Config should deserialize");
+    let loaded: UniversalConfig = serde_json::from_str(&json).expect("Config should deserialize");
 
     // Verify ensemble config persists
     assert!(
@@ -152,7 +154,10 @@ fn test_config_json_is_human_readable() {
     let json = serde_json::to_string_pretty(&config).unwrap();
 
     // Verify it's pretty-printed (has newlines and indentation)
-    assert!(json.contains('\n'), "JSON should be pretty-printed with newlines");
+    assert!(
+        json.contains('\n'),
+        "JSON should be pretty-printed with newlines"
+    );
     assert!(json.contains("  "), "JSON should have indentation");
 
     // Verify it contains readable field names
@@ -184,8 +189,7 @@ fn test_model_and_config_save_together() {
 
     // Verify config is JSON
     let config_json = fs::read_to_string(&config_path).unwrap();
-    serde_json::from_str::<serde_json::Value>(&config_json)
-        .expect("Config should be valid JSON");
+    serde_json::from_str::<serde_json::Value>(&config_json).expect("Config should be valid JSON");
 
     // Verify model can be loaded
     let loaded_model = UniversalModel::load(&model_path).unwrap();

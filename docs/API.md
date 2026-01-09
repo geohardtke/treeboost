@@ -1434,6 +1434,62 @@ for (update_header, blob) in reader.iter_updates()? {
 let segments = reader.load_all_segments()?;
 ```
 
+### MmapTrbReader (mmap feature)
+
+Memory-mapped TRB reader for true zero-copy I/O. Requires the `mmap` feature:
+
+```bash
+cargo build --release --features mmap
+```
+
+**When to use:**
+- Large models (100MB+) where heap allocation is expensive
+- Inference servers requiring minimal startup time
+- Running multiple model instances (OS deduplicates pages)
+- Memory-constrained environments
+
+**Comparison:**
+
+| Reader | Load Time | Memory | Use Case |
+|--------|-----------|--------|----------|
+| `TrbReader` | O(model_size) | O(model_size) | Default, works everywhere |
+| `MmapTrbReader` | O(1) initial | O(1) initial | Large models, servers |
+
+**Usage:**
+
+```rust
+#[cfg(feature = "mmap")]
+{
+    use treeboost::serialize::MmapTrbReader;
+
+    // Open with memory mapping - instant, no heap allocation
+    let reader = MmapTrbReader::open("model.trb")?;
+
+    // Option 1: Deserialize (still faster than TrbReader due to mmap)
+    let model = reader.load_model()?;
+    let predictions = model.predict(&dataset);
+
+    // Option 2: Zero-copy blob access
+    let base_blob = reader.base_blob_bytes()?;  // &[u8] into mmap
+
+    // Iterate updates (zero-copy slices)
+    for (header, blob) in reader.iter_updates()? {
+        println!("Update: {} rows", header.rows_trained);
+    }
+}
+```
+
+**API:**
+
+| Method | Description |
+|--------|-------------|
+| `open(path)` | Open TRB file with memory mapping |
+| `header()` | Get the `TrbHeader` |
+| `load_model()` | Deserialize `UniversalModel` |
+| `base_blob_bytes()` | Zero-copy access to base blob |
+| `iter_updates()` | Iterate update segments (zero-copy) |
+| `mapped_size()` | Size of memory-mapped region |
+
 ### UniversalModel Incremental API
 
 Lower-level API for custom update logic:

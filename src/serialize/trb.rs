@@ -21,6 +21,32 @@
 //! [UPDATE_BLOB]             L bytes, rkyv (8-byte aligned)
 //! [UPDATE_CRC32]            4 bytes, u32 LE
 //! ```
+//!
+//! # Feature Flags
+//!
+//! - **`mmap`**: Enables [`MmapTrbReader`] for true zero-copy I/O. Without this feature,
+//!   TRB files are read into heap-allocated buffers. With `mmap`, the OS memory-maps
+//!   the file directly, enabling instant model loading with lazy page faults.
+//!
+//! # Performance Comparison
+//!
+//! | Reader | I/O Model | Memory | Load Time |
+//! |--------|-----------|--------|-----------|
+//! | [`TrbReader`] | read() to heap | O(model_size) | O(model_size) |
+//! | [`MmapTrbReader`] | mmap (lazy) | O(1) initial | O(1) initial |
+//!
+//! # Example (with mmap feature)
+//!
+//! ```ignore
+//! #[cfg(feature = "mmap")]
+//! {
+//!     use treeboost::serialize::MmapTrbReader;
+//!
+//!     let reader = MmapTrbReader::open("model.trb")?;
+//!     let model = reader.archived_model()?;  // Zero-copy access
+//!     let predictions = model.predict(&dataset);
+//! }
+//! ```
 
 use crate::{Result, TreeBoostError};
 use fs4::fs_std::FileExt;
@@ -28,6 +54,9 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+
+#[cfg(feature = "mmap")]
+use memmap2::Mmap;
 
 /// Magic bytes identifying a TRB file
 pub const TRB_MAGIC: &[u8; 4] = b"TRB1";
@@ -90,10 +119,7 @@ pub struct TrbUpdateHeader {
 #[derive(Debug)]
 pub enum TrbSegment {
     /// The base model segment
-    Base {
-        header: TrbHeader,
-        blob: Vec<u8>,
-    },
+    Base { header: TrbHeader, blob: Vec<u8> },
     /// An update segment
     Update {
         header: TrbUpdateHeader,
@@ -114,11 +140,7 @@ impl TrbWriter {
     /// * `path` - Path to create the file at
     /// * `header` - Metadata about the base model
     /// * `base_blob` - The serialized base model (rkyv bytes)
-    pub fn new(
-        path: impl AsRef<Path>,
-        mut header: TrbHeader,
-        base_blob: &[u8],
-    ) -> Result<Self> {
+    pub fn new(path: impl AsRef<Path>, mut header: TrbHeader, base_blob: &[u8]) -> Result<Self> {
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -137,8 +159,9 @@ impl TrbWriter {
         file.write_all(TRB_MAGIC)?;
 
         // Serialize header to JSON
-        let header_json = serde_json::to_vec(&header)
-            .map_err(|e| TreeBoostError::Serialization(format!("Failed to serialize header: {}", e)))?;
+        let header_json = serde_json::to_vec(&header).map_err(|e| {
+            TreeBoostError::Serialization(format!("Failed to serialize header: {}", e))
+        })?;
 
         // Write header size
         file.write_all(&(header_json.len() as u64).to_le_bytes())?;
@@ -179,8 +202,9 @@ impl TrbWriter {
         self.file.seek(SeekFrom::End(0))?;
 
         // Serialize update header to JSON
-        let header_json = serde_json::to_vec(update_header)
-            .map_err(|e| TreeBoostError::Serialization(format!("Failed to serialize update header: {}", e)))?;
+        let header_json = serde_json::to_vec(update_header).map_err(|e| {
+            TreeBoostError::Serialization(format!("Failed to serialize update header: {}", e))
+        })?;
 
         // Calculate padding for blob alignment
         // Position after: total_size(8) + header_size(8) + header_json
@@ -195,7 +219,8 @@ impl TrbWriter {
         self.file.write_all(&(total_size as u64).to_le_bytes())?;
 
         // Write header size (includes padding)
-        self.file.write_all(&(padded_header_json_len as u64).to_le_bytes())?;
+        self.file
+            .write_all(&(padded_header_json_len as u64).to_le_bytes())?;
 
         // Write header JSON + padding
         self.file.write_all(&header_json)?;
@@ -366,7 +391,11 @@ impl TrbReader {
             self.file.read_exact(&mut header_json)?;
 
             // Trim trailing zeros (padding)
-            let json_end = header_json.iter().rposition(|&b| b != 0).map(|i| i + 1).unwrap_or(0);
+            let json_end = header_json
+                .iter()
+                .rposition(|&b| b != 0)
+                .map(|i| i + 1)
+                .unwrap_or(0);
             let header_json_trimmed = &header_json[..json_end];
 
             let update_header: TrbUpdateHeader = match serde_json::from_slice(header_json_trimmed) {
@@ -488,6 +517,367 @@ fn alignment_padding(current_pos: usize) -> usize {
         0
     } else {
         RKYV_ALIGNMENT - remainder
+    }
+}
+
+// =============================================================================
+// Memory-Mapped TRB Reader (mmap feature)
+// =============================================================================
+
+/// Memory-mapped TRB reader for true zero-copy model loading
+///
+/// Unlike [`TrbReader`] which copies file contents to heap, `MmapTrbReader` uses
+/// OS memory mapping for instant model access with lazy page faults.
+///
+/// # Performance Benefits
+///
+/// - **O(1) load time**: Creating the mapping is instant; actual I/O happens lazily
+/// - **No heap allocation**: Model data lives in OS page cache, not Rust heap
+/// - **Memory pressure handling**: OS can evict pages under memory pressure
+/// - **Shared across processes**: Multiple processes can share the same pages
+///
+/// # Safety
+///
+/// The memory map is read-only and the file is locked during access. The archived
+/// model reference is valid as long as `MmapTrbReader` is alive.
+///
+/// # Example
+///
+/// ```ignore
+/// use treeboost::serialize::MmapTrbReader;
+/// use treeboost::model::UniversalModel;
+///
+/// let reader = MmapTrbReader::open("model.trb")?;
+///
+/// // Zero-copy access to archived model
+/// let archived = reader.archived_model()?;
+///
+/// // Or deserialize if needed (still faster due to mmap)
+/// let model: UniversalModel = reader.load_model()?;
+/// ```
+///
+/// # When to Use
+///
+/// Use `MmapTrbReader` when:
+/// - Loading large models (100MB+) where heap allocation is expensive
+/// - Running multiple model instances (OS deduplicates pages)
+/// - Startup time is critical (inference servers)
+/// - Memory is constrained (embedded systems)
+///
+/// Use [`TrbReader`] when:
+/// - Model will be modified after loading (mmap is read-only)
+/// - Platform doesn't support mmap (WASM)
+/// - File is on network storage (mmap performance varies)
+#[cfg(feature = "mmap")]
+pub struct MmapTrbReader {
+    /// Memory-mapped file
+    mmap: Mmap,
+    /// Parsed header
+    header: TrbHeader,
+    /// Offset where base blob starts
+    base_blob_offset: usize,
+    /// File handle kept alive to maintain shared lock for duration of mmap.
+    /// The lock prevents writers from modifying the file while we're reading.
+    /// Underscore prefix indicates this field is intentionally unused directly.
+    _file: File,
+}
+
+#[cfg(feature = "mmap")]
+impl std::fmt::Debug for MmapTrbReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MmapTrbReader")
+            .field("header", &self.header)
+            .field("base_blob_offset", &self.base_blob_offset)
+            .field("mapped_size", &self.mmap.len())
+            .finish()
+    }
+}
+
+#[cfg(feature = "mmap")]
+impl MmapTrbReader {
+    /// Open a TRB file with memory mapping
+    ///
+    /// # Arguments
+    /// * `path` - Path to the TRB file
+    ///
+    /// # Errors
+    /// - File doesn't exist or can't be opened
+    /// - Invalid TRB magic bytes
+    /// - Header parsing failure
+    /// - Memory mapping failure
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let file = File::open(path.as_ref())?;
+
+        // Acquire shared lock (allows other readers, blocks writers)
+        file.try_lock_shared().map_err(|e| {
+            TreeBoostError::Serialization(format!("Failed to acquire file lock: {}", e))
+        })?;
+
+        // Create memory map
+        // SAFETY: File is locked for shared access, map is read-only
+        let mmap = unsafe {
+            Mmap::map(&file).map_err(|e| {
+                TreeBoostError::Serialization(format!("Failed to memory map file: {}", e))
+            })?
+        };
+
+        // Validate magic
+        if mmap.len() < 4 {
+            return Err(TreeBoostError::Serialization(
+                "File too small for TRB format".to_string(),
+            ));
+        }
+        if &mmap[0..4] != TRB_MAGIC {
+            return Err(TreeBoostError::Serialization(format!(
+                "Invalid TRB magic: expected {:?}, got {:?}",
+                TRB_MAGIC,
+                &mmap[0..4]
+            )));
+        }
+
+        // Parse header size
+        if mmap.len() < 12 {
+            return Err(TreeBoostError::Serialization(
+                "File too small for header size".to_string(),
+            ));
+        }
+        let header_size =
+            u64::from_le_bytes(mmap[4..12].try_into().expect("bounds checked above")) as usize;
+
+        // Parse header JSON
+        if mmap.len() < 12 + header_size {
+            return Err(TreeBoostError::Serialization(
+                "File too small for header".to_string(),
+            ));
+        }
+        let header: TrbHeader = serde_json::from_slice(&mmap[12..12 + header_size])
+            .map_err(|e| TreeBoostError::Serialization(format!("Failed to parse header: {}", e)))?;
+
+        // Calculate base blob offset (after magic + header_size + header + padding)
+        let current_pos = 4 + 8 + header_size;
+        let padding = alignment_padding(current_pos);
+        let base_blob_offset = current_pos + padding;
+
+        Ok(Self {
+            mmap,
+            header,
+            base_blob_offset,
+            _file: file,
+        })
+    }
+
+    /// Get the header of this TRB file
+    pub fn header(&self) -> &TrbHeader {
+        &self.header
+    }
+
+    /// Get the raw bytes of the base model blob (zero-copy)
+    ///
+    /// Returns a slice directly into the memory-mapped region.
+    /// CRC validation is performed.
+    pub fn base_blob_bytes(&self) -> Result<&[u8]> {
+        let blob_size = self.header.base_blob_size as usize;
+        let blob_end = self.base_blob_offset + blob_size;
+        let crc_end = blob_end + 4;
+
+        if self.mmap.len() < crc_end {
+            return Err(TreeBoostError::Serialization(
+                "File truncated: missing base blob or CRC".to_string(),
+            ));
+        }
+
+        let blob = &self.mmap[self.base_blob_offset..blob_end];
+
+        // Validate CRC
+        let stored_crc = u32::from_le_bytes(
+            self.mmap[blob_end..crc_end]
+                .try_into()
+                .expect("crc_end bounds checked above"),
+        );
+        let computed_crc = crc32fast::hash(blob);
+
+        if stored_crc != computed_crc {
+            return Err(TreeBoostError::Serialization(format!(
+                "Base blob CRC mismatch: stored={:#x}, computed={:#x}",
+                stored_crc, computed_crc
+            )));
+        }
+
+        Ok(blob)
+    }
+
+    /// Access the archived UniversalModel directly (true zero-copy)
+    ///
+    /// Returns a reference to the archived model that can be used for
+    /// prediction without deserialization. This is the fastest way to
+    /// use a TRB model.
+    ///
+    /// # Safety
+    ///
+    /// The returned reference borrows from the memory map and is valid
+    /// as long as `self` is alive.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let reader = MmapTrbReader::open("model.trb")?;
+    /// let archived = reader.archived_model()?;
+    ///
+    /// // Use archived model directly (no deserialization)
+    /// // Note: predict() must work with ArchivedUniversalModel
+    /// ```
+    pub fn archived_model(&self) -> Result<&rkyv::Archived<crate::model::UniversalModel>> {
+        let blob = self.base_blob_bytes()?;
+
+        // SAFETY: Blob is 8-byte aligned (we ensured this during write)
+        // and CRC validated above. Debug assertion catches alignment bugs early.
+        debug_assert_eq!(
+            blob.as_ptr() as usize % 8,
+            0,
+            "rkyv blob must be 8-byte aligned"
+        );
+        let archived =
+            unsafe { rkyv::access_unchecked::<rkyv::Archived<crate::model::UniversalModel>>(blob) };
+
+        Ok(archived)
+    }
+
+    /// Load and deserialize the base model
+    ///
+    /// This deserializes the model from the memory-mapped region.
+    /// While this does allocate, it's still faster than [`TrbReader`]
+    /// because the source data is already in memory (via mmap).
+    pub fn load_model(&self) -> Result<crate::model::UniversalModel> {
+        use rkyv::rancor::Error as RkyvError;
+
+        let blob = self.base_blob_bytes()?;
+
+        let model: crate::model::UniversalModel =
+            rkyv::from_bytes::<_, RkyvError>(blob).map_err(|e| {
+                TreeBoostError::Serialization(format!("Failed to deserialize model: {}", e))
+            })?;
+
+        Ok(model)
+    }
+
+    /// Get the size of the memory-mapped region
+    pub fn mapped_size(&self) -> usize {
+        self.mmap.len()
+    }
+
+    /// Get the base blob offset (useful for debugging)
+    pub fn base_blob_offset(&self) -> usize {
+        self.base_blob_offset
+    }
+
+    /// Iterate over update segments (zero-copy)
+    ///
+    /// Returns an iterator yielding `(TrbUpdateHeader, &[u8])` for each valid update.
+    /// The blob slices point directly into the memory-mapped region.
+    pub fn iter_updates(&self) -> Result<Vec<(TrbUpdateHeader, &[u8])>> {
+        let mut updates = Vec::new();
+
+        // Position after base blob + CRC
+        let mut pos = self.base_blob_offset + self.header.base_blob_size as usize + 4;
+        let file_size = self.mmap.len();
+
+        let mut segment_index = 0;
+        while pos < file_size {
+            // Check if we have enough bytes for total_size
+            if pos + 8 > file_size {
+                eprintln!(
+                    "Warning: Incomplete update segment {} at offset {} (truncated total_size)",
+                    segment_index, pos
+                );
+                break;
+            }
+
+            // Read total size
+            let total_size = u64::from_le_bytes(
+                self.mmap[pos..pos + 8]
+                    .try_into()
+                    .expect("pos+8 bounds checked above"),
+            ) as usize;
+
+            // Check if we have the full segment
+            if pos + 8 + total_size > file_size {
+                eprintln!(
+                    "Warning: Incomplete update segment {} at offset {} (expected {} bytes, have {})",
+                    segment_index, pos, total_size, file_size - pos - 8
+                );
+                break;
+            }
+
+            // Read header size
+            let header_size = u64::from_le_bytes(
+                self.mmap[pos + 8..pos + 16]
+                    .try_into()
+                    .expect("pos+16 within total_size bounds"),
+            ) as usize;
+
+            // Parse header JSON (may include padding)
+            let header_start = pos + 16;
+            let header_bytes = &self.mmap[header_start..header_start + header_size];
+
+            // Trim trailing zeros (padding)
+            let json_end = header_bytes
+                .iter()
+                .rposition(|&b| b != 0)
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            let header_json_trimmed = &header_bytes[..json_end];
+
+            let update_header: TrbUpdateHeader = match serde_json::from_slice(header_json_trimmed) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Failed to parse update header at segment {}: {}",
+                        segment_index, e
+                    );
+                    pos += 8 + total_size;
+                    segment_index += 1;
+                    continue;
+                }
+            };
+
+            // Calculate blob position and size
+            let blob_start = header_start + header_size;
+            let blob_size = total_size - 8 - header_size - 4;
+            let blob_end = blob_start + blob_size;
+            let crc_end = blob_end + 4;
+
+            // Get blob slice
+            let blob = &self.mmap[blob_start..blob_end];
+
+            // Validate CRC
+            let stored_crc = u32::from_le_bytes(
+                self.mmap[blob_end..crc_end]
+                    .try_into()
+                    .expect("crc_end within total_size bounds"),
+            );
+            let computed_crc = crc32fast::hash(blob);
+
+            if stored_crc != computed_crc {
+                eprintln!(
+                    "Warning: Update segment {} CRC mismatch (stored={:#x}, computed={:#x})",
+                    segment_index, stored_crc, computed_crc
+                );
+                break;
+            }
+
+            updates.push((update_header, blob));
+            pos += 8 + total_size;
+            segment_index += 1;
+        }
+
+        Ok(updates)
+    }
+}
+
+#[cfg(feature = "mmap")]
+impl Drop for MmapTrbReader {
+    fn drop(&mut self) {
+        // File lock is released when _file is dropped
     }
 }
 
@@ -652,7 +1042,11 @@ mod tests {
         drop(writer);
 
         // Corrupt a byte in the base blob (not truncate, just flip a bit)
-        let mut file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
         // Calculate where the blob starts
         file.seek(SeekFrom::Start(4)).unwrap(); // Skip magic
         let mut header_size_bytes = [0u8; 8];
@@ -758,7 +1152,11 @@ mod tests {
         // Layout: total_size(8) + header_size(8) + header_json(padded) + blob + crc(4)
         // Header JSON for "U1" is roughly 80 bytes, padded to 8-byte alignment
         // We'll corrupt a byte well into the blob area (offset 100 into the update segment)
-        let mut file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
 
         // Read the header size to know where blob starts
         file.seek(SeekFrom::Start(base_end)).unwrap();
@@ -788,7 +1186,10 @@ mod tests {
 
         let updates = reader.iter_updates().unwrap();
         // Update 1 CRC fails, chain breaks, update 2 not loaded
-        assert!(updates.is_empty(), "Corrupted update should break the chain");
+        assert!(
+            updates.is_empty(),
+            "Corrupted update should break the chain"
+        );
     }
 
     #[test]
@@ -816,7 +1217,8 @@ mod tests {
         });
         let header_bytes = serde_json::to_vec(&header_json).unwrap();
 
-        file.write_all(&(header_bytes.len() as u64).to_le_bytes()).unwrap();
+        file.write_all(&(header_bytes.len() as u64).to_le_bytes())
+            .unwrap();
         file.write_all(&header_bytes).unwrap();
 
         // Padding
@@ -861,9 +1263,212 @@ mod tests {
 
         // Verify blob starts at 8-byte aligned offset
         let mut reader = TrbReader::open(&path).unwrap();
-        assert_eq!(reader.base_blob_offset % 8, 0, "Base blob should be 8-byte aligned");
+        assert_eq!(
+            reader.base_blob_offset % 8,
+            0,
+            "Base blob should be 8-byte aligned"
+        );
 
         let blob = reader.read_base_blob().unwrap();
         assert_eq!(blob, base_blob);
+    }
+
+    // =========================================================================
+    // Memory-Mapped Reader Tests (mmap feature)
+    // =========================================================================
+
+    #[cfg(feature = "mmap")]
+    mod mmap_tests {
+        use super::*;
+
+        #[test]
+        fn test_mmap_reader_basic() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("model.trb");
+
+            // Create TRB file
+            let base_blob = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+            let header = create_test_header();
+            let writer = TrbWriter::new(&path, header.clone(), &base_blob).unwrap();
+            drop(writer);
+
+            // Open with mmap
+            let reader = MmapTrbReader::open(&path).unwrap();
+
+            // Verify header
+            assert_eq!(reader.header().format_version, FORMAT_VERSION);
+            assert_eq!(reader.header().model_type, "universal");
+            assert_eq!(reader.header().num_features, 10);
+
+            // Verify blob
+            let blob = reader.base_blob_bytes().unwrap();
+            assert_eq!(blob, base_blob.as_slice());
+
+            // Verify mapped size
+            assert!(reader.mapped_size() > 0);
+
+            // Verify alignment
+            assert_eq!(reader.base_blob_offset() % 8, 0);
+        }
+
+        #[test]
+        fn test_mmap_reader_crc_validation() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("model.trb");
+
+            // Create TRB file
+            let base_blob = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+            let header = create_test_header();
+            let writer = TrbWriter::new(&path, header, &base_blob).unwrap();
+            drop(writer);
+
+            // Corrupt the blob
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            file.seek(SeekFrom::Start(4)).unwrap();
+            let mut header_size_bytes = [0u8; 8];
+            file.read_exact(&mut header_size_bytes).unwrap();
+            let header_size = u64::from_le_bytes(header_size_bytes) as usize;
+            let current_pos = 4 + 8 + header_size;
+            let padding = alignment_padding(current_pos);
+            let blob_offset = current_pos + padding;
+
+            file.seek(SeekFrom::Start(blob_offset as u64)).unwrap();
+            let mut byte = [0u8; 1];
+            file.read_exact(&mut byte).unwrap();
+            byte[0] ^= 0xFF;
+            file.seek(SeekFrom::Start(blob_offset as u64)).unwrap();
+            file.write_all(&byte).unwrap();
+            drop(file);
+
+            // Try to read with mmap - should detect CRC mismatch
+            let reader = MmapTrbReader::open(&path).unwrap();
+            let result = reader.base_blob_bytes();
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("CRC mismatch"));
+        }
+
+        #[test]
+        fn test_mmap_reader_with_updates() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("model.trb");
+
+            // Create base
+            let base_blob = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+            let header = create_test_header();
+            let writer = TrbWriter::new(&path, header, &base_blob).unwrap();
+            drop(writer);
+
+            // Add updates
+            for i in 0..3 {
+                let mut writer = open_for_append(&path).unwrap();
+                let update_header = TrbUpdateHeader {
+                    update_type: UpdateType::Trees,
+                    created_at: current_timestamp(),
+                    rows_trained: (i + 1) * 100,
+                    description: format!("Update {}", i + 1),
+                };
+                let update_blob = vec![(i + 10) as u8; 16];
+                writer.append_update(&update_header, &update_blob).unwrap();
+                drop(writer);
+            }
+
+            // Read with mmap
+            let reader = MmapTrbReader::open(&path).unwrap();
+
+            // Verify base
+            let blob = reader.base_blob_bytes().unwrap();
+            assert_eq!(blob, base_blob.as_slice());
+
+            // Verify updates (zero-copy slices)
+            let updates = reader.iter_updates().unwrap();
+            assert_eq!(updates.len(), 3);
+
+            for (i, (header, blob)) in updates.iter().enumerate() {
+                assert_eq!(header.update_type, UpdateType::Trees);
+                assert_eq!(header.rows_trained, (i + 1) * 100);
+                assert_eq!(blob.len(), 16);
+                assert_eq!(blob[0], (i + 10) as u8);
+            }
+        }
+
+        #[test]
+        fn test_mmap_reader_invalid_magic() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("bad.trb");
+
+            // Write invalid file
+            std::fs::write(&path, b"BAD!invalid data").unwrap();
+
+            // Should fail with magic error
+            let result = MmapTrbReader::open(&path);
+            assert!(result.is_err());
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid TRB magic"));
+        }
+
+        #[test]
+        fn test_mmap_reader_truncated_file() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("truncated.trb");
+
+            // Write just magic (truncated)
+            std::fs::write(&path, TRB_MAGIC).unwrap();
+
+            // Should fail
+            let result = MmapTrbReader::open(&path);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("too small"));
+        }
+
+        #[test]
+        fn test_mmap_vs_standard_reader_equivalence() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("model.trb");
+
+            // Create TRB file with base + updates
+            let base_blob = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+            let header = create_test_header();
+            let writer = TrbWriter::new(&path, header, &base_blob).unwrap();
+            drop(writer);
+
+            let mut writer = open_for_append(&path).unwrap();
+            let update_header = TrbUpdateHeader {
+                update_type: UpdateType::Trees,
+                created_at: current_timestamp(),
+                rows_trained: 500,
+                description: "Test update".to_string(),
+            };
+            let update_blob = vec![20u8; 32];
+            writer.append_update(&update_header, &update_blob).unwrap();
+            drop(writer);
+
+            // Read with standard reader
+            let mut std_reader = TrbReader::open(&path).unwrap();
+            let std_base = std_reader.read_base_blob().unwrap();
+            let std_updates = std_reader.iter_updates().unwrap();
+
+            // Read with mmap reader
+            let mmap_reader = MmapTrbReader::open(&path).unwrap();
+            let mmap_base = mmap_reader.base_blob_bytes().unwrap();
+            let mmap_updates = mmap_reader.iter_updates().unwrap();
+
+            // Verify equivalence
+            assert_eq!(std_base, mmap_base);
+            assert_eq!(std_updates.len(), mmap_updates.len());
+
+            for ((std_hdr, std_blob), (mmap_hdr, mmap_blob)) in
+                std_updates.iter().zip(mmap_updates.iter())
+            {
+                assert_eq!(std_hdr.update_type, mmap_hdr.update_type);
+                assert_eq!(std_hdr.rows_trained, mmap_hdr.rows_trained);
+                assert_eq!(std_blob.as_slice(), *mmap_blob);
+            }
+        }
     }
 }

@@ -26,6 +26,7 @@ default = []
 python = ["dep:pyo3", "dep:numpy"]
 gpu = ["dep:wgpu", "dep:pollster"]
 cuda = ["dep:cudarc"]
+mmap = ["dep:memmap2"]
 
 [[bin]]
 name = "treeboost"
@@ -105,6 +106,9 @@ cudarc = { version = "=0.18.2", optional = true, default-features = false, featu
   "dynamic-linking",
   "cuda-version-from-build-system",
 ] }
+
+# Memory-mapped file I/O (optional - for mmap feature)
+memmap2 = { version = "0.9", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

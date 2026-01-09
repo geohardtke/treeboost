@@ -122,9 +122,8 @@ fn test_autotuner_generate_param_values() {
 
 #[test]
 fn test_autotuner_generate_cartesian_grid() {
-    let tuner =
-        AutoTuner::<GBDTModel>::new(GBDTConfig::default())
-            .with_space(ParameterSpace::with_preset(SpacePreset::Minimal));
+    let tuner = AutoTuner::<GBDTModel>::new(GBDTConfig::default())
+        .with_space(ParameterSpace::with_preset(SpacePreset::Minimal));
 
     let grid = tuner.generate_cartesian_grid(0.5, 3);
     // 2 parameters, 3 points each = 9 candidates

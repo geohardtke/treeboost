@@ -53,7 +53,8 @@ mod tracker;
 
 pub use detector::{AlertLevel, ShiftDetector, ShiftResult};
 pub use incremental::{
-    check_drift, DriftHistory, DriftRecommendation, IncrementalDriftDetector, IncrementalDriftResult,
+    check_drift, DriftHistory, DriftRecommendation, IncrementalDriftDetector,
+    IncrementalDriftResult,
 };
 pub use metrics::{DistributionMetric, JensenShannon, KolmogorovSmirnov, PSI};
 pub use tracker::{CVHoldoutTracker, GapRecord, Trend};

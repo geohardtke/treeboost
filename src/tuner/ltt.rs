@@ -828,8 +828,7 @@ impl LttTuner {
 
         let candidates = self.config.shrinkage_factor_values.clone();
 
-        let (train_binned, val_binned, feature_info) =
-            Self::build_probe_binned_datasets(split);
+        let (train_binned, val_binned, feature_info) = Self::build_probe_binned_datasets(split);
 
         struct ShrinkageScore {
             shrinkage: f32,

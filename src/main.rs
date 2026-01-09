@@ -569,10 +569,7 @@ fn main() -> Result<()> {
                 println!("  Model type: {}", header.model_type);
                 println!("  Boosting mode: {}", header.boosting_mode);
                 println!("  Number of features: {}", header.num_features);
-                println!(
-                    "  Created: {}",
-                    format_timestamp(header.created_at)
-                );
+                println!("  Created: {}", format_timestamp(header.created_at));
                 if !header.metadata.is_empty() {
                     println!("  Description: {}", header.metadata);
                 }
@@ -690,7 +687,9 @@ fn main() -> Result<()> {
                     "Error: Update command requires .trb format. Got: {:?}",
                     model
                 );
-                eprintln!("Hint: Train with .trb extension: treeboost train ... --output model.trb");
+                eprintln!(
+                    "Hint: Train with .trb extension: treeboost train ... --output model.trb"
+                );
                 return Err(treeboost::TreeBoostError::Config(
                     "Update requires .trb format".to_string(),
                 ));
@@ -746,7 +745,10 @@ fn main() -> Result<()> {
             auto_model.save_trb_update(&model, report.rows_trained, &update_desc)?;
 
             println!("Update saved successfully.");
-            println!("  Model now has {} trees (was {})", report.trees_after, report.trees_before);
+            println!(
+                "  Model now has {} trees (was {})",
+                report.trees_after, report.trees_before
+            );
 
             Ok(())
         }

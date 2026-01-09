@@ -450,6 +450,48 @@ cd treeboost
 pip install maturin && maturin develop --release
 ```
 
+### Feature Flags
+
+| Feature | Description | Use Case |
+|---------|-------------|----------|
+| `gpu` | WGPU backend (Vulkan/Metal/DX12) | All GPUs, portable |
+| `cuda` | NVIDIA CUDA backend | 2x+ faster than WGPU on NVIDIA |
+| `mmap` | Memory-mapped TRB loading | Instant model load, zero-copy I/O |
+| `python` | PyO3 bindings | Python interop |
+
+**Enable features:**
+
+```bash
+# GPU acceleration
+cargo build --release --features gpu
+
+# CUDA (NVIDIA only, requires CUDA 12.x)
+cargo build --release --features cuda
+
+# Memory-mapped model loading (instant load for large models)
+cargo build --release --features mmap
+```
+
+**Memory-mapped loading (`mmap` feature):**
+
+For large models (100MB+), `mmap` provides true zero-copy I/O:
+
+```rust
+#[cfg(feature = "mmap")]
+{
+    use treeboost::serialize::MmapTrbReader;
+
+    // Instant load - OS pages data lazily, no heap allocation
+    let reader = MmapTrbReader::open("model.trb")?;
+    let model = reader.load_model()?;  // Still faster than TrbReader
+}
+```
+
+| Reader | Load Time | Memory | Use Case |
+|--------|-----------|--------|----------|
+| `TrbReader` | O(model_size) | O(model_size) | Default, works everywhere |
+| `MmapTrbReader` | O(1) | O(1) initial | Large models, inference servers |
+
 ## More Examples
 
 ### Rust: Train, Save Config, and Save Model

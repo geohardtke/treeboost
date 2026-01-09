@@ -283,7 +283,6 @@ impl ParameterSpace {
         }
     }
 
-
     /// Create an exhaustive search space (adds GOSS and colsample).
     pub fn exhaustive() -> Self {
         Self {
@@ -299,7 +298,6 @@ impl ParameterSpace {
             ],
         }
     }
-
 
     /// Create search space for UniversalModel focusing on mode selection only
     ///
@@ -1564,8 +1562,8 @@ mod tests {
 
     #[test]
     fn test_parameter_space_without_param() {
-        let space = ParameterSpace::with_preset(SpacePreset::Regression)
-            .without_param("entropy_weight");
+        let space =
+            ParameterSpace::with_preset(SpacePreset::Regression).without_param("entropy_weight");
 
         assert_eq!(space.len(), 4);
         assert!(space.get("entropy_weight").is_none());

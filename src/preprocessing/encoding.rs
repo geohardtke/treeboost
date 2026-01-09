@@ -670,7 +670,9 @@ impl OneHotEncoder {
     /// # Returns
     /// Always returns `Err(TreeBoostError::Config)` with explanation
     pub fn partial_fit(&mut self, _categories: &[&str]) -> Result<()> {
-        Err(crate::preprocessing::incremental::not_supported_error("OneHotEncoder"))
+        Err(crate::preprocessing::incremental::not_supported_error(
+            "OneHotEncoder",
+        ))
     }
 }
 
