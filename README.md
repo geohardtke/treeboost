@@ -98,6 +98,22 @@ model.save_trb("model.trb", "initial training")?;
 
 The actual file includes the full set of tree/linear fields so you can tweak every detail.
 
+## Inference (Simple and Fast)
+
+```rust
+use treeboost::UniversalModel;
+use treeboost::dataset::DatasetLoader;
+
+// Use either a static model (.rkyv) or incremental model (.trb)
+let model = UniversalModel::load("model.rkyv")?;
+// let model = UniversalModel::load_trb("model.trb")?;
+
+let loader = DatasetLoader::new(255);
+let dataset = loader.load_parquet("new_data.parquet", "target", None)?;
+
+let predictions = model.predict(&dataset);
+```
+
 ## Quick Start (UniversalModel)
 
 ```rust
@@ -189,6 +205,9 @@ treeboost train --data data.csv --target price --output model.rkyv
 
 # Predict
 treeboost predict --model model.rkyv --data test.csv --output predictions.json
+
+# Predict (.trb)
+treeboost predict --model model.trb --data test.csv --output predictions.json
 ```
 
 Run `treeboost --help` for full options.
