@@ -420,13 +420,36 @@ impl GBDTModel {
     /// with different hyperparameters on the same binned dataset).
     ///
     /// For most use cases, prefer `train()` which handles binning automatically.
-    pub fn train_binned(dataset: &BinnedDataset, config: GBDTConfig) -> Result<Self> {
+    pub fn train_binned(dataset: &BinnedDataset, mut config: GBDTConfig) -> Result<Self> {
         // Dispatch to multi-class training if using multi-class loss
         if let Some(num_classes) = config.loss_type.num_classes() {
             return Self::train_binned_multiclass(dataset, config, num_classes);
         }
 
         config.validate().map_err(TreeBoostError::Config)?;
+
+        // CRITICAL: Resolve BackendType::Auto to concrete backend ONCE based on full dataset
+        // This prevents mixing CPU/GPU during train/val splits (bad for accuracy)
+        if matches!(config.backend_type, crate::backend::BackendType::Auto) {
+            let resolved = crate::backend::BackendSelector::with_config(
+                crate::backend::BackendConfig {
+                    preferred: crate::backend::BackendType::Auto,
+                    ..Default::default()
+                },
+            )
+            .select(dataset.num_rows());
+
+            // Update config with resolved backend (CUDA/WGPU/Scalar/etc)
+            let resolved_type = match resolved.name() {
+                "CUDA" => crate::backend::BackendType::Cuda,
+                "WGPU" => crate::backend::BackendType::Wgpu,
+                "Scalar (AVX2)" | "Scalar (NEON)" | "Scalar" => {
+                    crate::backend::BackendType::Scalar
+                }
+                _ => crate::backend::BackendType::Scalar, // Fallback
+            };
+            config.backend_type = resolved_type;
+        }
 
         let loss_fn = config.loss_type.create();
         let targets = dataset.targets();
@@ -791,9 +814,32 @@ impl GBDTModel {
         train_dataset: &BinnedDataset,
         val_dataset: &BinnedDataset,
         val_targets: &[f32],
-        config: GBDTConfig,
+        mut config: GBDTConfig,
     ) -> Result<Self> {
         config.validate().map_err(TreeBoostError::Config)?;
+
+        // CRITICAL: Resolve BackendType::Auto to concrete backend ONCE based on full dataset
+        // This prevents mixing CPU/GPU during train/val splits (bad for accuracy)
+        if matches!(config.backend_type, crate::backend::BackendType::Auto) {
+            let resolved = crate::backend::BackendSelector::with_config(
+                crate::backend::BackendConfig {
+                    preferred: crate::backend::BackendType::Auto,
+                    ..Default::default()
+                },
+            )
+            .select(train_dataset.num_rows());
+
+            // Update config with resolved backend (CUDA/WGPU/Scalar/etc)
+            let resolved_type = match resolved.name() {
+                "CUDA" => crate::backend::BackendType::Cuda,
+                "WGPU" => crate::backend::BackendType::Wgpu,
+                "Scalar (AVX2)" | "Scalar (NEON)" | "Scalar" => {
+                    crate::backend::BackendType::Scalar
+                }
+                _ => crate::backend::BackendType::Scalar, // Fallback
+            };
+            config.backend_type = resolved_type;
+        }
 
         let loss_fn = config.loss_type.create();
         let targets = train_dataset.targets();
@@ -838,6 +884,10 @@ impl GBDTModel {
             .with_backend(config.backend_type)
             .with_gpu_subgroups(config.use_gpu_subgroups)
             .with_era_splitting(config.era_splitting);
+
+        // CRITICAL: Initialize backend with FULL dataset size before any training
+        // This ensures consistent backend (CUDA/GPU/CPU) throughout, no mixing!
+        tree_grower.init_backend(train_dataset.num_rows());
 
         let mut trees = Vec::with_capacity(config.num_rounds);
         let mut rng = rand::rngs::StdRng::seed_from_u64(config.seed);

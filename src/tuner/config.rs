@@ -1079,9 +1079,11 @@ pub struct TunerConfig {
     /// Use `tune()` for optimistic mode (pre-encoded BinnedDataset).
     /// Use `tune_dataframe()` for realistic mode (raw DataFrame + encoding config).
     pub tuning_mode: TuningMode,
-    /// Enable parallel trial evaluation (for CPU backends)
+    /// Enable parallel trial evaluation (for CPU backends only)
     ///
-    /// GPU backends always run sequentially to avoid contention.
+    /// When enabled, CPU-based trials are evaluated concurrently using Rayon.
+    /// GPU backends always run sequentially to avoid CUDA context contention.
+    /// Since GPU trials are fast (~1-2s each), sequential execution is acceptable.
     pub parallel_trials: bool,
     /// Maximum number of parallel trials (0 = auto)
     pub n_parallel: usize,
@@ -1181,7 +1183,7 @@ impl Default for TunerConfig {
                 folds: 1,
             },
             tuning_mode: TuningMode::Optimistic, // Fast by default (for backwards compat)
-            parallel_trials: false,              // Conservative default (GPU contention)
+            parallel_trials: true,               // Enable parallel trials by default
             n_parallel: 0,                       // Auto-detect
             num_rounds: tuner_defaults::DEFAULT_TUNER_ROUNDS, // Rounds per trial
 

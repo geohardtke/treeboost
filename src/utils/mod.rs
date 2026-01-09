@@ -5,6 +5,7 @@
 //!
 //! # Feature Engineering Utilities
 //! - `apply_timeseries_features` - Generate lag, rolling, EWMA features for panel data
+//! - `apply_crosssectional_features` - Generate rank/zscore for panel data (critical for Rank IC)
 //! - `apply_polynomial_features` - Generate x², x³, √x, log(x+1) transformations
 //! - `apply_ratio_features` - Generate ratio features (x_i / x_j)
 //! - `apply_interaction_features` - Generate interaction features (x_i × x_j, etc.)
@@ -24,6 +25,7 @@ pub mod preprocessing;
 
 // Re-export feature application utilities for convenience
 pub use features::{
+    apply_crosssectional_features, apply_crosssectional_features_selective,
     apply_interaction_features, apply_polynomial_features, apply_ratio_features,
     apply_timeseries_features, extract_selected_features,
 };

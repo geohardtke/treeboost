@@ -5,12 +5,10 @@
 
 use crate::analysis::PanelDataInfo;
 use crate::features::{
-    FeatureGenerator, InteractionGenerator, PolynomialGenerator, RatioGenerator,
-    TimeSeriesFeaturePlan,
+    FeatureGenerator, GroupedTimeSeriesConfig, GroupedTimeSeriesGenerator, InteractionGenerator,
+    NaNStrategy, PolynomialGenerator, RatioGenerator, TimeSeriesFeaturePlan,
 };
-use crate::preprocessing::{
-    polars_ext::is_numeric, GroupedTimeSeriesConfig, GroupedTimeSeriesGenerator, NaNStrategy,
-};
+use crate::preprocessing::polars_ext::is_numeric;
 use crate::Result;
 use polars::prelude::*;
 use std::collections::HashMap;
@@ -163,8 +161,9 @@ pub fn apply_timeseries_features(
         GroupedTimeSeriesConfig {
             lag_periods: vec![1, 7],
             rolling_windows: vec![7],
-            rolling_stats: vec![crate::preprocessing::RollingStat::Mean],
+            rolling_stats: vec![crate::features::RollingStat::Mean],
             ewma_alphas: vec![0.1],
+            momentum_periods: vec![1, 7],
             nan_strategy: NaNStrategy::Keep,
             min_periods: 1,
         }
@@ -175,6 +174,7 @@ pub fn apply_timeseries_features(
             rolling_windows: ts_plan.rolling_windows.clone(),
             rolling_stats: ts_plan.rolling_stats.clone(),
             ewma_alphas: ts_plan.ewma_alphas.clone(),
+            momentum_periods: ts_plan.momentum_periods.clone(),
             nan_strategy: NaNStrategy::Keep,
             min_periods: 1,
         }
@@ -641,4 +641,68 @@ mod tests {
         let col_names: Vec<String> = result.get_column_names().iter().map(|s| s.to_string()).collect();
         assert!(col_names.contains(&"a_mul_b".to_string()));
     }
+}
+
+/// Apply cross-sectional ranking features to panel data
+///
+/// Transforms numeric features to be relative to their cross-section (e.g., all stocks on same date).
+/// Critical for ranking models where relative position matters (Rank IC).
+///
+/// # Arguments
+///
+/// * `df` - Input DataFrame with panel data
+/// * `group_col` - Column defining cross-sections (e.g., "date")
+/// * `exclude_cols` - Columns to exclude (IDs, targets)
+///
+/// # Transformations
+///
+/// For each numeric column, generates:
+/// - `{col}_rank`: Percentile rank [0, 1]
+/// - `{col}_zscore`: Standardized value within cross-section
+/// - `{col}_vs_median`: Distance from cross-sectional median
+///
+/// # Example
+///
+/// ```ignore
+/// let df = apply_crosssectional_features(&df, "date", &["code", "date", "y"])?;
+/// ```
+pub fn apply_crosssectional_features(
+    df: &DataFrame,
+    group_col: &str,
+    exclude_cols: &[&str],
+) -> Result<DataFrame> {
+    crate::features::crosssectional::apply_crosssectional_features(df, group_col, exclude_cols)
+        .map_err(|e| crate::TreeBoostError::Data(e.to_string()))
+}
+
+/// Apply cross-sectional features to specific columns only
+///
+/// Same as `apply_crosssectional_features` but allows specifying which columns to include.
+/// Useful when you only want cross-sectional features for original features, not derived ones.
+///
+/// # Example
+///
+/// ```ignore
+/// // Only apply to original features f_0-f_6, not to lag/rolling features
+/// let original_features = vec!["f_0", "f_1", "f_2", "f_3", "f_4", "f_5", "f_6"];
+/// let df = apply_crosssectional_features_selective(
+///     &df,
+///     "date",
+///     &["code", "date", "y"],
+///     Some(&original_features),
+/// )?;
+/// ```
+pub fn apply_crosssectional_features_selective(
+    df: &DataFrame,
+    group_col: &str,
+    exclude_cols: &[&str],
+    include_cols: Option<&[&str]>,
+) -> Result<DataFrame> {
+    crate::features::crosssectional::apply_crosssectional_features_with_include(
+        df,
+        group_col,
+        exclude_cols,
+        include_cols,
+    )
+    .map_err(|e| crate::TreeBoostError::Data(e.to_string()))
 }

@@ -134,6 +134,12 @@ pub struct AutoConfig {
 
     /// Optional ensemble configuration (PureTree only)
     pub ensemble: Option<AutoEnsembleConfig>,
+
+    /// Custom tree tuner configuration (overrides tuning_level for tree-based modes)
+    pub tree_tuner_config: Option<TreeTunerConfig>,
+
+    /// Backend type for computation (Auto, Cuda, Wgpu, Scalar, etc.)
+    pub backend_type: crate::backend::BackendType,
 }
 
 impl Clone for AutoConfig {
@@ -153,6 +159,8 @@ impl Clone for AutoConfig {
             linear_feature_config: self.linear_feature_config.clone(),
             custom_config: self.custom_config.clone(),
             ensemble: self.ensemble.clone(),
+            tree_tuner_config: self.tree_tuner_config.clone(),
+            backend_type: self.backend_type,
         }
     }
 }
@@ -173,6 +181,8 @@ impl std::fmt::Debug for AutoConfig {
             .field("progress_callback", &"<callback>")
             .field("linear_feature_config", &self.linear_feature_config)
             .field("ensemble", &self.ensemble)
+            .field("tree_tuner_config", &self.tree_tuner_config)
+            .field("backend_type", &self.backend_type)
             .finish()
     }
 }
@@ -194,6 +204,8 @@ impl Default for AutoConfig {
             linear_feature_config: LinearFeatureConfig::default(),
             custom_config: None,
             ensemble: None,
+            tree_tuner_config: None,
+            backend_type: crate::backend::BackendType::Auto,
         }
     }
 }
@@ -271,6 +283,14 @@ impl AutoConfig {
         self
     }
 
+    /// Set backend type for computation
+    ///
+    /// Use BackendType::Auto (default) for automatic detection: CUDA > WGPU > Scalar
+    pub fn with_backend(mut self, backend_type: crate::backend::BackendType) -> Self {
+        self.backend_type = backend_type;
+        self
+    }
+
     /// Set time budget for training
     ///
     /// AutoBuilder will adapt tuning intensity to fit within this budget.
@@ -336,6 +356,38 @@ impl AutoConfig {
         self.custom_config = Some(config);
         self
     }
+
+    /// Set custom tree tuner configuration (overrides tuning_level for tree-based modes)
+    ///
+    /// Use this to provide custom hyperparameter search configuration for PureTree
+    /// and RandomForest modes. This allows fine-grained control over the number of
+    /// samples, iterations, depth ranges, and other tuning parameters.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use treeboost::model::{AutoConfig, TreeTunerConfig};
+    /// use treeboost::defaults::auto as auto_defaults;
+    ///
+    /// let custom_tuner = TreeTunerConfig {
+    ///     max_depth_range: (3, 8),
+    ///     learning_rate_range: auto_defaults::STANDARD_LR_RANGE,
+    ///     n_samples: 50,
+    ///     n_iterations: 1,
+    ///     max_rounds: 200,
+    ///     early_stopping_rounds: 10,
+    ///     validation_ratio: 0.2,
+    ///     improvement_threshold: 0.001,
+    ///     min_f1_score: 0.85,
+    /// };
+    ///
+    /// let config = AutoConfig::new()
+    ///     .with_tree_tuner_config(custom_tuner);
+    /// ```
+    pub fn with_tree_tuner_config(mut self, config: TreeTunerConfig) -> Self {
+        self.tree_tuner_config = Some(config);
+        self
+    }
 }
 
 /// Tuning result for tree-based models (PureTree, RandomForest)
@@ -370,6 +422,8 @@ pub struct TreeTunerConfig {
     pub improvement_threshold: f32,
     /// Minimum F1 score required before stopping
     pub min_f1_score: f32,
+    /// Optional output directory for CSV logging (None = no logging)
+    pub output_dir: Option<std::path::PathBuf>,
 }
 
 /// Presets for tree tuner configuration.
@@ -388,13 +442,14 @@ impl TreeTunerConfig {
         Self {
             max_depth_range: auto_defaults::QUICK_DEPTH_RANGE,
             learning_rate_range: auto_defaults::QUICK_LR_RANGE,
-            n_samples: 10, // Reduced from 30 for faster testing
+            n_samples: 30, // Default for Quick preset
             n_iterations: 1,
             max_rounds: 100,
             early_stopping_rounds: 10,
             validation_ratio: auto_defaults::DEFAULT_VALIDATION_RATIO,
             improvement_threshold: 0.001,
             min_f1_score: 0.80,
+            output_dir: None,
         }
     }
 
@@ -409,6 +464,7 @@ impl TreeTunerConfig {
             validation_ratio: auto_defaults::DEFAULT_VALIDATION_RATIO,
             improvement_threshold: 0.001,
             min_f1_score: 0.85,
+            output_dir: None,
         }
     }
 
@@ -423,6 +479,7 @@ impl TreeTunerConfig {
             validation_ratio: auto_defaults::DEFAULT_VALIDATION_RATIO,
             improvement_threshold: 0.001,
             min_f1_score: 0.85,
+            output_dir: None,
         }
     }
 

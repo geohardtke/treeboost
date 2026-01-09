@@ -309,6 +309,8 @@ impl<M: TunableModel> AutoTuner<M> {
             .map_err(|e| TreeBoostError::Config(format!("Invalid tuner configuration: {}", e)))?;
 
         let total_trials = self.config.estimated_trials();
+        // For GPU backends, run sequentially to avoid CUDA context contention
+        // GPU trials are fast (~1-2s each), so sequential is fine
         let use_parallel = self.config.parallel_trials && !self.is_gpu_backend();
 
         if self.config.verbose {
@@ -319,11 +321,14 @@ impl<M: TunableModel> AutoTuner<M> {
             println!("  Grid strategy: {:?}", self.config.grid_strategy);
             println!("  Eval strategy: {:?}", self.config.eval_strategy);
             println!("  Tuning mode: {:?}", self.config.tuning_mode);
-            println!(
-                "  Parallel: {} (gpu: {})",
-                if use_parallel { "enabled" } else { "disabled" },
-                if self.is_gpu_backend() { "yes" } else { "no" }
-            );
+            let parallel_reason = if self.is_gpu_backend() {
+                "disabled (GPU: sequential trials avoid context contention)"
+            } else if use_parallel {
+                "enabled (CPU: parallel trials for faster tuning)"
+            } else {
+                "disabled by config"
+            };
+            println!("  Parallel: {}", parallel_reason);
         }
 
         let current_trial = AtomicUsize::new(0);
@@ -629,6 +634,8 @@ impl<M: TunableModel> AutoTuner<M> {
             .map_err(|e| TreeBoostError::Config(format!("Invalid tuner configuration: {}", e)))?;
 
         let total_trials = self.config.estimated_trials();
+        // For GPU backends, run sequentially to avoid CUDA context contention
+        // GPU trials are fast (~1-2s each), so sequential is fine
         let use_parallel = self.config.parallel_trials && !self.is_gpu_backend();
 
         // Parallel not supported in realistic mode (encoding is stateful)
@@ -642,11 +649,14 @@ impl<M: TunableModel> AutoTuner<M> {
             println!("  Grid strategy: {:?}", self.config.grid_strategy);
             println!("  Eval strategy: {:?}", self.config.eval_strategy);
             println!("  Tuning mode: {:?}", self.config.tuning_mode);
-            println!(
-                "  Parallel: {} (gpu: {})",
-                if use_parallel { "enabled" } else { "disabled" },
-                if self.is_gpu_backend() { "yes" } else { "no" }
-            );
+            let parallel_reason = if self.is_gpu_backend() {
+                "disabled (GPU: sequential trials avoid context contention)"
+            } else if use_parallel {
+                "enabled (CPU: parallel trials for faster tuning)"
+            } else {
+                "disabled by config"
+            };
+            println!("  Parallel: {}", parallel_reason);
         }
 
         let current_trial = AtomicUsize::new(0);
@@ -1843,8 +1853,9 @@ impl<M: TunableModel> AutoTuner<M> {
 
     /// Evaluate candidates using parallel or sequential strategy
     ///
-    /// For CPU backends, uses Rayon for parallel evaluation.
-    /// For GPU backends, evaluates sequentially to avoid contention.
+    /// For CPU backends: Uses Rayon for parallel evaluation (faster tuning).
+    /// For GPU backends: Runs sequentially to avoid CUDA context contention.
+    /// GPU trials are fast individually (~1-2s), so sequential is acceptable.
     ///
     /// If a logger is provided, results are written immediately after each trial.
     fn evaluate_candidates(
@@ -1856,7 +1867,7 @@ impl<M: TunableModel> AutoTuner<M> {
         total_trials: usize,
         logger: Option<&SharedLogger>,
     ) -> Vec<TrialResult> {
-        let use_parallel = self.config.parallel_trials && !self.is_gpu_backend();
+        let use_parallel = self.config.parallel_trials;
 
         if use_parallel {
             let results = Mutex::new(Vec::with_capacity(candidates.len()));
@@ -1901,7 +1912,7 @@ impl<M: TunableModel> AutoTuner<M> {
 
             results.into_inner().unwrap()
         } else {
-            // Sequential evaluation for GPU backends or when parallel disabled
+            // Sequential evaluation (GPU backends or parallel disabled)
             let mut results = Vec::with_capacity(candidates.len());
 
             for params in candidates {

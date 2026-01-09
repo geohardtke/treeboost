@@ -93,16 +93,20 @@ fn tune_tree_model(
         println!("  [Tuning] Running AutoTuner for {:?} mode...", mode);
     }
 
-    // Get tuning configuration based on tuning level
-    let tuner_cfg = match config.tuning_level {
-        TuningLevel::Quick => TreeTunerConfig::with_preset(crate::model::TreeTunerPreset::Quick),
-        TuningLevel::Standard => {
-            TreeTunerConfig::with_preset(crate::model::TreeTunerPreset::Standard)
+    // Get tuning configuration - use custom config if provided, otherwise use preset
+    let tuner_cfg = if let Some(custom_cfg) = &config.tree_tuner_config {
+        custom_cfg.clone()
+    } else {
+        match config.tuning_level {
+            TuningLevel::Quick => TreeTunerConfig::with_preset(crate::model::TreeTunerPreset::Quick),
+            TuningLevel::Standard => {
+                TreeTunerConfig::with_preset(crate::model::TreeTunerPreset::Standard)
+            }
+            TuningLevel::Thorough => {
+                TreeTunerConfig::with_preset(crate::model::TreeTunerPreset::Thorough)
+            }
+            TuningLevel::None => return Ok((UniversalConfig::default().with_mode(mode), None)),
         }
-        TuningLevel::Thorough => {
-            TreeTunerConfig::with_preset(crate::model::TreeTunerPreset::Thorough)
-        }
-        TuningLevel::None => return Ok((UniversalConfig::default().with_mode(mode), None)),
     };
 
     // Define parameter space from config
@@ -124,25 +128,48 @@ fn tune_tree_model(
         .with_param("lambda", ParamBounds::continuous(0.1, 5.0), 1.0)
         .with_param("entropy_weight", ParamBounds::continuous(0.0, 0.3), 0.1);
 
+    // Resolve backend ONCE before tuning (don't re-resolve per trial)
+    use crate::backend::{BackendSelector, BackendConfig, BackendType};
+    let backend_type = if matches!(config.backend_type, BackendType::Auto) {
+        let resolved = BackendSelector::with_config(BackendConfig {
+            preferred: BackendType::Auto,
+            ..Default::default()
+        })
+        .select(dataset.num_rows());
+
+        // Convert backend name to BackendType
+        match resolved.name() {
+            "CUDA" => BackendType::Cuda,
+            "WGPU" => BackendType::Wgpu,
+            "Scalar (AVX2)" | "Scalar (NEON)" | "Scalar" => BackendType::Scalar,
+            _ => BackendType::Scalar,
+        }
+    } else {
+        config.backend_type
+    };
+
     // Base config for tuning - select loss function based on task type
     use crate::booster::GBDTConfig;
     let base_config = match &profile.task_type {
         TaskType::Regression => GBDTConfig::new()
             .with_mse_loss()
             .with_min_samples_leaf(5)
-            .with_seed(42),
+            .with_seed(42)
+            .with_backend(backend_type),
         TaskType::BinaryClassification => GBDTConfig::new()
             .with_binary_logloss()
             .with_min_samples_leaf(5)
-            .with_seed(42),
+            .with_seed(42)
+            .with_backend(backend_type),
         TaskType::MultiClassification { num_classes } => GBDTConfig::new()
             .with_multiclass_logloss(*num_classes)
             .with_min_samples_leaf(5)
-            .with_seed(42),
+            .with_seed(42)
+            .with_backend(backend_type),
     };
 
     // Configure tuner using TreeTunerConfig
-    let tuner_config = TunerConfig::new()
+    let mut tuner_config = TunerConfig::new()
         .with_iterations(tuner_cfg.n_iterations)
         .with_grid_strategy(GridStrategy::LatinHypercube {
             n_samples: tuner_cfg.n_samples,
@@ -154,6 +181,11 @@ fn tune_tree_model(
         .with_improvement_threshold(tuner_cfg.improvement_threshold)
         .with_min_f1_score(tuner_cfg.min_f1_score)
         .with_verbose(false); // Quiet internal logging
+
+    // Enable CSV logging if output_dir is specified
+    if let Some(ref dir) = tuner_cfg.output_dir {
+        tuner_config = tuner_config.with_output_dir(dir);
+    }
 
     let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
         .with_config(tuner_config)
@@ -178,7 +210,8 @@ fn tune_tree_model(
         .with_num_rounds(best_gbdt_config.num_rounds)
         .with_learning_rate(best_gbdt_config.learning_rate)
         .with_subsample(best_gbdt_config.subsample)
-        .with_tree_config(tree_config);
+        .with_tree_config(tree_config)
+        .with_backend(best_gbdt_config.backend_type); // Preserve backend type from tuning!
 
     // Extract tuning results
     let tuning_result = history.best().map(|best| TreeTuningResult {

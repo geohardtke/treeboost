@@ -625,6 +625,7 @@ impl AutoBuilder {
         };
 
         // Train UniversalModel (handles both single and ensemble internally)
+        let max_rounds = final_config.num_rounds; // Save before moving
         let model = self.train_model(
             &dataset,
             final_config,
@@ -635,7 +636,20 @@ impl AutoBuilder {
         phase_times.training = phase_start.elapsed();
 
         if self.config.verbose {
+            let num_trees = model.num_trees();
+            let stopped_early = num_trees < max_rounds;
+
             println!("  [Train] Model trained in {:?}", phase_times.training);
+            println!(
+                "  [Train] Trees: {}/{} {}",
+                num_trees,
+                max_rounds,
+                if stopped_early {
+                    "(early stopped)"
+                } else {
+                    "(full rounds)"
+                }
+            );
         }
 
         // Emit completion progress

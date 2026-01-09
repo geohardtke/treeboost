@@ -412,6 +412,18 @@ impl TreeGrower {
         self.era_splitting
     }
 
+    /// Pre-initialize backend with full dataset size
+    ///
+    /// CRITICAL: Call this BEFORE any training to select backend based on full dataset,
+    /// not on train/validation split sizes. This ensures consistent backend usage
+    /// throughout training (no mixing CPU/GPU which hurts accuracy).
+    ///
+    /// # Arguments
+    /// * `full_dataset_rows` - Total rows in the FULL dataset (before any splits)
+    pub fn init_backend(&self, full_dataset_rows: usize) {
+        self.ensure_backend(full_dataset_rows);
+    }
+
     /// Initialize backend (called once at start of tree growing)
     fn ensure_backend(&self, num_rows: usize) {
         let mut cached = self.cached_backend.borrow_mut();

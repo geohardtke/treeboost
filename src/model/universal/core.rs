@@ -471,6 +471,7 @@ impl UniversalModel {
             .with_lambda(config.tree_config.lambda)
             .with_entropy_weight(config.tree_config.entropy_weight) // Pass entropy regularization
             .with_subsample(config.subsample)
+            .with_backend(config.backend_type) // Pass backend type
             .with_seed(config.seed);
 
         // Early stopping

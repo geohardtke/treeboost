@@ -157,6 +157,17 @@ pub struct UniversalConfig {
     /// Only used if `ensemble_seeds.is_some()`.
     /// Determines how predictions from multiple GBDTs are combined.
     pub stacking_strategy: StackingStrategy,
+
+    /// Backend type for histogram building (CPU/GPU)
+    ///
+    /// Determines which backend to use for gradient histogram computation:
+    /// - `Auto`: Automatically select best available backend
+    /// - `Cuda`: Force NVIDIA CUDA (requires `cuda` feature)
+    /// - `Wgpu`: Force GPU via WGPU/Vulkan (requires `gpu` feature)
+    /// - `Scalar`: Force CPU (portable fallback)
+    #[rkyv(with = rkyv::with::Skip)]
+    #[serde(skip)]
+    pub backend_type: crate::backend::BackendType,
 }
 
 impl Default for UniversalConfig {
@@ -178,6 +189,7 @@ impl Default for UniversalConfig {
             feature_extractor: None,
             ensemble_seeds: None, // No ensemble by default
             stacking_strategy: StackingStrategy::default(),
+            backend_type: crate::backend::BackendType::Auto,
         }
     }
 }
@@ -368,6 +380,20 @@ impl UniversalConfig {
     /// ```
     pub fn with_stacking_strategy(mut self, strategy: StackingStrategy) -> Self {
         self.stacking_strategy = strategy;
+        self
+    }
+
+    /// Set backend type for histogram building.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use treeboost::BackendType;
+    ///
+    /// let config = UniversalConfig::new()
+    ///     .with_backend(BackendType::Cuda); // Force CUDA backend
+    /// ```
+    pub fn with_backend(mut self, backend_type: crate::backend::BackendType) -> Self {
+        self.backend_type = backend_type;
         self
     }
 }
