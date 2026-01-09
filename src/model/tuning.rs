@@ -23,6 +23,7 @@ use polars::prelude::*;
 pub(super) fn tune_hyperparameters(
     config: &AutoConfig,
     dataset: &BinnedDataset,
+    validation_dataset: Option<&BinnedDataset>,
     mode: BoostingMode,
     df: &DataFrame,
     target_col: &str,
@@ -72,7 +73,7 @@ pub(super) fn tune_hyperparameters(
                 BoostingMode::PureTree | BoostingMode::RandomForest => {
                     // Run proper AutoTuner for tree-based models
                     let (univ_config, tree_result) =
-                        tune_tree_model(config, dataset, mode, profile)?;
+                        tune_tree_model(config, dataset, validation_dataset, mode, profile)?;
                     Ok((univ_config, None, tree_result))
                 }
             }
@@ -84,6 +85,7 @@ pub(super) fn tune_hyperparameters(
 fn tune_tree_model(
     config: &AutoConfig,
     dataset: &BinnedDataset,
+    validation_dataset: Option<&BinnedDataset>,
     mode: BoostingMode,
     profile: &DataFrameProfile,
 ) -> Result<(UniversalConfig, Option<TreeTuningResult>)> {
@@ -158,8 +160,12 @@ fn tune_tree_model(
         .with_space(param_space)
         .with_seed(123);
 
-    // Run tuning
-    let (best_gbdt_config, history): (GBDTConfig, SearchHistory) = tuner.tune(dataset)?;
+    // Run tuning (use custom validation if provided)
+    let (best_gbdt_config, history): (GBDTConfig, SearchHistory) = if let Some(val_dataset) = validation_dataset {
+        tuner.tune_with_validation(dataset, val_dataset)?
+    } else {
+        tuner.tune(dataset)?
+    };
 
     // Convert GBDT config to UniversalConfig
     let tree_config = TreeConfig::default()

@@ -46,6 +46,27 @@ const MAX_ZONE_SWITCH_FAILS: usize = 3;
 const BINARY_CLASSIFICATION_THRESHOLD: f32 = 0.5;
 
 // =============================================================================
+// Thread-safe pointer wrapper for custom validation
+// =============================================================================
+
+/// Thread-safe wrapper for raw pointer to enable Send/Sync
+/// SAFETY: Pointer is read-only and guaranteed valid during tune_with_validation call
+struct SendPtr<T>(*const T);
+
+unsafe impl<T> Send for SendPtr<T> {}
+unsafe impl<T> Sync for SendPtr<T> {}
+
+impl<T> SendPtr<T> {
+    fn new(ptr: *const T) -> Self {
+        SendPtr(ptr)
+    }
+
+    unsafe fn as_ref<'a>(&self) -> &'a T {
+        &*self.0
+    }
+}
+
+// =============================================================================
 // Evaluation Data Types
 // =============================================================================
 
@@ -138,6 +159,12 @@ pub struct AutoTuner<M: TunableModel> {
     /// Realistic mode encoding configuration
     realistic_config: Option<RealisticModeConfig>,
 
+    // Custom validation support (for time-series/grouped data)
+    /// Custom train/validation datasets (when provided via tune_with_validation)
+    /// Stored as raw pointers since they're only valid during the tune call
+    /// Wrapped in SendPtr for thread safety (pointers are read-only and valid during tune)
+    custom_validation: Option<(SendPtr<BinnedDataset>, SendPtr<BinnedDataset>)>,
+
     /// Phantom data for generic type
     _phantom: PhantomData<M>,
 }
@@ -154,6 +181,7 @@ impl<M: TunableModel> AutoTuner<M> {
             history: SearchHistory::new(),
             callback: None,
             next_trial_id: AtomicUsize::new(0),
+            custom_validation: None,
             raw_data: None,
             realistic_config: None,
             _phantom: PhantomData,
@@ -233,6 +261,41 @@ impl<M: TunableModel> AutoTuner<M> {
         // Store dataset reference for evaluation (wrapped in a temporary storage)
         // We use a simple approach: store dataset pointer and retrieve in evaluate functions
         self.run_tune_with_dataset(dataset)
+    }
+
+    /// Tune hyperparameters with custom validation dataset (for time-series/grouped data)
+    ///
+    /// Use this when you need custom validation splits (e.g., date-based splits for time-series,
+    /// group-based splits for hierarchical data) to prevent data leakage.
+    ///
+    /// # Arguments
+    /// * `train_dataset` - Training data (will NOT be split)
+    /// * `val_dataset` - Validation data (for evaluation)
+    ///
+    /// # Returns
+    /// * Best model config found and the complete search history
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Split by date for time-series
+    /// let (train_dataset, val_dataset) = split_by_date(full_dataset, cutoff_date);
+    ///
+    /// let mut tuner = AutoTuner::new(base_config)
+    ///     .with_config(tuner_config)
+    ///     .with_space(param_space);
+    ///
+    /// let (best_config, history) = tuner.tune_with_validation(&train_dataset, &val_dataset)?;
+    /// ```
+    pub fn tune_with_validation(
+        &mut self,
+        train_dataset: &BinnedDataset,
+        val_dataset: &BinnedDataset,
+    ) -> Result<(M::Config, SearchHistory)> {
+        // Store raw pointers for custom validation (valid only during this call)
+        self.custom_validation = Some((SendPtr::new(train_dataset as *const _), SendPtr::new(val_dataset as *const _)));
+        let result = self.run_tune_with_dataset(train_dataset);
+        self.custom_validation = None;
+        result
     }
 
     /// Internal tune method that works with BinnedDataset
@@ -1261,6 +1324,43 @@ impl<M: TunableModel> AutoTuner<M> {
         params: &HashMap<String, f32>,
         validation_ratio: f32,
     ) -> EvalResult {
+        // Check if custom validation is provided (for time-series/grouped data)
+        if let Some((train_ptr, val_ptr)) = &self.custom_validation {
+            // SAFETY: Pointers are valid for the duration of tune_with_validation() call
+            let train_dataset = unsafe { train_ptr.as_ref() };
+            let val_dataset = unsafe { val_ptr.as_ref() };
+
+            // Build config - NO internal validation split (already pre-split!)
+            let mut config = self.build_config(params);
+            M::configure_validation(&mut config, 0.0, 0); // Disable internal split!
+
+            // Train on custom train dataset
+            let model = M::train(train_dataset, &config)?;
+
+            // Predict on both datasets for metrics
+            let train_predictions = model.predict(train_dataset);
+            let val_predictions = model.predict(val_dataset);
+
+            let metric = self.select_metric();
+
+            // Compute metrics on the respective datasets
+            let train_metric = metric.compute(&train_predictions, train_dataset.targets());
+            let val_metric = metric.compute(&val_predictions, val_dataset.targets());
+
+            // F1/ROC-AUC computation skipped for custom validation (can be added later if needed)
+            let f1_score = None;
+            let roc_auc = None;
+
+            return Ok((
+                val_metric,
+                train_metric,
+                model.num_trees(),
+                f1_score,
+                roc_auc,
+            ));
+        }
+
+        // Standard holdout: split the dataset internally
         // Build config with proper validation for early stopping
         // Use tuner's seed for consistency between training and evaluation splits
         let mut config = self.build_config(params);

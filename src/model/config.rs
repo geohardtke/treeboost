@@ -388,7 +388,7 @@ impl TreeTunerConfig {
         Self {
             max_depth_range: auto_defaults::QUICK_DEPTH_RANGE,
             learning_rate_range: auto_defaults::QUICK_LR_RANGE,
-            n_samples: 30,
+            n_samples: 10, // Reduced from 30 for faster testing
             n_iterations: 1,
             max_rounds: 100,
             early_stopping_rounds: 10,
