@@ -26,7 +26,7 @@
 use crate::analysis::profiler::{ColumnDataType, ColumnProfile, DataFrameProfile};
 use crate::analysis::{DatasetAnalysis, PanelDataInfo};
 use crate::defaults::features as feature_defaults;
-use crate::preprocessing::timeseries::RollingStat;
+use crate::features::timeseries::RollingStat;
 use std::collections::HashSet;
 
 /// Time-series feature engineering plan
@@ -53,6 +53,10 @@ pub struct TimeSeriesFeaturePlan {
     pub ewma_columns: Vec<String>,
     /// EWMA alpha values (e.g., [0.1, 0.3])
     pub ewma_alphas: Vec<f32>,
+    /// Columns to generate momentum/return features for
+    pub momentum_columns: Vec<String>,
+    /// Momentum periods (e.g., [1, 3, 7, 14] for 1-day, 3-day, 7-day, 14-day returns)
+    pub momentum_periods: Vec<usize>,
     /// Estimated number of features to generate
     pub estimated_features: usize,
     /// Reasoning for feature selections
@@ -72,6 +76,8 @@ impl TimeSeriesFeaturePlan {
             rolling_stats: Vec::new(),
             ewma_columns: Vec::new(),
             ewma_alphas: Vec::new(),
+            momentum_columns: Vec::new(),
+            momentum_periods: Vec::new(),
             estimated_features: 0,
             reasoning: Vec::new(),
         }
@@ -82,6 +88,7 @@ impl TimeSeriesFeaturePlan {
         self.lag_columns.is_empty()
             && self.rolling_columns.is_empty()
             && self.ewma_columns.is_empty()
+            && self.momentum_columns.is_empty()
     }
 
     /// Compute estimated feature count
@@ -90,8 +97,9 @@ impl TimeSeriesFeaturePlan {
         let rolling_count =
             self.rolling_columns.len() * self.rolling_windows.len() * self.rolling_stats.len();
         let ewma_count = self.ewma_columns.len() * self.ewma_alphas.len();
+        let momentum_count = self.momentum_columns.len() * self.momentum_periods.len();
 
-        self.estimated_features = lag_count + rolling_count + ewma_count;
+        self.estimated_features = lag_count + rolling_count + ewma_count + momentum_count;
     }
 }
 
@@ -694,16 +702,25 @@ impl SmartFeatureEngine {
             .clone()
             .unwrap_or_else(|| panel_info.time_granularity.suggested_rolling_windows());
 
-        // Default rolling stats: Mean and Std
-        plan.rolling_stats = vec![RollingStat::Mean, RollingStat::Std];
+        // Default rolling stats: Mean, Std, Min, Max (captures more signal)
+        plan.rolling_stats = vec![
+            RollingStat::Mean,
+            RollingStat::Std,
+            RollingStat::Min,
+            RollingStat::Max,
+        ];
 
-        // Default EWMA alphas
-        plan.ewma_alphas = vec![0.1, 0.3];
+        // EWMA alphas for signal capture across different timescales
+        plan.ewma_alphas = vec![0.1, 0.2, 0.3, 0.5];
+
+        // Momentum periods - same as lag periods (percentage changes over these periods)
+        plan.momentum_periods = plan.lag_periods.clone();
 
         // Assign columns to each feature type
         plan.lag_columns = top_cols.clone();
         plan.rolling_columns = top_cols.clone();
-        plan.ewma_columns = top_cols;
+        plan.ewma_columns = top_cols.clone();
+        plan.momentum_columns = top_cols;
 
         // Compute estimated features
         plan.compute_estimated_features();
@@ -718,11 +735,12 @@ impl SmartFeatureEngine {
             plan.lag_columns.len()
         ));
         plan.reasoning.push(format!(
-            "Estimated {} time-series features ({} lag + {} rolling + {} EWMA)",
+            "Estimated {} time-series features ({} lag + {} rolling + {} EWMA + {} momentum)",
             plan.estimated_features,
             plan.lag_columns.len() * plan.lag_periods.len(),
             plan.rolling_columns.len() * plan.rolling_windows.len() * plan.rolling_stats.len(),
-            plan.ewma_columns.len() * plan.ewma_alphas.len()
+            plan.ewma_columns.len() * plan.ewma_alphas.len(),
+            plan.momentum_columns.len() * plan.momentum_periods.len()
         ));
 
         plan

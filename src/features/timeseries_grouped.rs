@@ -44,6 +44,8 @@ pub struct GroupedTimeSeriesConfig {
     pub rolling_stats: Vec<RollingStat>,
     /// EWMA alpha values [0.1, 0.3]
     pub ewma_alphas: Vec<f32>,
+    /// Momentum periods for return calculation [1, 3, 7, 14, ...]
+    pub momentum_periods: Vec<usize>,
     /// NaN handling strategy
     pub nan_strategy: NaNStrategy,
     /// Minimum periods for rolling statistics
@@ -64,6 +66,7 @@ impl GroupedTimeSeriesConfig {
             rolling_windows: vec![7, 14, 28],
             rolling_stats: vec![RollingStat::Mean, RollingStat::Std],
             ewma_alphas: vec![0.1, 0.3],
+            momentum_periods: vec![1, 3, 7, 14],
             nan_strategy: NaNStrategy::Keep,
             min_periods: 1,
         }
@@ -76,6 +79,7 @@ impl GroupedTimeSeriesConfig {
             rolling_windows: vec![12, 24, 48],
             rolling_stats: vec![RollingStat::Mean, RollingStat::Std],
             ewma_alphas: vec![0.1, 0.3],
+            momentum_periods: vec![1, 6, 12, 24],
             nan_strategy: NaNStrategy::Keep,
             min_periods: 1,
         }
@@ -88,6 +92,7 @@ impl GroupedTimeSeriesConfig {
             rolling_windows: vec![4, 12, 26],
             rolling_stats: vec![RollingStat::Mean, RollingStat::Std],
             ewma_alphas: vec![0.1, 0.3],
+            momentum_periods: vec![1, 4, 12],
             nan_strategy: NaNStrategy::Keep,
             min_periods: 1,
         }
@@ -100,6 +105,7 @@ impl GroupedTimeSeriesConfig {
             rolling_windows: vec![7],
             rolling_stats: vec![RollingStat::Mean],
             ewma_alphas: vec![],
+            momentum_periods: vec![],
             nan_strategy: NaNStrategy::Keep,
             min_periods: 1,
         }
@@ -146,7 +152,8 @@ impl GroupedTimeSeriesConfig {
         let n_lags = self.lag_periods.len();
         let n_rolling = self.rolling_windows.len() * self.rolling_stats.len();
         let n_ewma = self.ewma_alphas.len();
-        n_lags + n_rolling + n_ewma
+        let n_momentum = self.momentum_periods.len();
+        n_lags + n_rolling + n_ewma + n_momentum
     }
 }
 
@@ -276,6 +283,11 @@ impl GroupedTimeSeriesGenerator {
             for alpha in &self.config.ewma_alphas {
                 names.push(format!("{}_ewma_{:.2}", col_name, alpha));
             }
+
+            // Momentum features
+            for period in &self.config.momentum_periods {
+                names.push(format!("{}_momentum_{}", col_name, period));
+            }
         }
 
         names
@@ -337,6 +349,8 @@ impl GroupedTimeSeriesGenerator {
             .iter()
             .map(|&alpha| EwmaGenerator::new(alpha))
             .collect();
+
+        let momentum_gen = crate::features::MomentumGenerator::new(self.config.momentum_periods.clone());
 
         // Process each group independently
         for group_rows in group_indices {
@@ -403,6 +417,23 @@ impl GroupedTimeSeriesGenerator {
                             global_row * total_new_features + base_offset + roll_offset + ewma_idx;
                         if local_idx < ewma.len() && dst_idx < new_data.len() {
                             new_data[dst_idx] = ewma[local_idx];
+                        }
+                    }
+                }
+
+                // Generate momentum features
+                let momentum = momentum_gen.transform_column(&column);
+                let n_momentum = self.config.momentum_periods.len();
+                let n_ewma = self.config.ewma_alphas.len();
+                let momentum_offset = roll_offset + n_ewma;
+
+                for (local_idx, &global_row) in group_rows.iter().enumerate() {
+                    for mom_idx in 0..n_momentum {
+                        let src_idx = mom_idx * column.len() + local_idx;
+                        let dst_idx =
+                            global_row * total_new_features + base_offset + momentum_offset + mom_idx;
+                        if src_idx < momentum.len() && dst_idx < new_data.len() {
+                            new_data[dst_idx] = momentum[src_idx];
                         }
                     }
                 }

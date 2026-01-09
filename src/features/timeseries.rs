@@ -63,6 +63,21 @@ impl NaNStrategy {
             _ => None,
         }
     }
+
+    /// Apply the NaN strategy to produce a fallback value
+    ///
+    /// # Arguments
+    /// * `fallback` - Value to use for ForwardFill strategy
+    ///
+    /// # Returns
+    /// The value to use based on the strategy
+    pub fn apply(&self, fallback: f32) -> f32 {
+        match self {
+            Self::Keep => f32::NAN,
+            Self::ForwardFill => fallback,
+            Self::Constant(_) => self.get_constant().unwrap_or(0.0),
+        }
+    }
 }
 
 // ============================================================================
@@ -190,16 +205,7 @@ impl LagGenerator {
                         result[dst_idx] = data[src_idx];
                     } else {
                         // Not enough history - apply NaN strategy
-                        result[dst_idx] = match self.nan_strategy {
-                            NaNStrategy::Keep => f32::NAN,
-                            NaNStrategy::ForwardFill => {
-                                // Use first available value
-                                data[feat]
-                            }
-                            NaNStrategy::Constant(_) => {
-                                self.nan_strategy.get_constant().unwrap_or(0.0)
-                            }
-                        };
+                        result[dst_idx] = self.nan_strategy.apply(data[feat]);
                     }
                 }
                 lag_offset += num_features;
@@ -226,11 +232,7 @@ impl LagGenerator {
                 if row >= lag {
                     result[offset + row] = column[row - lag];
                 } else {
-                    result[offset + row] = match self.nan_strategy {
-                        NaNStrategy::Keep => f32::NAN,
-                        NaNStrategy::ForwardFill => column[0],
-                        NaNStrategy::Constant(_) => self.nan_strategy.get_constant().unwrap_or(0.0),
-                    };
+                    result[offset + row] = self.nan_strategy.apply(column[0]);
                 }
             }
         }
@@ -673,6 +675,164 @@ impl EwmaGenerator {
             } else {
                 ewma
             };
+        }
+
+        result
+    }
+}
+
+// ============================================================================
+// Momentum Generator
+// ============================================================================
+
+/// Minimum absolute value for denominator in momentum calculation to prevent
+/// division-by-near-zero numerical artifacts (e.g., momentum = (x_t - x_{t-k}) / x_{t-k})
+const MIN_DENOMINATOR_VALUE: f32 = 1e-10;
+
+/// Generates momentum/return features from time-series data
+///
+/// Computes percentage changes over different periods:
+/// momentum_t = (x_t - x_{t-lag}) / x_{t-lag}
+///
+/// This is fundamental for financial time-series (stock returns, etc.)
+/// where relative changes are more predictive than absolute values.
+///
+/// # Example
+///
+/// ```ignore
+/// let gen = MomentumGenerator::new(vec![1, 7, 14]); // 1-day, 7-day, 14-day returns
+/// let momentum = gen.transform(&data, num_features)?;
+/// ```
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MomentumGenerator {
+    /// Lag periods for computing momentum (e.g., [1, 7, 14])
+    lags: Vec<usize>,
+    /// Optional feature names
+    feature_names: Option<Vec<String>>,
+}
+
+impl MomentumGenerator {
+    /// Create a new momentum generator with specified lag periods
+    ///
+    /// # Arguments
+    /// * `lags` - Lag periods for momentum calculation (e.g., `vec![1, 7, 14]`)
+    pub fn new(lags: Vec<usize>) -> Self {
+        Self {
+            lags,
+            feature_names: None,
+        }
+    }
+
+    /// Set feature names for output column naming
+    pub fn with_feature_names(mut self, names: Vec<String>) -> Self {
+        self.feature_names = Some(names);
+        self
+    }
+
+    /// Get output feature names
+    pub fn output_names(&self) -> Vec<String> {
+        let base_names: Vec<String> = self
+            .feature_names
+            .clone()
+            .unwrap_or_else(|| vec!["feature".to_string()]);
+
+        let mut names = Vec::new();
+        for base in &base_names {
+            for lag in &self.lags {
+                names.push(format!("{}_momentum_{}", base, lag));
+            }
+        }
+        names
+    }
+
+    /// Transform data by adding momentum features
+    ///
+    /// # Arguments
+    /// * `data` - Row-major data matrix (num_rows × num_features)
+    /// * `num_features` - Number of features per row
+    ///
+    /// # Returns
+    /// New data with original + momentum features (num_rows × (num_features + num_features * num_lags))
+    pub fn transform(&self, data: &[f32], num_features: usize) -> Result<Vec<f32>> {
+        if data.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let num_rows = data.len() / num_features;
+        if num_rows * num_features != data.len() {
+            return Err(TreeBoostError::Data(format!(
+                "Data length {} not divisible by num_features {}",
+                data.len(),
+                num_features
+            )));
+        }
+
+        let num_new_features = num_features * self.lags.len();
+        let total_features = num_features + num_new_features;
+        let mut result = vec![f32::NAN; num_rows * total_features];
+
+        for row in 0..num_rows {
+            // Copy original features
+            let src_start = row * num_features;
+            let dst_start = row * total_features;
+            result[dst_start..dst_start + num_features]
+                .copy_from_slice(&data[src_start..src_start + num_features]);
+
+            // Generate momentum features
+            let mut momentum_offset = num_features;
+            for &lag in &self.lags {
+                for feat in 0..num_features {
+                    let dst_idx = dst_start + momentum_offset + feat;
+                    if row >= lag {
+                        // We have enough history
+                        let current = data[src_start + feat];
+                        let lagged = data[(row - lag) * num_features + feat];
+
+                        // Compute percentage change: (current - lagged) / lagged
+                        if !current.is_nan() && !lagged.is_nan() && lagged.abs() > MIN_DENOMINATOR_VALUE {
+                            result[dst_idx] = (current - lagged) / lagged;
+                        } else {
+                            result[dst_idx] = f32::NAN;
+                        }
+                    } else {
+                        // Not enough history
+                        result[dst_idx] = f32::NAN;
+                    }
+                }
+                momentum_offset += num_features;
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Transform a single feature column (column-major)
+    ///
+    /// # Arguments
+    /// * `column` - Single feature column (length = num_rows)
+    ///
+    /// # Returns
+    /// Momentum columns concatenated (length = num_rows * num_lags)
+    pub fn transform_column(&self, column: &[f32]) -> Vec<f32> {
+        let num_rows = column.len();
+        let mut result = vec![f32::NAN; num_rows * self.lags.len()];
+
+        for (lag_idx, &lag) in self.lags.iter().enumerate() {
+            let offset = lag_idx * num_rows;
+            for row in 0..num_rows {
+                if row >= lag {
+                    let current = column[row];
+                    let lagged = column[row - lag];
+
+                    if !current.is_nan() && !lagged.is_nan() && lagged.abs() > MIN_DENOMINATOR_VALUE {
+                        result[offset + row] = (current - lagged) / lagged;
+                    } else {
+                        result[offset + row] = f32::NAN;
+                    }
+                } else {
+                    result[offset + row] = f32::NAN;
+                }
+            }
         }
 
         result
@@ -1137,6 +1297,65 @@ mod tests {
 
         // NaN should propagate last EWMA
         assert_eq!(result[1], result[0]);
+    }
+
+    // ========================================
+    // MomentumGenerator Tests
+    // ========================================
+
+    #[test]
+    fn test_momentum_basic() {
+        let gen = MomentumGenerator::new(vec![1, 2]);
+
+        // 5 rows × 1 feature
+        let data = vec![100.0, 110.0, 121.0, 133.1, 146.41];
+
+        let result = gen.transform(&data, 1).unwrap();
+
+        // Output: 5 rows × 3 features (1 original + 1 momentum_1 + 1 momentum_2)
+        assert_eq!(result.len(), 15);
+
+        // Row 2: original=121, momentum_1=(121-110)/110=0.1, momentum_2=(121-100)/100=0.21
+        let row2_start = 2 * 3;
+        assert_eq!(result[row2_start], 121.0);
+        assert!((result[row2_start + 1] - 0.1).abs() < 0.001); // momentum lag 1
+        assert!((result[row2_start + 2] - 0.21).abs() < 0.001); // momentum lag 2
+
+        // Row 4: original=146.41, momentum_1=(146.41-133.1)/133.1=0.1
+        let row4_start = 4 * 3;
+        assert_eq!(result[row4_start], 146.41);
+        assert!((result[row4_start + 1] - 0.1).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_momentum_handles_zero() {
+        let gen = MomentumGenerator::new(vec![1]);
+
+        // Include a zero value
+        let data = vec![100.0, 0.0, 50.0];
+        let result = gen.transform(&data, 1).unwrap();
+
+        // Row 1: momentum = (0 - 100) / 100 = -1.0
+        assert!((result[3] + 1.0).abs() < 0.001);
+
+        // Row 2: momentum = (50 - 0) / 0 = NaN (division by zero)
+        assert!(result[5].is_nan());
+    }
+
+    #[test]
+    fn test_momentum_column() {
+        let gen = MomentumGenerator::new(vec![1, 3]);
+        let column = vec![100.0, 110.0, 121.0, 133.1, 146.41];
+        let result = gen.transform_column(&column);
+
+        // Output: 5 rows × 2 lags = 10 values
+        assert_eq!(result.len(), 10);
+
+        // Lag 1 at row 1: (110 - 100) / 100 = 0.1
+        assert!((result[1] - 0.1).abs() < 0.001);
+
+        // Lag 3 at row 3: (133.1 - 100) / 100 = 0.331
+        assert!((result[8] - 0.331).abs() < 0.001);
     }
 
     // ========================================

@@ -10,7 +10,9 @@
 //! 1. **Polynomial features**: x², √x, log(1+x)
 //! 2. **Ratio features**: x_i / x_j for correlated pairs
 //! 3. **Interaction features**: x_i × x_j, x_i + x_j, |x_i - x_j|, min/max
-//! 4. **Feature selection**: Filter by variance, correlation, target importance
+//! 4. **Time-series features**: Lag, rolling stats, EWMA for panel data
+//! 5. **Cross-sectional features**: Rank, z-score, median diff for panel data
+//! 6. **Feature selection**: Filter by variance, correlation, target importance
 //!
 //! All feature generation happens BEFORE binning (required by the data pipeline).
 //!
@@ -27,12 +29,15 @@
 //! let (int_features, int_names) = interactions.generate(&features, num_features, &names);
 //! ```
 
+pub mod crosssectional;
 mod interaction;
 mod polynomial;
 mod ratio;
 mod selector;
 pub mod smart;
 mod stats;
+pub mod timeseries;
+pub mod timeseries_grouped;
 
 use crate::defaults::feature_generation as feature_generation_defaults;
 pub use interaction::{InteractionGenerator, InteractionType, PairSelection};
@@ -43,6 +48,8 @@ pub use smart::{
     FeaturePlan, LttFeaturePlan, SmartFeatureConfig, SmartFeatureEngine, SmartFeaturePreset,
     TimeFeatureType, TimeSeriesFeaturePlan,
 };
+pub use timeseries::{EwmaGenerator, LagGenerator, MomentumGenerator, NaNStrategy, RollingGenerator, RollingStat, SeasonalComponent, SeasonalGenerator};
+pub use timeseries_grouped::{GroupedTimeSeriesConfig, GroupedTimeSeriesGenerator};
 
 /// Trait for feature generation strategies
 pub trait FeatureGenerator: Send + Sync {

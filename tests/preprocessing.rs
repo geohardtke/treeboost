@@ -299,7 +299,7 @@ fn test_preprocessing_simple_imputer_strategies() {
 // Time-Series Feature Integration Tests
 // ============================================================================
 
-use treeboost::preprocessing::{
+use treeboost::features::{
     EwmaGenerator, LagGenerator, NaNStrategy, RollingGenerator, RollingStat, SeasonalComponent,
     SeasonalGenerator,
 };
@@ -432,7 +432,8 @@ fn test_timeseries_ewma_workflow() {
 
     // All values should be finite
     for &v in &smoothed {
-        assert!(v.is_finite(), "EWMA value should be finite");
+        let val: f32 = v;
+        assert!(val.is_finite(), "EWMA value should be finite");
     }
 }
 

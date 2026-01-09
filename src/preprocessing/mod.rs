@@ -20,12 +20,6 @@
 //! ## Power Transforms
 //! - **YeoJohnsonTransform**: Normalize skewed distributions (handles negatives)
 //!
-//! ## Time-Series Features
-//! - **LagGenerator**: Create lagged features (x_{t-1}, x_{t-2}, etc.)
-//! - **RollingGenerator**: Rolling statistics (mean, std, min, max, sum, median)
-//! - **EwmaGenerator**: Exponentially weighted moving average
-//! - **SeasonalGenerator**: Extract datetime components with cyclical encoding
-//!
 //! ## Outlier Detection
 //! - **OutlierDetector**: Detect and handle outliers with IQR or Z-score methods
 //!   - Actions: Cap (winsorize), Flag (indicator columns), Remove (filter rows)
@@ -76,8 +70,6 @@ pub mod pipeline;
 pub mod polars_ext;
 pub mod scaler;
 pub mod smart;
-pub mod timeseries;
-pub mod timeseries_grouped;
 pub mod transforms;
 
 pub use encoding::{FrequencyEncoder, LabelEncoder, OneHotEncoder, UnknownStrategy};
@@ -96,9 +88,4 @@ pub use smart::{
     EncodingType, LttPreprocessingPlan, ModelType, PreprocessingPlan, PreprocessingStep,
     ScalerType, SmartPreprocessConfig, SmartPreprocessPreset, SmartPreprocessor,
 };
-pub use timeseries::{
-    EwmaGenerator, LagGenerator, NaNStrategy, RollingGenerator, RollingStat, SeasonalComponent,
-    SeasonalGenerator,
-};
-pub use timeseries_grouped::{GroupedTimeSeriesConfig, GroupedTimeSeriesGenerator};
 pub use transforms::YeoJohnsonTransform;
