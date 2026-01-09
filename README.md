@@ -1,8 +1,37 @@
 # TreeBoost
 
+[![Crates.io](https://img.shields.io/crates/v/treeboost.svg)](https://crates.io/crates/treeboost)[![Docs](https://img.shields.io/docsrs/treeboost)](https://docs.rs/treeboost)[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 ![TreeBoost](images/treeboost.jpeg)
 
 > **Universal Tabular Learning Engine. Linear models, GBDTs, and Random Forests—unified.**
+
+## At a Glance
+
+- Hybrid Linear+Tree learner that extrapolates trends while capturing interactions
+- AutoTuner and AutoML mode selection with conformal prediction built in
+- GPU acceleration (WebGPU, CUDA) plus AVX-512/SVE2 CPU backends
+- Zero-copy serialization and incremental TRB updates for production pipelines
+- Rust crate, CLI, and optional PyO3 bindings in one codebase
+
+## Quick Install
+
+```bash
+cargo add treeboost
+```
+
+```bash
+# Optional Python bindings (requires Rust toolchain + maturin)
+pip install treeboost
+```
+
+See [Installation](#installation) for feature flags and build notes.
+
+## Project Links
+
+- Docs: https://docs.rs/treeboost
+- Crate: https://crates.io/crates/treeboost
+- GitHub: https://github.com/ml-rust/treeboost
 
 TreeBoost combines the extrapolation power of linear models, the interaction-capturing ability of gradient boosted trees, and the robustness of random forests—all in a single, zero-copy, production-ready Rust binary. GPU-accelerated out of the box.
 
@@ -452,12 +481,12 @@ pip install maturin && maturin develop --release
 
 ### Feature Flags
 
-| Feature | Description | Use Case |
-|---------|-------------|----------|
-| `gpu` | WGPU backend (Vulkan/Metal/DX12) | All GPUs, portable |
-| `cuda` | NVIDIA CUDA backend | 2x+ faster than WGPU on NVIDIA |
-| `mmap` | Memory-mapped TRB loading | Instant model load, zero-copy I/O |
-| `python` | PyO3 bindings | Python interop |
+| Feature  | Description                      | Use Case                          |
+| -------- | -------------------------------- | --------------------------------- |
+| `gpu`    | WGPU backend (Vulkan/Metal/DX12) | All GPUs, portable                |
+| `cuda`   | NVIDIA CUDA backend              | 2x+ faster than WGPU on NVIDIA    |
+| `mmap`   | Memory-mapped TRB loading        | Instant model load, zero-copy I/O |
+| `python` | PyO3 bindings                    | Python interop                    |
 
 **Enable features:**
 
@@ -487,10 +516,10 @@ For large models (100MB+), `mmap` provides true zero-copy I/O:
 }
 ```
 
-| Reader | Load Time | Memory | Use Case |
-|--------|-----------|--------|----------|
-| `TrbReader` | O(model_size) | O(model_size) | Default, works everywhere |
-| `MmapTrbReader` | O(1) | O(1) initial | Large models, inference servers |
+| Reader          | Load Time     | Memory        | Use Case                        |
+| --------------- | ------------- | ------------- | ------------------------------- |
+| `TrbReader`     | O(model_size) | O(model_size) | Default, works everywhere       |
+| `MmapTrbReader` | O(1)          | O(1) initial  | Large models, inference servers |
 
 ## More Examples
 
