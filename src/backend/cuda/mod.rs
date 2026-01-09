@@ -53,7 +53,10 @@ pub struct CudaBackend {
 impl CudaBackend {
     /// Create a new CUDA backend if a compatible GPU is available.
     pub fn new() -> Option<Self> {
-        let device = CudaDevice::new()?;
+        let device = match CudaDevice::new() {
+            Some(d) => d,
+            None => return None,
+        };
         let device = Arc::new(device);
         let histogram_kernel = Mutex::new(HistogramKernel::new(Arc::clone(&device)));
 

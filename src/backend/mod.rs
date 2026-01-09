@@ -12,6 +12,7 @@
 //! - **Metal**: Apple GPU direct (future)
 
 mod config;
+mod hybrid;
 pub mod scalar;
 mod traits;
 
@@ -22,6 +23,7 @@ pub mod wgpu;
 pub mod cuda;
 
 pub use config::{BackendConfig, BackendPreset, BackendType, GpuMode};
+pub use hybrid::HybridGpuBackend;
 pub use scalar::ScalarBackend;
 pub use traits::{BinStorage, HistogramBackend, SparseColumn, SplitCandidate, SplitConfig};
 
@@ -63,13 +65,15 @@ impl BackendSelector {
     /// # Returns
     /// A boxed trait object implementing HistogramBackend
     pub fn select(&self, num_rows: usize) -> Box<dyn HistogramBackend> {
-        // For small datasets, always use scalar (lower overhead)
-        if num_rows < self.config.tensor_tile_min_rows {
-            return Box::new(ScalarBackend::new());
-        }
-
         match self.config.preferred {
-            BackendType::Auto => self.detect_best(),
+            BackendType::Auto => {
+                // For Auto mode, apply threshold check for small datasets
+                if num_rows < self.config.tensor_tile_min_rows {
+                    return Box::new(ScalarBackend::new());
+                }
+                self.detect_best()
+            }
+            // For explicit backend choices, respect them regardless of dataset size
             BackendType::Scalar => Box::new(ScalarBackend::new()),
             BackendType::Wgpu => self.try_wgpu_or_fallback(),
             BackendType::Avx512 => self.try_avx512_or_fallback(),
@@ -88,7 +92,11 @@ impl BackendSelector {
         #[cfg(feature = "cuda")]
         {
             if let Some(backend) = cuda::CudaBackend::new() {
-                return Box::new(backend);
+                // Wrap CUDA in hybrid backend with user-configured threshold
+                return Box::new(HybridGpuBackend::with_threshold(
+                    Box::new(backend),
+                    self.config.cuda_hybrid_threshold,
+                ));
             }
         }
 
@@ -97,7 +105,11 @@ impl BackendSelector {
         {
             if let Some(backend) = wgpu::WgpuBackend::new() {
                 backend.set_use_subgroups(self.config.use_gpu_subgroups);
-                return Box::new(backend);
+                // Wrap WGPU in hybrid backend with user-configured threshold
+                return Box::new(HybridGpuBackend::with_threshold(
+                    Box::new(backend),
+                    self.config.wgpu_hybrid_threshold,
+                ));
             }
         }
 
@@ -112,7 +124,11 @@ impl BackendSelector {
         {
             if let Some(backend) = wgpu::WgpuBackend::new() {
                 backend.set_use_subgroups(self.config.use_gpu_subgroups);
-                return Box::new(backend);
+                // Wrap WGPU in hybrid backend with user-configured threshold
+                return Box::new(HybridGpuBackend::with_threshold(
+                    Box::new(backend),
+                    self.config.wgpu_hybrid_threshold,
+                ));
             }
         }
 
@@ -145,7 +161,11 @@ impl BackendSelector {
         #[cfg(feature = "cuda")]
         {
             if let Some(backend) = cuda::CudaBackend::new() {
-                return Box::new(backend);
+                // Wrap CUDA in hybrid backend with user-configured threshold
+                return Box::new(HybridGpuBackend::with_threshold(
+                    Box::new(backend),
+                    self.config.cuda_hybrid_threshold,
+                ));
             }
         }
 
@@ -210,12 +230,12 @@ mod tests {
         let selector = BackendSelector::new();
         // Large dataset - uses GPU if available, otherwise scalar
         let backend = selector.select(100_000);
-        // Accept CUDA, WGPU, or Scalar depending on GPU availability
+        // Accept Hybrid CUDA, Hybrid WGPU, or Scalar depending on GPU availability
         assert!(
-            backend.name() == "CUDA"
-                || backend.name() == "WGPU"
+            backend.name() == "Hybrid CUDA"
+                || backend.name() == "Hybrid WGPU"
                 || backend.name().starts_with("Scalar"),
-            "Expected CUDA, WGPU, or Scalar, got: {}",
+            "Expected Hybrid CUDA, Hybrid WGPU, or Scalar, got: {}",
             backend.name()
         );
     }
@@ -235,10 +255,10 @@ mod tests {
         // Uses GPU if available, otherwise falls back to scalar
         let backend = selector.select(100_000);
         assert!(
-            backend.name() == "CUDA"
-                || backend.name() == "WGPU"
+            backend.name() == "Hybrid CUDA"
+                || backend.name() == "Hybrid WGPU"
                 || backend.name().starts_with("Scalar"),
-            "Expected CUDA, WGPU, or Scalar, got: {}",
+            "Expected Hybrid CUDA, Hybrid WGPU, or Scalar, got: {}",
             backend.name()
         );
     }

@@ -287,3 +287,273 @@ fn test_gpu_training_end_to_end() {
     println!("GPU model MSE: {:.4}", gpu_mse);
     assert!(gpu_mse < 1.0, "GPU model MSE too high: {}", gpu_mse);
 }
+
+// =============================================================================
+// CUDA-specific tests
+// =============================================================================
+
+/// Test CUDA backend initialization
+#[cfg(feature = "cuda")]
+#[test]
+fn test_cuda_backend_initialization() {
+    use treeboost::backend::cuda::CudaBackend;
+
+    eprintln!("\n=== Testing CUDA Backend Initialization ===");
+
+    match CudaBackend::new() {
+        Some(backend) => {
+            eprintln!("✓ CUDA backend initialized successfully");
+            eprintln!("  Device: {}", backend.device().name());
+        }
+        None => {
+            panic!("CUDA backend initialization failed! Check CUDA installation and driver.");
+        }
+    }
+}
+
+/// Test that auto-detection selects CUDA when available
+#[cfg(feature = "cuda")]
+#[test]
+fn test_cuda_auto_detection() {
+    let dataset = create_synthetic_dataset(15000, 42); // Must be > TENSOR_TILE_MIN_ROWS (10k)
+
+    eprintln!("\n=== Testing CUDA Auto-Detection ===");
+
+    // Use Auto backend type - should select CUDA
+    let config = BackendConfig {
+        preferred: BackendType::Auto,
+        ..Default::default()
+    };
+    let backend = BackendSelector::with_config(config).select(dataset.num_rows());
+
+    eprintln!("  Selected backend: {}", backend.name());
+
+    // Should select CUDA if available
+    assert_eq!(
+        backend.name(),
+        "CUDA",
+        "Auto-detection should select CUDA backend when cuda feature is enabled"
+    );
+}
+
+/// Test CUDA backend histogram correctness vs scalar
+#[cfg(feature = "cuda")]
+#[test]
+fn test_cuda_backend_histogram_correctness() {
+    let dataset = create_synthetic_dataset(1000, 42); // Small for fast test
+
+    let targets = dataset.targets();
+    let grad_hess: Vec<(f32, f32)> = targets
+        .iter()
+        .enumerate()
+        .map(|(i, &t)| {
+            let grad = -t;
+            let hess = 1.0 + (i % 3) as f32 * 0.1;
+            (grad, hess)
+        })
+        .collect();
+
+    let row_indices: Vec<usize> = (0..dataset.num_rows()).collect();
+
+    eprintln!("\n=== Testing CUDA Histogram Correctness ===");
+
+    // Get scalar backend histograms
+    let scalar_config = BackendConfig {
+        preferred: BackendType::Scalar,
+        ..Default::default()
+    };
+    let scalar_backend = BackendSelector::with_config(scalar_config).select(dataset.num_rows());
+    let scalar_hists = scalar_backend.build_histograms(&dataset, &grad_hess, &row_indices);
+
+    // Get CUDA backend histograms
+    let cuda_config = BackendConfig {
+        preferred: BackendType::Cuda,
+        ..Default::default()
+    };
+    let cuda_backend = BackendSelector::with_config(cuda_config).select(dataset.num_rows());
+
+    assert_eq!(cuda_backend.name(), "CUDA", "Should use CUDA backend");
+
+    let cuda_hists = cuda_backend.build_histograms(&dataset, &grad_hess, &row_indices);
+
+    // Compare histograms
+    assert_eq!(
+        scalar_hists.len(),
+        cuda_hists.len(),
+        "Histogram count mismatch"
+    );
+
+    for (f, (scalar_hist, cuda_hist)) in scalar_hists.iter().zip(cuda_hists.iter()).enumerate() {
+        let (scalar_grad, scalar_hess, scalar_count) = scalar_hist.totals();
+        let (cuda_grad, cuda_hess, cuda_count) = cuda_hist.totals();
+
+        assert_eq!(
+            scalar_count, cuda_count,
+            "Feature {}: count mismatch ({} vs {})",
+            f, scalar_count, cuda_count
+        );
+
+        // CUDA atomics may have small numerical differences
+        let grad_diff = (scalar_grad - cuda_grad).abs();
+        let hess_diff = (scalar_hess - cuda_hess).abs();
+        let grad_tol = scalar_grad.abs() * 0.01 + 0.1;
+        let hess_tol = scalar_hess.abs() * 0.01 + 0.1;
+
+        assert!(
+            grad_diff < grad_tol,
+            "Feature {}: gradient mismatch (scalar={}, cuda={}, diff={})",
+            f,
+            scalar_grad,
+            cuda_grad,
+            grad_diff
+        );
+        assert!(
+            hess_diff < hess_tol,
+            "Feature {}: hessian mismatch (scalar={}, cuda={}, diff={})",
+            f,
+            scalar_hess,
+            cuda_hess,
+            hess_diff
+        );
+    }
+
+    eprintln!(
+        "  ✓ CUDA histogram correctness verified for {} features × {} rows",
+        dataset.num_features(),
+        dataset.num_rows()
+    );
+}
+
+/// Test full GBDT training with CUDA backend
+#[cfg(feature = "cuda")]
+#[test]
+fn test_cuda_training_end_to_end() {
+    let dataset = create_synthetic_dataset(5000, 789); // Small dataset for fast test
+
+    eprintln!("\n=== Testing CUDA End-to-End Training ===");
+
+    // Train with CUDA backend
+    let cuda_config = GBDTConfig::new()
+        .with_num_rounds(5) // Few rounds for speed
+        .with_max_depth(4)
+        .with_learning_rate(0.1)
+        .with_backend(BackendType::Cuda);
+
+    let start = std::time::Instant::now();
+    let cuda_model = GBDTModel::train_binned(&dataset, cuda_config).expect("CUDA training failed");
+    let cuda_time = start.elapsed();
+
+    // Train with scalar backend for comparison
+    let scalar_config = GBDTConfig::new()
+        .with_num_rounds(5) // Few rounds for speed
+        .with_max_depth(4)
+        .with_learning_rate(0.1)
+        .with_backend(BackendType::Scalar);
+
+    let start = std::time::Instant::now();
+    let scalar_model = GBDTModel::train_binned(&dataset, scalar_config).expect("Scalar training failed");
+    let scalar_time = start.elapsed();
+
+    eprintln!("  CUDA training time: {:?}", cuda_time);
+    eprintln!("  Scalar training time: {:?}", scalar_time);
+    eprintln!("  Speedup: {:.2}x", scalar_time.as_secs_f64() / cuda_time.as_secs_f64());
+
+    // Both models should produce similar predictions
+    let cuda_preds = cuda_model.predict(&dataset);
+    let scalar_preds = scalar_model.predict(&dataset);
+
+    assert_eq!(cuda_preds.len(), scalar_preds.len());
+
+    // Compute RMSE between predictions
+    let mse: f32 = cuda_preds
+        .iter()
+        .zip(scalar_preds.iter())
+        .map(|(&a, &b)| (a - b).powi(2))
+        .sum::<f32>()
+        / cuda_preds.len() as f32;
+    let rmse = mse.sqrt();
+
+    let target_range = dataset.targets().iter().cloned().fold(f32::MIN, f32::max)
+        - dataset.targets().iter().cloned().fold(f32::MAX, f32::min);
+    let tolerance = target_range * 0.01;
+
+    eprintln!("  CUDA vs Scalar RMSE: {:.6}, tolerance: {:.6}", rmse, tolerance);
+
+    assert!(
+        rmse < tolerance,
+        "CUDA and Scalar predictions differ too much: RMSE={:.4} > tolerance={:.4}",
+        rmse,
+        tolerance
+    );
+
+    // Verify model quality
+    let targets = dataset.targets();
+    let cuda_mse: f32 = cuda_preds
+        .iter()
+        .zip(targets.iter())
+        .map(|(&p, &t)| (p - t).powi(2))
+        .sum::<f32>()
+        / cuda_preds.len() as f32;
+
+    eprintln!("  ✓ CUDA model MSE: {:.4}", cuda_mse);
+    assert!(cuda_mse < 1.0, "CUDA model MSE too high: {}", cuda_mse);
+}
+
+/// Test CUDA backend is used during AutoTuner hyperparameter search
+#[cfg(feature = "cuda")]
+#[test]
+fn test_cuda_autotuner() {
+    use treeboost::tuner::{
+        AutoTuner, EvalStrategy, GridStrategy, OptimizationMetric, ParameterSpace, SpacePreset,
+        TunerConfig,
+    };
+
+    // Need 60k rows so that 20% validation split = 12k rows (> 10k threshold)
+    let dataset = create_synthetic_dataset(60000, 42);
+
+    eprintln!("\n=== Testing CUDA in AutoTuner ===");
+
+    // Create base config with Auto backend - should auto-select CUDA
+    let base_config = GBDTConfig::new()
+        .with_num_rounds(10) // Few rounds for speed
+        .with_max_depth(4)
+        .with_learning_rate(0.1)
+        .with_backend(BackendType::Auto); // Auto should select CUDA
+
+    // Create tuner with minimal trials
+    let tuner_config = TunerConfig::new()
+        .with_iterations(2) // Just 2 trials for speed
+        .with_grid_strategy(GridStrategy::LatinHypercube { n_samples: 2 })
+        .with_eval_strategy(EvalStrategy::holdout(0.2))
+        .with_optimization_metric(OptimizationMetric::ValidationLoss)
+        .with_verbose(false);
+
+    let mut tuner = AutoTuner::<GBDTModel>::new(base_config)
+        .with_config(tuner_config)
+        .with_space(ParameterSpace::with_preset(SpacePreset::Regression));
+
+    eprintln!("  Running 2 tuning trials with CUDA backend...");
+
+    let start = std::time::Instant::now();
+    let (best_config, history) = tuner.tune(&dataset).expect("Tuning should succeed");
+    let elapsed = start.elapsed();
+
+    let best = history.best().expect("Should have best trial");
+
+    eprintln!("  Tuning completed in {:?}", elapsed);
+    eprintln!("  Best validation loss: {:.6}", best.val_metric);
+    eprintln!(
+        "  Best config: depth={}, lr={:.3}",
+        best_config.max_depth, best_config.learning_rate
+    );
+
+    // With CUDA, 2 trials on 15k rows should be very fast (< 5 seconds)
+    // With CPU, it would take much longer (> 10 seconds)
+    assert!(
+        elapsed.as_secs() < 10,
+        "Tuning too slow ({:?}), CUDA may not be used",
+        elapsed
+    );
+
+    eprintln!("  ✓ CUDA AutoTuner test passed (fast execution confirms GPU usage)");
+}

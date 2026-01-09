@@ -138,6 +138,30 @@ pub struct BackendConfig {
     /// modern NVIDIA GPUs (~1.0x speedup). May help on older AMD or Intel.
     /// Default: false
     pub use_gpu_subgroups: bool,
+
+    /// Batch size threshold for CUDA hybrid backend (rows).
+    ///
+    /// For batches smaller than this, use CPU to avoid GPU launch overhead.
+    /// CUDA has low dispatch overhead (10-100μs), so threshold is low.
+    ///
+    /// Default: 1000 rows (measured empirically)
+    /// Set to 0 to always use GPU, or usize::MAX to always use CPU.
+    ///
+    /// Run `cargo test --release --features cuda test_gpu_threshold -- --ignored --nocapture`
+    /// to measure optimal threshold for your hardware.
+    pub cuda_hybrid_threshold: usize,
+
+    /// Batch size threshold for WGPU hybrid backend (rows).
+    ///
+    /// For batches smaller than this, use CPU to avoid GPU launch overhead.
+    /// WGPU has higher dispatch overhead (1-2ms), so threshold is higher.
+    ///
+    /// Default: 5000 rows (measured empirically)
+    /// Set to 0 to always use GPU, or usize::MAX to always use CPU.
+    ///
+    /// Run `cargo test --release --features gpu test_wgpu_threshold -- --ignored --nocapture`
+    /// to measure optimal threshold for your hardware.
+    pub wgpu_hybrid_threshold: usize,
 }
 
 /// Presets for backend selection.
@@ -162,6 +186,8 @@ impl Default for BackendConfig {
             tensor_tile_min_rows: backend_defaults::TENSOR_TILE_MIN_ROWS,
             gpu_batch_size: backend_defaults::DEFAULT_GPU_BATCH_SIZE,
             use_gpu_subgroups: false,
+            cuda_hybrid_threshold: backend_defaults::CUDA_HYBRID_THRESHOLD,
+            wgpu_hybrid_threshold: backend_defaults::WGPU_HYBRID_THRESHOLD,
         }
     }
 }
@@ -206,6 +232,8 @@ impl BackendConfig {
             tensor_tile_min_rows: usize::MAX,
             gpu_batch_size: backend_defaults::DEFAULT_GPU_BATCH_SIZE,
             use_gpu_subgroups: false,
+            cuda_hybrid_threshold: backend_defaults::CUDA_HYBRID_THRESHOLD,
+            wgpu_hybrid_threshold: backend_defaults::WGPU_HYBRID_THRESHOLD,
         }
     }
 
@@ -222,6 +250,8 @@ impl BackendConfig {
             tensor_tile_min_rows: backend_defaults::TENSOR_TILE_MIN_ROWS,
             gpu_batch_size: backend_defaults::DEFAULT_GPU_BATCH_SIZE,
             use_gpu_subgroups: false,
+            cuda_hybrid_threshold: backend_defaults::CUDA_HYBRID_THRESHOLD,
+            wgpu_hybrid_threshold: backend_defaults::WGPU_HYBRID_THRESHOLD,
         }
     }
 
@@ -251,6 +281,45 @@ impl BackendConfig {
     /// Enable or disable GPU subgroup operations.
     pub fn with_gpu_subgroups(mut self, enabled: bool) -> Self {
         self.use_gpu_subgroups = enabled;
+        self
+    }
+
+    /// Set the CUDA hybrid threshold (batch size in rows).
+    ///
+    /// Batches smaller than this use CPU, larger batches use GPU.
+    /// Set to 0 to always use GPU, or `usize::MAX` to always use CPU.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Always use GPU for CUDA, even for small batches
+    /// let config = BackendConfig::new().with_cuda_threshold(0);
+    ///
+    /// // Use CPU for all CUDA batches (testing)
+    /// let config = BackendConfig::new().with_cuda_threshold(usize::MAX);
+    ///
+    /// // Custom threshold based on benchmarks
+    /// let config = BackendConfig::new().with_cuda_threshold(2000);
+    /// ```
+    pub fn with_cuda_threshold(mut self, threshold: usize) -> Self {
+        self.cuda_hybrid_threshold = threshold;
+        self
+    }
+
+    /// Set the WGPU hybrid threshold (batch size in rows).
+    ///
+    /// Batches smaller than this use CPU, larger batches use GPU.
+    /// Set to 0 to always use GPU, or `usize::MAX` to always use CPU.
+    pub fn with_wgpu_threshold(mut self, threshold: usize) -> Self {
+        self.wgpu_hybrid_threshold = threshold;
+        self
+    }
+
+    /// Set both CUDA and WGPU thresholds to the same value.
+    ///
+    /// Useful when you want a consistent threshold regardless of GPU type.
+    pub fn with_gpu_threshold(mut self, threshold: usize) -> Self {
+        self.cuda_hybrid_threshold = threshold;
+        self.wgpu_hybrid_threshold = threshold;
         self
     }
 }

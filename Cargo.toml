@@ -37,7 +37,7 @@ crate-type = ["cdylib", "rlib"]
 default = []
 python = ["dep:pyo3", "dep:numpy"]
 gpu = ["dep:wgpu", "dep:pollster"]
-cuda = ["dep:cudarc"]
+cuda = ["dep:cudarc", "gpu"]  # CUDA also enables GPU for fallback chain
 mmap = ["dep:memmap2"]
 
 [[bin]]
