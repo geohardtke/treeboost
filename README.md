@@ -1,138 +1,104 @@
 # TreeBoost
 
-[![Crates.io](https://img.shields.io/crates/v/treeboost.svg)](https://crates.io/crates/treeboost)[![Docs](https://img.shields.io/docsrs/treeboost)](https://docs.rs/treeboost)[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Crates.io](https://img.shields.io/crates/v/treeboost.svg)](https://crates.io/crates/treeboost) [![Docs](https://img.shields.io/docsrs/treeboost)](https://docs.rs/treeboost) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 ![TreeBoost](images/treeboost.jpeg)
 
-> **Universal Tabular Learning Engine. Linear models, GBDTs, and Random Forests—unified.**
+> **Practical tabular ML for messy, real-world data. Fast baselines first, deep control when you need it.**
+
+TreeBoost is a Rust-first library for tabular machine learning that starts simple and scales to expert use. It is built for the reality of production datasets: time series, missing values, drift, mixed feature types, and noisy labels. You get a clean path from “just give me a working model” to full control over training, backends, and constraints.
 
 ## At a Glance
 
-- Hybrid Linear+Tree learner that extrapolates trends while capturing interactions
-- AutoTuner and AutoML mode selection with conformal prediction built in
+- AutoML and AutoTuner for fast, explainable baselines
+- Hybrid Linear+Tree mode for trend extrapolation + non-linear interactions
+- Built-in preprocessing that serializes with your model
 - GPU acceleration (WebGPU, CUDA) plus AVX-512/SVE2 CPU backends
 - Zero-copy serialization and incremental TRB updates for production pipelines
-- Rust crate, CLI, and optional PyO3 bindings in one codebase
 
-## Quick Install
+## Why TreeBoost
 
-```bash
-cargo add treeboost
-```
+Most libraries are tuned for leaderboard-style modeling. TreeBoost is built for shipping models:
 
-```bash
-# Optional Python bindings (requires Rust toolchain + maturin)
-pip install treeboost
-```
+- **Fast baseline in one call** for beginners and teams under time pressure.
+- **White-box AutoML** that explains why it chose a mode and lets you iterate.
+- **Upgradeable control** without rewriting your data pipeline.
+- **Deployment-friendly**: zero-copy serialization, fast inference, and a CLI for batch jobs.
 
-See [Installation](#installation) for feature flags and build notes.
+## Three API Levels (Start Simple, Go Deep)
 
-## Project Links
+- **AutoModel** — One call trains a solid baseline and produces a model you can ship. Export a `config.json` when you want to improve it later.
+- **UniversalModel** — Choose the learning mode (PureTree, LinearThenTree, RandomForest) and tune it without leaving a high-level API.
+- **GBDTModel** — Lowest-level API for maximum control, backend selection, and benchmarking.
 
-- Docs: https://docs.rs/treeboost
-- Crate: https://crates.io/crates/treeboost
-- GitHub: https://github.com/ml-rust/treeboost
+You can move between these levels without changing your dataset format.
 
-TreeBoost combines the extrapolation power of linear models, the interaction-capturing ability of gradient boosted trees, and the robustness of random forests—all in a single, zero-copy, production-ready Rust binary. GPU-accelerated out of the box.
+📖 **See [docs/API.md](docs/API.md) for complete API documentation with examples.**
 
-## Why TreeBoost?
+## Recommended Workflow
 
-Most tabular problems are solved by Linear, Tree, or their combination. Other libraries make you pick one. TreeBoost gives you all three through a single `UniversalModel` interface, plus automatic mode selection via the AutoTuner.
+1. **AutoModel** for a strong baseline and a training report.
+2. **Inspect the report and config** to understand the model choice.
+3. **Refine with UniversalModel or GBDTModel** for extra accuracy, constraints, or incremental updates.
 
-**The Architecture:**
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      UniversalModel                         │
-├──────────────┬──────────────────────┬───────────────────────┤
-│   PureTree   │   LinearThenTree     │    RandomForest       │
-│   (GBDT)     │   (Hybrid)           │    (Bagging)          │
-│              │                      │                       │
-│ Best for:    │ Best for:            │ Best for:             │
-│ - General    │ - Time-series        │ - Noisy data          │
-│ - Categorics │ - Trending data      │ - Variance reduction  │
-│              │ - Extrapolation      │ - Avoiding overfit    │
-└──────────────┴──────────────────────┴───────────────────────┘
-```
-
-**Why Rust?**
-
-- Zero-copy, type-safe data handling
-- Deploy without Python runtime
-- Memory safety guarantees
-- Single binary, no dependencies
-
-**What You Get:**
-
-- **AutoML mode selection** — instant data analysis picks `PureTree`, `LinearThenTree`, or `RandomForest` without expensive training trials.
-- **Hybrid Linear+Tree architecture** — `LinearThenTree` mode captures global trends with linear models, then trees learn the residuals. Extrapolates beyond training range.
-- **Built-in preprocessing pipeline** — Scalers, encoders, imputers that serialize _with_ the model. No train/test skew.
-- **Linear Trees** — Decision trees with Ridge regression in leaves. 10-100x fewer trees for piecewise linear data.
-- **Automatic hyperparameter tuning** — AutoTuner with Latin Hypercube Sampling, k-fold CV, parallel evaluation. Tries all three modes automatically.
-- **GPU acceleration** — WGPU (all GPUs), CUDA (NVIDIA), with AVX-512/SVE2/scalar fallback
-- **Production features** — conformal prediction intervals, entropy regularization, ordered target encoding, zero-copy serialization
-
-## Automatic Hyperparameter Optimization
-
-TreeBoost includes a production-ready **AutoTuner** that finds optimal hyperparameters automatically, eliminating manual tuning:
-
-See `examples/autotuner.rs` for comprehensive examples.
-
-## AutoML Mode Selection
-
-TreeBoost can **analyze your dataset and pick the best boosting mode** without a full training sweep.
+## Quick Start (AutoModel)
 
 ```rust
-use treeboost::{UniversalModel, MseLoss};
+use treeboost::{auto_train, AutoModel};
 
-let model = UniversalModel::auto(&dataset, &MseLoss)?;
-println!("Selected mode: {:?}", model.mode());
-println!("Confidence: {:?}", model.selection_confidence());
+let model = auto_train(&df, "target")?;
+println!("{}", model.summary());
+
+model.save("model.rkyv")?;
+model.save_config("config.json")?;
 ```
 
-This analysis uses fast linear/tree probes and produces a full report you can log or inspect.
+This gives you a deployable model plus a config you can tweak later.
 
-**Multi-Seed Ensemble Training**
+## Expected Outputs (After Training)
 
-Combine predictions from multiple models trained with different random seeds:
+After training, you typically save:
+
+- `model.rkyv` for fast inference and deployment
+- `config.json` for reproducible retraining or fine-tuning
+- `model.trb` if you want incremental updates later
 
 ```rust
-use treeboost::{UniversalConfig, UniversalModel, BoostingMode, StackingStrategy};
-use treeboost::loss::MseLoss;
-
-// Train with 5 ensemble members, Ridge stacking
-let config = UniversalConfig::new()
-    .with_mode(BoostingMode::PureTree)
-    .with_ensemble_seeds(vec![1, 2, 3, 4, 5])
-    .with_stacking_strategy(StackingStrategy::Ridge {
-        alpha: 0.01,
-        rank_transform: false,
-        fit_intercept: true,
-        min_weight: 0.01,
-    });
-
-let model = UniversalModel::train(&dataset, config, &MseLoss)?;
-let predictions = model.predict(&dataset);
+let model = auto_train(&df, "target")?;
+model.save("model.rkyv")?;
+model.save_config("config.json")?;
+model.save_trb("model.trb", "initial training")?;
 ```
 
-**Stacking strategies:**
+**Example `config.json` (abridged):**
 
-- **Ridge**: Learns optimal weights via Ridge regression on out-of-fold predictions. Recommended for diverse ensembles.
-- **Average**: Simple equal-weight averaging. Fast and effective for homogeneous ensembles.
-
-```rust
-// Simple averaging
-let config = UniversalConfig::new()
-    .with_mode(BoostingMode::LinearThenTree)
-    .with_ensemble_seeds(vec![42, 43, 44])
-    .with_stacking_strategy(StackingStrategy::Average);
-
-let model = UniversalModel::train(&dataset, config, &MseLoss)?;
+```json
+{
+  "mode": "LinearThenTree",
+  "num_rounds": 120,
+  "learning_rate": 0.1,
+  "subsample": 0.9,
+  "validation_ratio": 0.1,
+  "early_stopping_rounds": 20,
+  "linear_rounds": 10,
+  "tree_config": {
+    "max_depth": 6,
+    "max_leaves": 31,
+    "lambda": 1.0,
+    "min_samples_leaf": 20,
+    "colsample": 0.8
+  },
+  "linear_config": {
+    "lambda": 1.0,
+    "l1_ratio": 0.0,
+    "shrinkage_factor": 0.3
+  }
+}
 ```
 
-## Quick Start
+The actual file includes the full set of tree/linear fields so you can tweak every detail.
 
-### Rust (Native)
+## Quick Start (UniversalModel)
 
 ```rust
 use treeboost::{UniversalConfig, UniversalModel, BoostingMode};
@@ -142,9 +108,8 @@ use treeboost::loss::MseLoss;
 let loader = DatasetLoader::new(255);
 let dataset = loader.load_parquet("data.parquet", "target", None)?;
 
-// Choose your mode based on your data
 let config = UniversalConfig::new()
-    .with_mode(BoostingMode::LinearThenTree)  // Hybrid: linear trend + tree residuals
+    .with_mode(BoostingMode::LinearThenTree)
     .with_num_rounds(100)
     .with_linear_rounds(10)
     .with_learning_rate(0.1);
@@ -161,609 +126,92 @@ let predictions = model.predict(&dataset);
 | Time-series, trending, needs extrapolation | `BoostingMode::LinearThenTree` |
 | Noisy data, want robustness                | `BoostingMode::RandomForest`   |
 
-### Python (via PyO3)
+## Quick Start (GBDTModel)
+
+```rust
+use treeboost::{GBDTConfig, GBDTModel};
+
+let config = GBDTConfig::new()
+    .with_num_rounds(200)
+    .with_max_depth(6)
+    .with_learning_rate(0.05);
+
+let model = GBDTModel::train(&features, num_features, &targets, config, None)?;
+```
+
+## Python (GBDTModel)
 
 ```python
 import numpy as np
-from treeboost import UniversalConfig, UniversalModel, BoostingMode
+from treeboost import GBDTConfig, GBDTModel
 
 X = np.random.randn(10000, 20).astype(np.float32)
 y = (X[:, 0] + X[:, 1] * 2 + np.random.randn(10000) * 0.1).astype(np.float32)
 
-config = UniversalConfig()
-config.mode = BoostingMode.LinearThenTree  # Hybrid mode
+config = GBDTConfig()
 config.num_rounds = 100
-config.linear_rounds = 10
+config.max_depth = 6
 config.learning_rate = 0.1
 
-model = UniversalModel.train(X, y, config)
-predictions = model.predict(X)
+model = GBDTModel.train(X, y, config)
 ```
 
-> **Architecture note:** `UniversalModel` wraps `GBDTModel` internally—`PureTree` mode delegates directly to it. You get GPU acceleration, conformal prediction, and all mature features through either API. `GBDTModel` is still available for direct use if you prefer.
+## What You Get
 
-## How It Works: Automatic Backend Selection
+- **AutoML mode selection** that evaluates probes and explains its choice.
+- **Hybrid Linear+Tree architecture** for trend extrapolation and interactions.
+- **Built-in preprocessing**: encoders, scalers, and imputers that serialize with the model.
+- **Linear Trees** for piecewise-linear data with far fewer trees.
+- **Conformal prediction** for uncertainty intervals.
+- **Incremental learning** via TRB format with drift detection.
 
-```mermaid
-flowchart TD
-    A{GPU Available?} -->|YES| B[WGPU Tensor-Tile<br/>Vulkan/Metal/DX12]
-    A -->|NO| C{CPU Architecture}
+## Backends (Automatic by Default)
 
-    C -->|x86-64| D{AVX-512?}
-    C -->|ARM| E{SVE2?}
-
-    D -->|YES| F[AVX-512 Tensor-Tile<br/>vpconflictd parallel]
-    D -->|NO| G[Scalar Backend<br/>AVX2 loads]
-
-    E -->|YES| H[SVE2 Tensor-Tile<br/>HISTCNT direct]
-    E -->|NO| I[Scalar Backend<br/>NEON loads]
-```
-
-**WebGPU backend:** Works on all GPUs (NVIDIA, AMD, Intel, Apple) via Vulkan, Metal, or DX12. Designed for portability - no installation required beyond your system drivers. Uses Hybrid mode (GPU histogram + CPU tree growth) due to WebGPU's higher dispatch overhead.
-
-**CUDA backend:** Enables Full GPU mode with custom kernels - **2x+ faster than WebGPU** on NVIDIA hardware. Low dispatch latency allows the entire tree building pipeline to run on GPU (histogram, partition, level-wise growth). The speedup grows with larger datasets. Optional but recommended for NVIDIA users.
-
-**Coming soon:** Native Metal and ROCm backends for Apple and AMD GPUs.
-
-**CPU backends:** AVX-512 (3rd Gen Xeon+), SVE2 (ARM Neoverse), with optimized scalar fallback.
-
-### Explicit Backend Selection
-
-By default, TreeBoost auto-detects the best backend. Specify backends explicitly to override:
-
-**Rust:**
+TreeBoost auto-selects the fastest backend. You can override it if needed.
 
 ```rust
 use treeboost::{GBDTConfig, GBDTModel};
 use treeboost::backend::BackendType;
 
 let config = GBDTConfig::new()
-    .with_num_rounds(100)
-    .with_max_depth(6)
-    .with_backend(BackendType::Scalar);  // Force CPU (AVX2/NEON)
+    .with_backend(BackendType::Scalar);
 
 let model = GBDTModel::train(&features, num_features, &targets, config, None)?;
 ```
 
-**Available backends:**
+Supported backends: Scalar, AVX-512, SVE2, WGPU, CUDA.
 
-```rust
-BackendType::Scalar   // CPU: AVX2 (x86) or NEON (ARM) - no GPU overhead
-BackendType::Avx512  // CPU: AVX-512 tensor-tile (x86-64 only)
-BackendType::Sve2    // CPU: SVE2 tensor-tile (ARM only)
-BackendType::Wgpu    // GPU: All GPUs via Vulkan/Metal/DX12 (portable)
-BackendType::Cuda    // GPU: NVIDIA CUDA (2x+ faster than WGPU)
-BackendType::Auto    // (Default) Auto-detect: CUDA > WGPU > AVX-512 > SVE2 > Scalar
-```
-
-**Python:**
-
-```python
-from treeboost import GBDTConfig, GBDTModel
-
-config = GBDTConfig()
-config.num_rounds = 100
-config.max_depth = 6
-config.backend = "scalar"  # Force CPU
-
-model = GBDTModel.train(X, y, config)
-```
-
-### Performance
-
-### Competitive Benchmarks
-
-**Inference:** Optimized for CPU execution via Rayon parallelism. Fast inference on standard compute eliminates GPU deployment overhead—no need for expensive GPU VMs just to serve predictions.
-
-**Training:** Automatic backend selection balances speed and cost. CPU training is already fast for datasets <100K rows; GPU acceleration (CUDA/WGPU) provides significant speedup for larger datasets (100K–1B+ rows) where the computational advantage justifies GPU deployment.
-
-Compared to other pure-Rust GBDT implementations:
-
-**Inference (per-batch prediction):**
-
-| Dataset     | TreeBoost | gbdt-rs  | forust  | Speedup              |
-| ----------- | --------- | -------- | ------- | -------------------- |
-| 100 samples | 47.4 µs   | 135.5 µs | 92.9 µs | **2.9x vs gbdt-rs**  |
-| 1K samples  | 202 µs    | 1.29 ms  | 893 µs  | **6.4x vs gbdt-rs**  |
-| 10K samples | 539 µs    | 11.7 ms  | 8.9 ms  | **21.7x vs gbdt-rs** |
-
-**Training:**
-
-| Dataset                          | TreeBoost | gbdt-rs  | forust   | Speedup              |
-| -------------------------------- | --------- | -------- | -------- | -------------------- |
-| 100K rows, 50 rounds             | 263 ms    | 3,389 ms | 581 ms   | **12.9x vs gbdt-rs** |
-| 100K rows, 100 rounds (parallel) | 344 ms    | 6,600 ms | 2,020 ms | **19.2x vs gbdt-rs** |
-
-_Benchmarks: NVIDIA CUDA (Full GPU mode), raw float32 data, per-iteration time. See `benches/competitors.rs` for reproducible methodology._
-
-**Running Benchmarks:**
+## CLI
 
 ```bash
-# CPU-only comparison (fast, ~2 minutes)
-cargo bench --bench competitors
+# Train a model
+treeboost train --data data.csv --target price --output model.rkyv
 
-# GPU-enabled comparison (with CUDA acceleration)
-cargo bench --bench competitors --features gpu,cuda
-
-# Python cross-library comparison
-python benchmarks/benchmark.py --mode cross-library-gpu
+# Predict
+treeboost predict --model model.rkyv --data test.csv --output predictions.json
 ```
 
-## Core Features
-
-### Robustness
-
-- **Shannon Entropy regularization** — Prevent drift across time windows
-- **Pseudo-Huber loss** — Automatic outlier handling (smoother than MSE)
-- **Split Conformal Prediction** — Distribution-free uncertainty intervals on predictions
-
-### Data Handling
-
-- **Ordered Target Encoding** — High-cardinality categoricals without target leakage
-- **Count-Min Sketch** — Automatic rare category compression (memory efficient)
-
-### Model Control
-
-- **Monotonic/Interaction constraints** — Enforce domain knowledge
-- **Feature importance** — Understand model decisions
-
-### Production
-
-- **Zero-copy serialization** — 100MB+ models load in milliseconds via rkyv
-- **Streaming inference** — Predict on 1M rows in seconds
-
-### Incremental Learning
-
-- **TRB format** — Custom journaled file format for incremental model updates
-- **Warm-start training** — Add trees to existing models without full retraining
-- **O(1) appending** — Updates append to file, no rewrite required
-- **Crash recovery** — CRC32 checksums detect corruption, partial writes recovered
-- **Drift detection** — Monitor distribution shifts between training batches
-
-## The Hybrid Architecture
-
-### How LinearThenTree Works
-
-The `LinearThenTree` mode implements what's sometimes called "Residual Boosting" or "Linear-Forest":
-
-```
-Final Prediction = Linear(x) + Trees(x)
-                   ↑              ↑
-                   │              └── Captures non-linear patterns, interactions
-                   └── Captures global trend (can extrapolate!)
-```
-
-1. **Phase 1**: Train a Ridge/LASSO/ElasticNet model on all features
-2. **Phase 2**: Compute residuals: `r = y - linear_prediction`
-3. **Phase 3**: Train GBDT on residuals (the stuff linear couldn't explain)
-
-This is powerful for data with underlying trends (time-series, pricing, growth curves). Pure trees can't extrapolate—they're bounded by training data. The linear component can.
-
-### LinearTreeBooster (Different Thing!)
-
-Don't confuse `LinearThenTree` mode with `LinearTreeBooster`. They solve different problems:
-
-|                  | LinearThenTree (Mode)                 | LinearTreeBooster (Learner)                   |
-| ---------------- | ------------------------------------- | --------------------------------------------- |
-| **Structure**    | 1 global linear + many standard trees | Trees with linear models _in each leaf_       |
-| **Best for**     | Global trends + local non-linearities | Piecewise linear data (tax brackets, physics) |
-| **Trees needed** | Normal (50-200)                       | Very few (5-20)                               |
-
-Use `LinearTreeBooster` when your data looks like segments with different slopes—the tree finds the breakpoints, Ridge fits each segment.
-
-### Preprocessing That Travels With Your Model
-
-TreeBoost's preprocessing pipeline serializes with your model:
-
-```rust
-use treeboost::preprocessing::{PipelineBuilder, StandardScaler, SimpleImputer};
-
-let pipeline = PipelineBuilder::new()
-    .add_standard_scaler(&["price", "quantity"])
-    .add_simple_imputer(&["category"], ImputeStrategy::Mode)
-    .add_frequency_encoder(&["category"])
-    .build();
-
-// Fit on training data
-pipeline.fit(&train_df)?;
-
-// Transform both train and test identically
-let train_transformed = pipeline.transform(&train_df)?;
-let test_transformed = pipeline.transform(&test_df)?;
-
-// Pipeline state saved with model - no train/test skew at inference
-```
-
-**For Trees**: Use `FrequencyEncoder` or `LabelEncoder`. OneHot creates sparse nightmares.
-
-**For Linear models**: Use `StandardScaler` (essential!) and `OneHotEncoder` (linear needs binary indicators).
-
-**For Hybrid (`LinearThenTree`)**: The linear component gets internally standardized. You can still preprocess for the tree component.
-
-### Incremental Learning
-
-TreeBoost supports incremental model updates via the TRB (TreeBoost) file format—a custom journaled format optimized for appending without rewriting the base model.
-
-**Why Incremental Learning?**
-
-- **Avoid full retraining** — Add trees to existing models with new data
-- **Real-time adaptation** — Update models daily/hourly as data arrives
-- **Lower compute costs** — Train on new data only, not entire history
-
-**Rust:**
-
-```rust
-use treeboost::{AutoModel, UniversalModel};
-use treeboost::dataset::DatasetLoader;
-use treeboost::loss::MseLoss;
-
-// 1. Initial training via AutoModel (convenience wrapper)
-let auto = AutoModel::train(&df_january, "target")?;
-
-// 2. Save UniversalModel to TRB format
-auto.inner().save_trb("model.trb", "Initial training on January data")?;
-
-// 3. Later: Load and update with new data (uses UniversalModel directly)
-let mut model = UniversalModel::load_trb("model.trb")?;
-let loader = DatasetLoader::new(255);
-let new_dataset = loader.load_parquet("february.parquet", "target", None)?;
-let report = model.update(&new_dataset, &MseLoss, 10)?;  // Add 10 trees
-println!("Trees: {} -> {}", report.trees_before, report.trees_after);
-
-// 4. Append update to same file (O(1) append, no rewrite)
-model.save_trb_update("model.trb", new_dataset.num_rows(), "February update")?;
-
-// 5. Inference: Load and predict with BinnedDataset
-let model = UniversalModel::load_trb("model.trb")?;
-let predictions = model.predict(&new_dataset);
-```
-
-> **Note:** TRB format stores `UniversalModel` only. Use `AutoModel` for initial training convenience,
-> then work with `UniversalModel` + `BinnedDataset` for incremental updates and inference.
-
-**The TRB Format:**
-
-```
-┌──────────────────────────────────────────────────────────┐
-│ Header (magic, version, model type, created_at, ...)     │
-├──────────────────────────────────────────────────────────┤
-│ Base Model Blob + CRC32                                  │
-├──────────────────────────────────────────────────────────┤
-│ Update 1: Header + Blob + CRC32  (appended)              │
-├──────────────────────────────────────────────────────────┤
-│ Update 2: Header + Blob + CRC32  (appended)              │
-└──────────────────────────────────────────────────────────┘
-```
-
-- **Journaled appends** — Updates append to file end, base model untouched
-- **CRC32 per segment** — Detect corruption at segment level
-- **Crash recovery** — Truncated writes detected and skipped on load
-- **Forward compatible** — Unknown JSON fields in headers ignored
-
-**Drift Detection:**
-
-Monitor distribution shifts between training batches:
-
-```rust
-use treeboost::monitoring::{IncrementalDriftDetector, check_drift};
-
-// Create detector from training data
-let detector = IncrementalDriftDetector::from_dataset(&train_data);
-
-// Before updating, check for drift
-let result = detector.check_update(&new_data);
-if result.has_significant_drift() {
-    println!("Warning: {}", result);
-    println!("Recommendation: {}", result.recommendation);
-    // Consider full retrain instead of incremental update
-}
-```
+Run `treeboost --help` for full options.
 
 ## Installation
-
-### Rust Library
 
 ```bash
 cargo add treeboost
 ```
 
-### Python Package
-
 ```bash
-# From PyPI
+# Python bindings (requires Rust toolchain + maturin)
 pip install treeboost
-
-# From source (requires Rust toolchain)
-git clone https://github.com/your-org/treeboost
-cd treeboost
-pip install maturin && maturin develop --release
 ```
 
-### Feature Flags
+Feature flags: `gpu`, `cuda`, `mmap`, `python`.
 
-| Feature  | Description                      | Use Case                          |
-| -------- | -------------------------------- | --------------------------------- |
-| `gpu`    | WGPU backend (Vulkan/Metal/DX12) | All GPUs, portable                |
-| `cuda`   | NVIDIA CUDA backend              | 2x+ faster than WGPU on NVIDIA    |
-| `mmap`   | Memory-mapped TRB loading        | Instant model load, zero-copy I/O |
-| `python` | PyO3 bindings                    | Python interop                    |
+## Project Links
 
-**Enable features:**
-
-```bash
-# GPU acceleration
-cargo build --release --features gpu
-
-# CUDA (NVIDIA only, requires CUDA 12.x)
-cargo build --release --features cuda
-
-# Memory-mapped model loading (instant load for large models)
-cargo build --release --features mmap
-```
-
-**Memory-mapped loading (`mmap` feature):**
-
-For large models (100MB+), `mmap` provides true zero-copy I/O:
-
-```rust
-#[cfg(feature = "mmap")]
-{
-    use treeboost::serialize::MmapTrbReader;
-
-    // Instant load - OS pages data lazily, no heap allocation
-    let reader = MmapTrbReader::open("model.trb")?;
-    let model = reader.load_model()?;  // Still faster than TrbReader
-}
-```
-
-| Reader          | Load Time     | Memory        | Use Case                        |
-| --------------- | ------------- | ------------- | ------------------------------- |
-| `TrbReader`     | O(model_size) | O(model_size) | Default, works everywhere       |
-| `MmapTrbReader` | O(1)          | O(1) initial  | Large models, inference servers |
-
-## More Examples
-
-### Rust: Train, Save Config, and Save Model
-
-```rust
-use treeboost::{AutoModel, UniversalModel};
-
-// Train with AutoML (discovers best mode and hyperparameters)
-let auto = AutoModel::train(&df, "target")?;
-
-// Save the discovered configuration to JSON (useful for inspection and reuse)
-auto.save_config("best_config.json")?;
-
-// Save the trained model for inference
-auto.save("model.rkyv")?;
-
-// Later: Load and predict (no need to retrain)
-let loaded = UniversalModel::load("model.rkyv")?;
-let predictions = loaded.predict(&dataset);
-let importances = loaded.feature_importance();
-```
-
-**Export config to inspect discovered hyperparameters:**
-
-```rust
-// After training with AutoML
-let auto = AutoModel::train(&df, "target")?;
-
-// Export to JSON
-let config_json = serde_json::to_string_pretty(auto.config())?;
-std::fs::write("config.json", config_json)?;
-
-// Inspect the JSON to see what mode was chosen,
-// learning rates, ensemble seeds, etc.
-// Then manually adjust and retrain if needed
-```
-
-### Python: Conformal Prediction
-
-```python
-from treeboost import GBDTConfig, GBDTModel
-
-X = np.random.randn(10000, 50).astype(np.float32)
-y = np.sum(X[:, :5], axis=1) + np.random.randn(10000) * 0.5
-
-config = GBDTConfig()
-config.num_rounds = 100
-config.max_depth = 6
-config.calibration_ratio = 0.2    # Reserve 20% for uncertainty estimation
-config.conformal_quantile = 0.9   # 90% prediction intervals
-
-model = GBDTModel.train(X, y, config)
-preds, lower, upper = model.predict_with_intervals(X_test)
-
-# Now you have uncertainty bounds on every prediction
-print(f"Prediction: {preds[0]:.2f}, [{lower[0]:.2f}, {upper[0]:.2f}]")
-```
-
-### Python: Categorical Features
-
-```python
-import pandas as pd
-from treeboost import GBDTConfig, GBDTModel
-
-df = pd.read_csv("data.csv")
-
-# Target encoding for high-cardinality categorical
-config = GBDTConfig()
-config.num_rounds = 100
-config.use_target_encoding = True    # Ordered encoding, no leakage
-config.cms_threshold = 100           # Rare categories → "Unknown"
-
-X = df[feature_cols].values.astype(np.float32)
-y = df['target'].values.astype(np.float32)
-
-model = GBDTModel.train(X, y, config)
-```
-
-### Automatic Hyperparameter Tuning
-
-**Rust:**
-
-```rust
-use treeboost::{AutoTuner, TunerConfig, GridStrategy, EvalStrategy, ParameterSpace, SpacePreset};
-
-let tuner_config = TunerConfig::new()
-    .with_iterations(3)
-    .with_grid_strategy(GridStrategy::LatinHypercube { n_samples: 50 })
-    .with_eval_strategy(EvalStrategy::holdout(0.2).with_folds(5)) // 5-fold CV
-    .with_verbose(true);
-
-let mut tuner = AutoTuner::new(GBDTConfig::new())
-    .with_config(tuner_config)
-    .with_space(ParameterSpace::with_preset(SpacePreset::Regression))
-    .with_callback(|trial, current, total| {
-        println!("Trial {}/{}: val_loss={:.4}", current, total, trial.val_metric);
-    });
-
-let (best_config, history) = tuner.tune(&dataset)?;
-println!("Best validation loss: {:.6}", history.best().unwrap().val_metric);
-
-// Train final model with best configuration
-let final_model = GBDTModel::train_binned(&dataset, best_config)?;
-```
-
-**Python:**
-
-```python
-from treeboost import AutoTuner, TunerConfig, GridStrategy, EvalStrategy, ParameterSpace
-
-tuner = AutoTuner(GBDTConfig())
-tuner_config = (
-    TunerConfig.preset("thorough")
-    .with_grid_strategy(GridStrategy.lhs(50))
-    .with_eval_strategy(EvalStrategy.holdout(0.2).with_folds(5))
-    .with_verbose(True)
-)
-tuner.config = tuner_config
-tuner.space = ParameterSpace.preset("regression")
-
-best_config, history = tuner.tune(X, y)
-print(f"Best validation loss: {history.best().val_metric:.6f}")
-
-# Train final model
-model = GBDTModel.train(X, y, best_config)
-```
-
-## CLI Tool
-
-If you're using the binary distribution:
-
-```bash
-# Train a model (rkyv format for static models)
-treeboost train --data data.csv --target price --output model.rkyv \
-  --rounds 100 --max-depth 6 --learning-rate 0.1
-
-# Make predictions
-treeboost predict --model model.rkyv --data test.csv --output predictions.json
-
-# Inspect the model
-treeboost info --model model.rkyv --importances
-
-# Incremental updates (TRB format)
-treeboost update --model model.trb --data new_data.csv --target price --rounds 10
-```
-
-**Incremental Learning via CLI:**
-
-```bash
-# Inspect a TRB file (shows update history)
-treeboost info --model model.trb
-# Output:
-#   Format version: 1
-#   Created: 2024-01-15 10:30:00 UTC
-#   Update History:
-#     Update 1: 2024-02-01 09:00:00 UTC (500 rows, "February data")
-#     Update 2: 2024-03-01 09:00:00 UTC (450 rows, "March data")
-#   Current tree count: 120
-
-# Update with new data
-treeboost update --model model.trb --data april.csv --target price \
-  --rounds 10 --description "April update"
-
-# Force load despite corrupted updates (loads base only)
-treeboost info --model model.trb --force
-```
-
-Run `treeboost <command> --help` for all available options.
-
-## Configuration Reference
-
-### Core Hyperparameters
-
-| Parameter       | Default | Description                                                   |
-| --------------- | ------- | ------------------------------------------------------------- |
-| `num_rounds`    | 100     | Number of boosting iterations                                 |
-| `max_depth`     | 6       | Maximum tree depth (deeper = more expressive but slower)      |
-| `learning_rate` | 0.1     | Shrinkage per round (lower = more stable but slower training) |
-| `max_leaves`    | 31      | Maximum leaves per tree                                       |
-| `lambda`        | 1.0     | L2 leaf regularization                                        |
-| `loss`          | `mse`   | `mse` or `huber` (huber for outliers)                         |
-
-### Advanced Features
-
-| Parameter             | Default | Description                                            |
-| --------------------- | ------- | ------------------------------------------------------ |
-| `entropy_weight`      | 0.0     | Shannon entropy penalty (prevents drift)               |
-| `subsample`           | 1.0     | Row sampling ratio per round                           |
-| `colsample`           | 1.0     | Feature sampling ratio per tree                        |
-| `calibration_ratio`   | 0.0     | Fraction of data reserved for conformal calibration    |
-| `conformal_quantile`  | 0.9     | Quantile for prediction intervals (0.9 = 90% coverage) |
-| `use_target_encoding` | false   | Enable ordered target encoding for categoricals        |
-| `cms_threshold`       | 0       | Rare category threshold (0 = disabled)                 |
-
-### Constraints
-
-```python
-config.monotonic_constraints = [
-    MonotonicConstraint.Increasing,   # Feature 0
-    MonotonicConstraint.None,         # Feature 1
-    MonotonicConstraint.Decreasing,   # Feature 2
-]
-
-config.interaction_groups = [
-    [0, 1, 2],  # These features can interact
-    [3, 4],     # Separate interaction group
-]
-```
-
-## Troubleshooting
-
-**Check which backend is being used:**
-
-```bash
-RUST_LOG=treeboost=debug treeboost train ...
-```
-
-**GPU not detected:**
-
-- Verify your GPU drivers are installed (NVIDIA, AMD, Intel, or Apple)
-- WGPU supports Vulkan (Linux), Metal (macOS), DX12 (Windows)
-- For NVIDIA CUDA: Install CUDA 12.x separately
-
-**Out of memory during training:**
-
-```bash
-treeboost train ... --subsample 0.8 --colsample 0.8
-```
-
-**Model won't load:**
-
-- Ensure you're using the same TreeBoost version for save/load
-- The `.rkyv` file is tied to the binary layout; recompiling TreeBoost may break compatibility
-
-## Acknowledgments
-
-TreeBoost builds on the collective knowledge of the GBDT community. We acknowledge the following projects that shaped our design and implementation:
-
-- **[XGBoost](https://github.com/dmlc/xgboost)** — Industry-standard GBDT with GPU support; inspired our histogram-based approach and Full GPU mode architecture.
-- **[LightGBM](https://github.com/Mottl/lightgbm)** — Leaf-wise growth strategy and histogram optimization techniques.
-- **[CatBoost](https://github.com/catboost/catboost/)** — Ordered target encoding for categorical features and conformal prediction intervals.
-- **[Forust](https://github.com/jinlow/forust)** — Pure-Rust GBDT implementation; motivated our focus on Rust-first performance.
-- **[WarpGBM](https://github.com/jefferythewind/warpgbm/tree/main/warpgbm)** — GPU-accelerated histogram building patterns.
+- **API Reference**: [docs/API.md](docs/API.md) - Complete API documentation with examples
+- Docs: https://docs.rs/treeboost
+- Crate: https://crates.io/crates/treeboost
+- GitHub: https://github.com/ml-rust/treeboost
 
 ## License
 
