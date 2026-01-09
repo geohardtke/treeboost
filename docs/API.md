@@ -12,9 +12,10 @@ Complete API documentation for TreeBoost's Rust and Python interfaces.
 6. [Loss Functions](#loss-functions) - Training objectives
 7. [Inference](#inference) - Prediction and uncertainty
 8. [Encoding](#encoding) - Categorical feature handling
-9. [Serialization](#serialization) - Model persistence
-10. [Backend Selection](#backend-selection) - Hardware acceleration
-11. [GBDTModel (Classic)](#gbdtmodel-classic) - The original GBDT-only API (still available)
+9. [Serialization](#serialization) - Model persistence (rkyv, bincode)
+10. [Incremental Learning](#incremental-learning) - **NEW:** TRB format, warm-start updates, drift detection
+11. [Backend Selection](#backend-selection) - Hardware acceleration
+12. [GBDTModel (Classic)](#gbdtmodel-classic) - The original GBDT-only API (still available)
 
 ---
 
@@ -1285,6 +1286,320 @@ from treeboost import GBDTModel
 model.save("model.rkyv", format="rkyv")
 model = GBDTModel.load("model.rkyv", format="rkyv")
 ```
+
+---
+
+## Incremental Learning
+
+Update models with new data without full retraining. TreeBoost provides a custom TRB (TreeBoost) file format optimized for incremental updates.
+
+### Why Incremental Learning?
+
+| Scenario | Without Incremental | With Incremental |
+|----------|---------------------|------------------|
+| Daily model updates | Retrain on full history | Add trees from new data only |
+| Storage for updates | New file per version | Single file, append updates |
+| Compute cost | O(total_data) | O(new_data) |
+| Recovery from crash | Restart training | Resume from last checkpoint |
+
+### TRB Workflow Overview
+
+TRB format stores `UniversalModel` only. The typical workflow:
+
+1. **Initial training** — Use `AutoModel` for convenience (handles DataFrames)
+2. **Save to TRB** — Extract `UniversalModel` and save
+3. **Incremental updates** — Load `UniversalModel`, update with `BinnedDataset`
+4. **Inference** — Load `UniversalModel`, predict with `BinnedDataset`
+
+```rust
+use treeboost::{AutoModel, UniversalModel};
+use treeboost::dataset::DatasetLoader;
+use treeboost::loss::MseLoss;
+
+// 1. Initial training via AutoModel (convenience)
+let auto = AutoModel::train(&df, "target")?;
+
+// 2. Save UniversalModel to TRB
+auto.inner().save_trb("model.trb", "Initial training")?;
+
+// 3. Later: Load and update (UniversalModel + BinnedDataset)
+let mut model = UniversalModel::load_trb("model.trb")?;
+let loader = DatasetLoader::new(255);
+let new_data = loader.load_parquet("new_data.parquet", "target", None)?;
+
+let report = model.update(&new_data, &MseLoss, 10)?;
+println!("Trees: {} -> {} (+{})", report.trees_before, report.trees_after, report.trees_added);
+
+// 4. Append update to file (O(1), no rewrite)
+model.save_trb_update("model.trb", new_data.num_rows(), "Update batch")?;
+
+// 5. Inference
+let model = UniversalModel::load_trb("model.trb")?;
+let predictions = model.predict(&new_data);
+```
+
+### IncrementalUpdateReport
+
+Returned by `UniversalModel::update()`:
+
+```rust
+pub struct IncrementalUpdateReport {
+    pub trees_before: usize,      // Tree count before update
+    pub trees_after: usize,       // Tree count after update
+    pub trees_added: usize,       // trees_after - trees_before
+    pub mode: BoostingMode,       // PureTree, LinearThenTree, or RandomForest
+}
+```
+
+### TRB File Format
+
+Custom journaled format for incremental model persistence:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ TrbHeader (JSON + length prefix)                            │
+│   - magic: "TRB1"                                           │
+│   - format_version: 1                                       │
+│   - model_type: "UniversalModel"                           │
+│   - boosting_mode: "PureTree" | "LinearThenTree" | ...     │
+│   - num_features: 50                                        │
+│   - created_at: 1704067200 (Unix timestamp)                │
+│   - metadata: "Initial training description"                │
+│   - base_blob_size: 1234567                                │
+├─────────────────────────────────────────────────────────────┤
+│ Base Model Blob (rkyv serialized UniversalModel)            │
+│   + CRC32 checksum (4 bytes)                               │
+├─────────────────────────────────────────────────────────────┤
+│ Update 1: TrbUpdateHeader (JSON) + Blob + CRC32            │
+│   - update_type: Trees | Linear | Full                     │
+│   - created_at: timestamp                                   │
+│   - rows_trained: 5000                                     │
+│   - description: "February update"                         │
+├─────────────────────────────────────────────────────────────┤
+│ Update 2: TrbUpdateHeader + Blob + CRC32                   │
+│ ...                                                         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key Properties:**
+
+- **O(1) appends** — Updates append to file end, base model never rewritten
+- **CRC32 per segment** — Corruption detected at segment level
+- **Crash recovery** — Truncated writes detected and skipped
+- **Forward compatible** — Unknown JSON fields ignored (safe for version upgrades)
+- **File locking** — Exclusive locks prevent concurrent writes
+
+### TrbReader / TrbWriter
+
+Low-level API for TRB file manipulation:
+
+```rust
+use treeboost::serialize::{TrbWriter, TrbReader, TrbHeader, TrbUpdateHeader, UpdateType};
+
+// Writing
+let header = TrbHeader {
+    format_version: 1,
+    model_type: "UniversalModel".to_string(),
+    boosting_mode: "PureTree".to_string(),
+    num_features: 50,
+    created_at: current_timestamp(),
+    metadata: "My model".to_string(),
+    base_blob_size: base_blob.len() as u64,
+};
+
+let writer = TrbWriter::new("model.trb", header, &base_blob)?;
+drop(writer);  // Finishes write
+
+// Appending updates
+let mut writer = open_for_append("model.trb")?;
+let update_header = TrbUpdateHeader {
+    update_type: UpdateType::Trees,
+    created_at: current_timestamp(),
+    rows_trained: 5000,
+    description: "February update".to_string(),
+};
+writer.append_update(&update_header, &update_blob)?;
+
+// Reading
+let mut reader = TrbReader::open("model.trb")?;
+let header = reader.header();  // &TrbHeader
+let base_blob = reader.read_base_blob()?;
+
+// Iterate updates (handles crash recovery automatically)
+for (update_header, blob) in reader.iter_updates()? {
+    println!("Update: {} rows", update_header.rows_trained);
+}
+
+// Load all segments at once
+let segments = reader.load_all_segments()?;
+```
+
+### UniversalModel Incremental API
+
+Lower-level API for custom update logic:
+
+```rust
+use treeboost::{UniversalModel, UniversalConfig, BoostingMode};
+use treeboost::loss::MseLoss;
+
+// Train initial model
+let config = UniversalConfig::new()
+    .with_mode(BoostingMode::PureTree)
+    .with_num_rounds(100);
+let mut model = UniversalModel::train(&dataset, config, &MseLoss)?;
+
+// Update with new data
+let report = model.update(&new_dataset, &MseLoss, 10)?;  // Add 10 trees
+println!("Added {} trees", report.trees_added);
+
+// Save/load TRB
+model.save_trb("model.trb", "description")?;
+let loaded = UniversalModel::load_trb("model.trb")?;
+```
+
+### IncrementalUpdateReport
+
+Returned by `UniversalModel::update()`:
+
+```rust
+pub struct IncrementalUpdateReport {
+    pub trees_before: usize,
+    pub trees_after: usize,
+    pub trees_added: usize,
+    pub mode: BoostingMode,
+}
+```
+
+### Drift Detection
+
+Monitor distribution shifts before updating:
+
+```rust
+use treeboost::monitoring::{
+    IncrementalDriftDetector,
+    DriftRecommendation,
+    check_drift
+};
+
+// Create detector from training data
+let detector = IncrementalDriftDetector::from_dataset(&train_data)
+    .with_thresholds(0.1, 0.25);  // warning, critical
+
+// Check new data before updating
+let result = detector.check_update(&new_data);
+
+println!("Mean drift: {:.4}", result.mean_drift);
+println!("Max drift feature: {:?}", result.max_drift_feature);
+println!("Alert level: {:?}", result.shift_result.alert);
+
+match result.recommendation {
+    DriftRecommendation::ProceedNormally => {
+        // Safe to update incrementally
+        model.update(&new_data, &loss, 10)?;
+    }
+    DriftRecommendation::ProceedWithCaution => {
+        // Update but monitor performance closely
+        model.update(&new_data, &loss, 10)?;
+    }
+    DriftRecommendation::ConsiderRetrain => {
+        // Significant drift - consider full retrain
+        println!("Warning: {}", result);
+    }
+    DriftRecommendation::RetrainRecommended => {
+        // Critical drift - full retrain recommended
+        println!("Critical: {}", result);
+    }
+}
+```
+
+### DriftHistory
+
+Track drift across multiple updates:
+
+```rust
+use treeboost::monitoring::DriftHistory;
+
+let mut history = DriftHistory::new();
+
+// Record each update's drift check
+for batch in batches {
+    let result = detector.check_update(&batch);
+    history.record(&result);
+
+    if !result.has_critical_drift() {
+        model.update(&batch, &loss, 10)?;
+    }
+}
+
+println!("{}", history);
+// Output:
+// Drift History (10 updates):
+//   Drift rate: 20.0% (1 warnings, 1 critical)
+//   Mean drift: 0.0823, Max drift: 0.3412
+//   Frequently drifted:
+//     - feature_5 (3 times)
+//     - feature_12 (2 times)
+```
+
+### EMA-Based Scaler Updates
+
+StandardScaler supports exponential moving average for adapting to drift:
+
+```rust
+use treeboost::preprocessing::StandardScaler;
+
+// Create scaler with EMA mode (alpha=0.1)
+let mut scaler = StandardScaler::with_forget_factor(0.1);
+
+// Each partial_fit blends new statistics with history
+// new_stat = (1 - alpha) * old_stat + alpha * batch_stat
+scaler.partial_fit(&batch1, num_features)?;  // 100% batch1
+scaler.partial_fit(&batch2, num_features)?;  // 90% batch1, 10% batch2
+scaler.partial_fit(&batch3, num_features)?;  // 81% batch1, 9% batch2, 10% batch3
+
+// After 10 batches, batch1 influence: (1-0.1)^10 ≈ 35%
+```
+
+### CLI for Incremental Learning
+
+```bash
+# Update existing TRB model with new data
+treeboost update --model model.trb --data new.csv --target price \
+  --rounds 10 --description "March 2024 update"
+
+# Inspect TRB file (shows update history)
+treeboost info --model model.trb
+
+# Force load despite corrupted updates
+treeboost info --model model.trb --force
+```
+
+### Method Summary
+
+**UniversalModel (TRB format):**
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `load_trb(path)` | Result<UniversalModel> | Load model from TRB file |
+| `save_trb(path, desc)` | Result<()> | Save model to TRB format |
+| `save_trb_update(path, rows, desc)` | Result<()> | Append update to existing TRB |
+| `update(&dataset, &loss, rounds)` | Result<IncrementalUpdateReport> | Add trees from BinnedDataset |
+| `predict(&dataset)` | Vec<f32> | Inference on BinnedDataset |
+
+**AutoModel (initial training only):**
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `train(&df, target)` | Result<AutoModel> | Train from DataFrame |
+| `inner()` | &UniversalModel | Get underlying model for TRB save |
+
+**IncrementalDriftDetector:**
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `from_dataset(&data)` | Self | Create from reference distribution |
+| `with_thresholds(warn, crit)` | Self | Set PSI thresholds |
+| `check_update(&data)` | IncrementalDriftResult | Check for drift |
 
 ---
 

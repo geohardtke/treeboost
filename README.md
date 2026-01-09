@@ -283,6 +283,14 @@ python benchmarks/benchmark.py --mode cross-library-gpu
 - **Zero-copy serialization** — 100MB+ models load in milliseconds via rkyv
 - **Streaming inference** — Predict on 1M rows in seconds
 
+### Incremental Learning
+
+- **TRB format** — Custom journaled file format for incremental model updates
+- **Warm-start training** — Add trees to existing models without full retraining
+- **O(1) appending** — Updates append to file, no rewrite required
+- **Crash recovery** — CRC32 checksums detect corruption, partial writes recovered
+- **Drift detection** — Monitor distribution shifts between training batches
+
 ## The Hybrid Architecture
 
 ### How LinearThenTree Works
@@ -342,6 +350,85 @@ let test_transformed = pipeline.transform(&test_df)?;
 **For Linear models**: Use `StandardScaler` (essential!) and `OneHotEncoder` (linear needs binary indicators).
 
 **For Hybrid (`LinearThenTree`)**: The linear component gets internally standardized. You can still preprocess for the tree component.
+
+### Incremental Learning
+
+TreeBoost supports incremental model updates via the TRB (TreeBoost) file format—a custom journaled format optimized for appending without rewriting the base model.
+
+**Why Incremental Learning?**
+
+- **Avoid full retraining** — Add trees to existing models with new data
+- **Real-time adaptation** — Update models daily/hourly as data arrives
+- **Lower compute costs** — Train on new data only, not entire history
+
+**Rust:**
+
+```rust
+use treeboost::{AutoModel, UniversalModel};
+use treeboost::dataset::DatasetLoader;
+use treeboost::loss::MseLoss;
+
+// 1. Initial training via AutoModel (convenience wrapper)
+let auto = AutoModel::train(&df_january, "target")?;
+
+// 2. Save UniversalModel to TRB format
+auto.inner().save_trb("model.trb", "Initial training on January data")?;
+
+// 3. Later: Load and update with new data (uses UniversalModel directly)
+let mut model = UniversalModel::load_trb("model.trb")?;
+let loader = DatasetLoader::new(255);
+let new_dataset = loader.load_parquet("february.parquet", "target", None)?;
+let report = model.update(&new_dataset, &MseLoss, 10)?;  // Add 10 trees
+println!("Trees: {} -> {}", report.trees_before, report.trees_after);
+
+// 4. Append update to same file (O(1) append, no rewrite)
+model.save_trb_update("model.trb", new_dataset.num_rows(), "February update")?;
+
+// 5. Inference: Load and predict with BinnedDataset
+let model = UniversalModel::load_trb("model.trb")?;
+let predictions = model.predict(&new_dataset);
+```
+
+> **Note:** TRB format stores `UniversalModel` only. Use `AutoModel` for initial training convenience,
+> then work with `UniversalModel` + `BinnedDataset` for incremental updates and inference.
+
+**The TRB Format:**
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ Header (magic, version, model type, created_at, ...)     │
+├──────────────────────────────────────────────────────────┤
+│ Base Model Blob + CRC32                                  │
+├──────────────────────────────────────────────────────────┤
+│ Update 1: Header + Blob + CRC32  (appended)              │
+├──────────────────────────────────────────────────────────┤
+│ Update 2: Header + Blob + CRC32  (appended)              │
+└──────────────────────────────────────────────────────────┘
+```
+
+- **Journaled appends** — Updates append to file end, base model untouched
+- **CRC32 per segment** — Detect corruption at segment level
+- **Crash recovery** — Truncated writes detected and skipped on load
+- **Forward compatible** — Unknown JSON fields in headers ignored
+
+**Drift Detection:**
+
+Monitor distribution shifts between training batches:
+
+```rust
+use treeboost::monitoring::{IncrementalDriftDetector, check_drift};
+
+// Create detector from training data
+let detector = IncrementalDriftDetector::from_dataset(&train_data);
+
+// Before updating, check for drift
+let result = detector.check_update(&new_data);
+if result.has_significant_drift() {
+    println!("Warning: {}", result);
+    println!("Recommendation: {}", result.recommendation);
+    // Consider full retrain instead of incremental update
+}
+```
 
 ## Installation
 
@@ -495,7 +582,7 @@ model = GBDTModel.train(X, y, best_config)
 If you're using the binary distribution:
 
 ```bash
-# Train a model
+# Train a model (rkyv format for static models)
 treeboost train --data data.csv --target price --output model.rkyv \
   --rounds 100 --max-depth 6 --learning-rate 0.1
 
@@ -504,6 +591,30 @@ treeboost predict --model model.rkyv --data test.csv --output predictions.json
 
 # Inspect the model
 treeboost info --model model.rkyv --importances
+
+# Incremental updates (TRB format)
+treeboost update --model model.trb --data new_data.csv --target price --rounds 10
+```
+
+**Incremental Learning via CLI:**
+
+```bash
+# Inspect a TRB file (shows update history)
+treeboost info --model model.trb
+# Output:
+#   Format version: 1
+#   Created: 2024-01-15 10:30:00 UTC
+#   Update History:
+#     Update 1: 2024-02-01 09:00:00 UTC (500 rows, "February data")
+#     Update 2: 2024-03-01 09:00:00 UTC (450 rows, "March data")
+#   Current tree count: 120
+
+# Update with new data
+treeboost update --model model.trb --data april.csv --target price \
+  --rounds 10 --description "April update"
+
+# Force load despite corrupted updates (loads base only)
+treeboost info --model model.trb --force
 ```
 
 Run `treeboost <command> --help` for all available options.
