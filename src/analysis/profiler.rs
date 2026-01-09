@@ -40,6 +40,105 @@ use std::collections::HashSet;
 // Use alias to avoid conflict with Polars DataType
 use polars::prelude::DataType as PolarsDataType;
 
+/// Time granularity detected from date/datetime differences
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeGranularity {
+    /// Sub-hourly data (minutes, seconds)
+    SubHourly,
+    /// Hourly observations
+    Hourly,
+    /// Daily observations
+    Daily,
+    /// Weekly observations
+    Weekly,
+    /// Monthly observations
+    Monthly,
+    /// Yearly observations
+    Yearly,
+    /// Could not determine granularity
+    Unknown,
+}
+
+impl TimeGranularity {
+    /// Get suggested lag periods for this granularity
+    pub fn suggested_lag_periods(&self) -> Vec<usize> {
+        match self {
+            TimeGranularity::SubHourly => vec![1, 5, 10, 30, 60],
+            TimeGranularity::Hourly => vec![1, 6, 12, 24],
+            TimeGranularity::Daily => vec![1, 3, 7, 14],
+            TimeGranularity::Weekly => vec![1, 4, 12],
+            TimeGranularity::Monthly => vec![1, 3, 6, 12],
+            TimeGranularity::Yearly => vec![1, 2, 5],
+            TimeGranularity::Unknown => vec![1, 3, 7],
+        }
+    }
+
+    /// Get suggested rolling windows for this granularity
+    pub fn suggested_rolling_windows(&self) -> Vec<usize> {
+        match self {
+            TimeGranularity::SubHourly => vec![10, 30, 60, 120],
+            TimeGranularity::Hourly => vec![12, 24, 48],
+            TimeGranularity::Daily => vec![7, 14, 28],
+            TimeGranularity::Weekly => vec![4, 12, 26],
+            TimeGranularity::Monthly => vec![3, 6, 12],
+            TimeGranularity::Yearly => vec![2, 5, 10],
+            TimeGranularity::Unknown => vec![7, 14, 28],
+        }
+    }
+}
+
+impl std::fmt::Display for TimeGranularity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TimeGranularity::SubHourly => write!(f, "sub-hourly"),
+            TimeGranularity::Hourly => write!(f, "hourly"),
+            TimeGranularity::Daily => write!(f, "daily"),
+            TimeGranularity::Weekly => write!(f, "weekly"),
+            TimeGranularity::Monthly => write!(f, "monthly"),
+            TimeGranularity::Yearly => write!(f, "yearly"),
+            TimeGranularity::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+/// Panel data structure information
+///
+/// Panel data (also called longitudinal data) has observations across multiple
+/// entities over time (e.g., daily stock prices for multiple stocks).
+#[derive(Debug, Clone)]
+pub struct PanelDataInfo {
+    /// Name of the group/entity column (e.g., "stock_code", "user_id")
+    pub group_column: String,
+    /// Name of the date/time column
+    pub date_column: String,
+    /// Number of unique groups/entities
+    pub num_groups: usize,
+    /// Average number of observations per group
+    pub avg_observations_per_group: f32,
+    /// Minimum observations in any group
+    pub min_observations_per_group: usize,
+    /// Maximum observations in any group
+    pub max_observations_per_group: usize,
+    /// Confidence score for this detection [0, 1]
+    pub confidence: f32,
+    /// Detected time granularity
+    pub time_granularity: TimeGranularity,
+}
+
+impl std::fmt::Display for PanelDataInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Panel data: {} groups by '{}', ordered by '{}' ({} granularity, {:.1} avg obs/group)",
+            self.num_groups,
+            self.group_column,
+            self.date_column,
+            self.time_granularity,
+            self.avg_observations_per_group
+        )
+    }
+}
+
 /// Data type classification for a column
 ///
 /// Text vs Categorical distinction is critical:
@@ -617,6 +716,243 @@ impl DataFrameProfile {
             .collect()
     }
 
+    /// Get names of datetime columns
+    pub fn datetime_column_names(&self) -> Vec<&str> {
+        self.columns
+            .iter()
+            .filter(|p| p.dtype == ColumnDataType::DateTime)
+            .map(|p| p.name.as_str())
+            .collect()
+    }
+
+    /// Detect panel data structure in the dataset
+    ///
+    /// Panel data has observations across multiple entities over time.
+    /// This method looks for:
+    /// 1. A datetime column (the time dimension)
+    /// 2. A categorical column with moderate cardinality (the entity/group dimension)
+    ///
+    /// Returns `Some(PanelDataInfo)` if panel structure is detected with sufficient confidence.
+    pub fn detect_panel_structure(&self, df: &DataFrame) -> Option<PanelDataInfo> {
+        // Step 1: Find datetime columns
+        let datetime_cols: Vec<&ColumnProfile> = self
+            .columns
+            .iter()
+            .filter(|p| p.dtype == ColumnDataType::DateTime)
+            .collect();
+
+        if datetime_cols.is_empty() {
+            return None;
+        }
+
+        // Step 2: Find candidate group columns (categorical with moderate cardinality)
+        // Good candidates: cardinality 2-1000, cardinality_ratio < 0.5
+        let group_candidates: Vec<&ColumnProfile> = self
+            .columns
+            .iter()
+            .filter(|p| {
+                p.dtype == ColumnDataType::Categorical
+                    && p.cardinality >= 2
+                    && p.cardinality <= 1000
+                    && p.cardinality_ratio < 0.5
+            })
+            .collect();
+
+        if group_candidates.is_empty() {
+            return None;
+        }
+
+        // Step 3: Score each (group_col, date_col) combination
+        let mut best_score = 0.0f32;
+        let mut best_info: Option<PanelDataInfo> = None;
+
+        for date_col in &datetime_cols {
+            for group_col in &group_candidates {
+                if let Some(info) =
+                    self.score_panel_candidate(df, &group_col.name, &date_col.name, group_col)
+                {
+                    if info.confidence > best_score {
+                        best_score = info.confidence;
+                        best_info = Some(info);
+                    }
+                }
+            }
+        }
+
+        // Only return if confidence > 0.5
+        best_info.filter(|info| info.confidence > 0.5)
+    }
+
+    /// Score a panel data candidate (group_col, date_col pair)
+    fn score_panel_candidate(
+        &self,
+        df: &DataFrame,
+        group_col: &str,
+        date_col: &str,
+        group_profile: &ColumnProfile,
+    ) -> Option<PanelDataInfo> {
+        // Get the columns
+        let group_series = df.column(group_col).ok()?;
+        let date_series = df.column(date_col).ok()?;
+
+        let num_rows = df.height();
+        let num_groups = group_profile.cardinality;
+
+        if num_groups == 0 {
+            return None;
+        }
+
+        // Compute observations per group
+        let avg_obs = num_rows as f32 / num_groups as f32;
+
+        // Compute min/max observations per group by counting
+        let (min_obs, max_obs) = Self::compute_group_obs_range(group_series, num_groups);
+
+        // Detect time granularity
+        let time_granularity = Self::detect_time_granularity(date_series);
+
+        // Compute confidence score based on multiple factors:
+        // 1. Avg observations per group (more = better, up to a point)
+        // 2. Balance across groups (min_obs / max_obs)
+        // 3. Reasonable cardinality ratio
+
+        let obs_score = (avg_obs.min(100.0) / 100.0).sqrt(); // 0-1, favors >=100 obs/group
+        let balance_score = if max_obs > 0 {
+            (min_obs as f32 / max_obs as f32).sqrt()
+        } else {
+            0.0
+        };
+        let cardinality_score = 1.0 - group_profile.cardinality_ratio; // Lower ratio = better
+
+        // Weight the scores
+        let confidence = 0.4 * obs_score + 0.3 * balance_score + 0.3 * cardinality_score;
+
+        Some(PanelDataInfo {
+            group_column: group_col.to_string(),
+            date_column: date_col.to_string(),
+            num_groups,
+            avg_observations_per_group: avg_obs,
+            min_observations_per_group: min_obs,
+            max_observations_per_group: max_obs,
+            confidence,
+            time_granularity,
+        })
+    }
+
+    /// Compute min/max observations per group
+    fn compute_group_obs_range(group_series: &Column, num_groups: usize) -> (usize, usize) {
+        use std::collections::HashMap;
+
+        // Count observations per group
+        let mut counts: HashMap<String, usize> = HashMap::with_capacity(num_groups);
+
+        // Sample for efficiency if large dataset
+        let sample_size = group_series.len().min(100_000);
+        let step = group_series.len() / sample_size.max(1);
+
+        for i in (0..group_series.len()).step_by(step.max(1)) {
+            if let Ok(val) = group_series.get(i) {
+                let key = format!("{:?}", val);
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+
+        if counts.is_empty() {
+            return (0, 0);
+        }
+
+        let min_obs = *counts.values().min().unwrap_or(&0);
+        let max_obs = *counts.values().max().unwrap_or(&0);
+
+        // Scale back if we sampled
+        let scale = group_series.len() as f32 / sample_size as f32;
+        (
+            (min_obs as f32 * scale) as usize,
+            (max_obs as f32 * scale) as usize,
+        )
+    }
+
+    /// Detect time granularity from a datetime column
+    fn detect_time_granularity(date_series: &Column) -> TimeGranularity {
+        // Try to compute median time difference between consecutive observations
+        let dtype = date_series.dtype();
+
+        // Extract timestamps as f64 (seconds or days depending on type)
+        let timestamps: Vec<f64> = match dtype {
+            PolarsDataType::Date => {
+                // Date is days since epoch
+                date_series
+                    .cast(&PolarsDataType::Int32)
+                    .ok()
+                    .and_then(|c| c.i32().ok().map(|ca| ca.into_iter().flatten().map(|v| v as f64).collect()))
+                    .unwrap_or_default()
+            }
+            PolarsDataType::Datetime(_, _) => {
+                // Datetime is microseconds since epoch, convert to days
+                date_series
+                    .cast(&PolarsDataType::Int64)
+                    .ok()
+                    .and_then(|c| {
+                        c.i64().ok().map(|ca| {
+                            ca.into_iter()
+                                .flatten()
+                                .map(|v| v as f64 / (1_000_000.0 * 86400.0)) // microseconds to days
+                                .collect()
+                        })
+                    })
+                    .unwrap_or_default()
+            }
+            _ => return TimeGranularity::Unknown,
+        };
+
+        if timestamps.len() < 2 {
+            return TimeGranularity::Unknown;
+        }
+
+        // Sort timestamps and compute differences
+        let mut sorted = timestamps.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Compute differences (sample for efficiency)
+        let mut diffs: Vec<f64> = Vec::new();
+        let step = (sorted.len() / 1000).max(1);
+        for i in (1..sorted.len()).step_by(step) {
+            let diff = sorted[i] - sorted[i - 1];
+            if diff > 0.0 {
+                diffs.push(diff);
+            }
+        }
+
+        if diffs.is_empty() {
+            return TimeGranularity::Unknown;
+        }
+
+        // Get median difference (in days)
+        diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median_diff_days = diffs[diffs.len() / 2];
+
+        // Classify based on median difference
+        // Note: These are in days
+        if median_diff_days < 1.0 / 24.0 {
+            // < 1 hour
+            TimeGranularity::SubHourly
+        } else if median_diff_days < 0.5 {
+            // < 12 hours
+            TimeGranularity::Hourly
+        } else if median_diff_days < 3.0 {
+            // < 3 days
+            TimeGranularity::Daily
+        } else if median_diff_days < 14.0 {
+            // < 2 weeks
+            TimeGranularity::Weekly
+        } else if median_diff_days < 60.0 {
+            // < 2 months
+            TimeGranularity::Monthly
+        } else {
+            TimeGranularity::Yearly
+        }
+    }
+
     /// Generate human-readable report
     pub fn report(&self) -> String {
         let mut report = String::new();
@@ -815,5 +1151,99 @@ mod tests {
         let y_neg = vec![10.0f32, 8.0, 6.0, 4.0, 2.0];
         let r_neg = compute_correlation_mixed(&x, &y_neg);
         assert!((r_neg + 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_time_granularity_suggestions() {
+        // Daily granularity
+        let lags = TimeGranularity::Daily.suggested_lag_periods();
+        assert!(lags.contains(&1));
+        assert!(lags.contains(&7));
+
+        let windows = TimeGranularity::Daily.suggested_rolling_windows();
+        assert!(windows.contains(&7));
+        assert!(windows.contains(&14));
+    }
+
+    #[test]
+    fn test_panel_data_detection() {
+        use chrono::{Datelike, NaiveDate};
+
+        // Create panel-like data: 2 stocks × 5 days = 10 rows
+        let dates: Vec<i32> = vec![
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 4).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 4).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
+        ]
+        .iter()
+        .map(|d| d.num_days_from_ce())
+        .collect();
+
+        let df = DataFrame::new(vec![
+            Series::new("stock_code".into(), vec!["AAPL", "AAPL", "AAPL", "AAPL", "AAPL", "GOOGL", "GOOGL", "GOOGL", "GOOGL", "GOOGL"]).into(),
+            Series::new("date".into(), dates).cast(&PolarsDataType::Date).unwrap().into(),
+            Series::new("price".into(), vec![150.0f64, 151.0, 152.0, 151.5, 153.0, 2800.0, 2810.0, 2805.0, 2820.0, 2830.0]).into(),
+            Series::new("target".into(), vec![0.01f64, 0.02, -0.01, 0.01, 0.02, 0.01, -0.01, 0.02, 0.01, 0.01]).into(),
+        ])
+        .unwrap();
+
+        let profile = DataFrameProfile::analyze(&df, "target").unwrap();
+
+        // Detect panel structure
+        let panel_info = profile.detect_panel_structure(&df);
+
+        assert!(panel_info.is_some(), "Should detect panel structure");
+        let info = panel_info.unwrap();
+
+        assert_eq!(info.group_column, "stock_code");
+        assert_eq!(info.date_column, "date");
+        assert_eq!(info.num_groups, 2);
+        assert!((info.avg_observations_per_group - 5.0).abs() < 0.1);
+        assert!(info.confidence > 0.5);
+    }
+
+    #[test]
+    fn test_no_panel_without_datetime() {
+        // Data without datetime column - should not detect panel
+        let df = DataFrame::new(vec![
+            Series::new("category".into(), vec!["A", "A", "B", "B", "C"]).into(),
+            Series::new("value".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
+            Series::new("target".into(), vec![0.0f64, 1.0, 0.0, 1.0, 0.0]).into(),
+        ])
+        .unwrap();
+
+        let profile = DataFrameProfile::analyze(&df, "target").unwrap();
+        let panel_info = profile.detect_panel_structure(&df);
+
+        assert!(panel_info.is_none(), "Should not detect panel without datetime");
+    }
+
+    #[test]
+    fn test_no_panel_without_group() {
+        use chrono::{Datelike, NaiveDate};
+
+        // Data with datetime but no group column
+        let dates: Vec<i32> = (0..5)
+            .map(|i| NaiveDate::from_ymd_opt(2024, 1, i + 1).unwrap().num_days_from_ce())
+            .collect();
+
+        let df = DataFrame::new(vec![
+            Series::new("date".into(), dates).cast(&PolarsDataType::Date).unwrap().into(),
+            Series::new("value".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
+            Series::new("target".into(), vec![0.0f64, 1.0, 0.0, 1.0, 0.0]).into(),
+        ])
+        .unwrap();
+
+        let profile = DataFrameProfile::analyze(&df, "target").unwrap();
+        let panel_info = profile.detect_panel_structure(&df);
+
+        assert!(panel_info.is_none(), "Should not detect panel without group column");
     }
 }

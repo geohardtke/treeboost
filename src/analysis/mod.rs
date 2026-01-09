@@ -58,7 +58,8 @@ pub use analyzer::{
     AnalysisConfig, AnalysisPreset, Confidence, DatasetAnalysis, ModeScores, Recommendation,
 };
 pub use profiler::{
-    ColumnDataType, ColumnProfile, DataFrameProfile, DropReason, DroppedColumn, TaskType,
+    ColumnDataType, ColumnProfile, DataFrameProfile, DropReason, DroppedColumn, PanelDataInfo,
+    TaskType, TimeGranularity,
 };
 pub use report::{compact_summary, AnalysisReport};
 pub use stats::{

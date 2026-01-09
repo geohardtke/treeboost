@@ -30,6 +30,12 @@ impl<'a> fmt::Display for AnalysisReport<'a> {
         writeln!(f, "├{}┤", "─".repeat(width))?;
 
         // Dataset Info
+        let padding = width
+            .saturating_sub(54)
+            .saturating_sub(digit_count(a.num_rows))
+            .saturating_sub(digit_count(a.num_features))
+            .saturating_sub(digit_count(a.num_numeric))
+            .saturating_sub(digit_count(a.num_categorical));
         writeln!(
             f,
             "│ Samples: {:>7}    Features: {:>3} ({} numeric, {} categorical){} │",
@@ -37,14 +43,7 @@ impl<'a> fmt::Display for AnalysisReport<'a> {
             a.num_features,
             a.num_numeric,
             a.num_categorical,
-            " ".repeat(
-                width
-                    - 54
-                    - digit_count(a.num_rows)
-                    - digit_count(a.num_features)
-                    - digit_count(a.num_numeric)
-                    - digit_count(a.num_categorical)
-            )
+            " ".repeat(padding)
         )?;
         writeln!(f, "├{}┤", "─".repeat(width))?;
 
@@ -140,11 +139,12 @@ impl<'a> fmt::Display for AnalysisReport<'a> {
         )?;
 
         if a.target_is_discrete {
+            let target_padding = 28usize.saturating_sub(digit_count(a.target_unique_values));
             writeln!(
                 f,
                 "│   Target type:       Discrete ({} unique values){} │",
                 a.target_unique_values,
-                " ".repeat(28 - digit_count(a.target_unique_values))
+                " ".repeat(target_padding)
             )?;
         }
 
