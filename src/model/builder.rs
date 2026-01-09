@@ -43,7 +43,7 @@
 //! let predictions = model.predict(&test_df)?;
 //! ```
 
-use crate::analysis::{Confidence, DataFrameProfile, DatasetAnalysis};
+use crate::analysis::{Confidence, DataFrameProfile, DatasetAnalysis, PanelDataInfo};
 use crate::dataset::feature_extractor::LinearFeatureConfig;
 use crate::dataset::{BinnedDataset, DataPipeline};
 use crate::defaults::auto as auto_defaults;
@@ -65,6 +65,8 @@ use super::tuning;
 /// AutoBuilder: High-level AutoML interface
 pub struct AutoBuilder {
     config: AutoConfig,
+    /// Optional custom validation DataFrame (for time-series or grouped data)
+    validation_df: Option<DataFrame>,
 }
 
 impl AutoBuilder {
@@ -72,12 +74,16 @@ impl AutoBuilder {
     pub fn new() -> Self {
         Self {
             config: AutoConfig::default(),
+            validation_df: None,
         }
     }
 
     /// Create with custom configuration
     pub fn with_config(config: AutoConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            validation_df: None,
+        }
     }
 
     /// Set tuning level
@@ -95,6 +101,32 @@ impl AutoBuilder {
     /// Enable/disable automatic features
     pub fn with_auto_features(mut self, enabled: bool) -> Self {
         self.config.auto_features = enabled;
+        self
+    }
+
+    /// Provide custom validation data (for time-series or grouped data)
+    ///
+    /// When provided, this disables internal validation splitting (sets val_ratio to 0.0)
+    /// to prevent conflicts. Use this for:
+    /// - Time-series data (date-based splits)
+    /// - Grouped data (no group leakage across splits)
+    /// - Pre-split data from custom strategies
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Split by date for time-series
+    /// let train_df = df.filter(col("date").lt(lit(cutoff_date)))?;
+    /// let val_df = df.filter(col("date").gt_eq(lit(cutoff_date)))?;
+    ///
+    /// let model = AutoBuilder::new()
+    ///     .with_validation_data(val_df)  // Disables internal split
+    ///     .fit(&train_df, "target")?;
+    /// ```
+    pub fn with_validation_data(mut self, validation_df: DataFrame) -> Self {
+        // Disable internal validation split when custom data is provided
+        self.config.val_ratio = 0.0;
+        self.validation_df = Some(validation_df);
         self
     }
 
@@ -286,7 +318,7 @@ impl AutoBuilder {
         });
 
         let phase_start = Instant::now();
-        let feature_plan = if !skip_features {
+        let mut feature_plan = if !skip_features {
             Some(self.plan_features(&profile)?)
         } else {
             None
@@ -304,17 +336,87 @@ impl AutoBuilder {
             }
         }
 
+        // === Phase 3b: Time-Series Feature Engineering ===
+        // Detect panel data structure and apply time-series features if found
+        let mut working_df = df.clone();
+        let panel_info = if !skip_features {
+            self.detect_panel_structure(&profile, df)
+        } else {
+            None
+        };
+
+        if let Some(ref info) = panel_info {
+            if self.config.verbose {
+                println!(
+                    "  [Panel] Detected: {} groups by '{}', ordered by '{}'",
+                    info.num_groups, info.group_column, info.date_column
+                );
+            }
+
+            // Plan time-series features
+            let ts_plan = SmartFeatureEngine::plan_timeseries_features(
+                &profile,
+                info,
+                &crate::features::SmartFeatureConfig::default(),
+            );
+
+            if !ts_plan.is_empty() {
+                if self.config.verbose {
+                    println!(
+                        "  [TimeSeries] Generating {} features (lag, rolling, EWMA)",
+                        ts_plan.estimated_features
+                    );
+                }
+
+                // Apply time-series features to the DataFrame
+                working_df = crate::utils::apply_timeseries_features(working_df, &ts_plan, info, false)?;
+
+                if self.config.verbose {
+                    println!(
+                        "  [TimeSeries] New shape: {} rows × {} columns",
+                        working_df.height(),
+                        working_df.width()
+                    );
+                }
+
+                // Update feature plan with time-series info
+                if let Some(ref mut plan) = feature_plan {
+                    plan.timeseries_features = Some(ts_plan);
+                }
+            }
+        }
+
         // === Phase 4: Prepare Dataset ===
         // Convert DataFrame to BinnedDataset (and capture pipeline state for inference!)
         self.config.progress_callback.on_progress(&ProgressUpdate {
             phase: TrainingPhase::DatasetPreparation,
             progress_pct: TrainingPhase::DatasetPreparation.progress_pct(),
             elapsed: start.elapsed(),
-            message: Some(format!("{} rows", df.height())),
+            message: Some(format!("{} rows × {} cols", working_df.height(), working_df.width())),
         });
 
         let (dataset, pipeline_state, filtered_df) =
-            self.prepare_dataset_and_state(df, target_col)?;
+            self.prepare_dataset_and_state(&working_df, target_col)?;
+
+        // Prepare validation dataset if custom validation data provided
+        let validation_dataset = if let Some(ref val_df) = self.validation_df {
+            // Apply same time-series features to validation data
+            let val_working_df = if let (Some(ref info), Some(ref plan)) =
+                (&panel_info, &feature_plan)
+            {
+                if let Some(ref ts_plan) = plan.timeseries_features {
+                    crate::utils::apply_timeseries_features(val_df.clone(), ts_plan, info, false)?
+                } else {
+                    val_df.clone()
+                }
+            } else {
+                val_df.clone()
+            };
+            let (val_dataset, _, _) = self.prepare_dataset_and_state(&val_working_df, target_col)?;
+            Some(val_dataset)
+        } else {
+            None
+        };
 
         // === Phase 5: Dataset Analysis (for mode selection) ===
         self.config.progress_callback.on_progress(&ProgressUpdate {
@@ -377,9 +479,11 @@ impl AutoBuilder {
                 (config, None, None)
             } else {
                 // CRITICAL: Pass filtered_df (preprocessed) to tuning for LTT raw feature extraction
+                // Also pass custom validation dataset if provided
                 tuning::tune_hyperparameters(
                     &self.config,
                     &dataset,
+                    validation_dataset.as_ref(),
                     mode,
                     &filtered_df,
                     target_col,
@@ -666,6 +770,68 @@ impl AutoBuilder {
             _ => UniversalModel::train(dataset, config, &loss),
         }
     }
+
+    /// Detect panel data structure in the DataFrame
+    ///
+    /// Tries automatic detection first, then falls back to heuristics
+    /// for common patterns (e.g., numeric date columns).
+    fn detect_panel_structure(
+        &self,
+        profile: &DataFrameProfile,
+        df: &DataFrame,
+    ) -> Option<PanelDataInfo> {
+        // Try automatic detection first
+        if let Some(info) = profile.detect_panel_structure(df) {
+            return Some(info);
+        }
+
+        // Heuristic: Look for categorical column + numeric column named "date"
+        // This handles cases where date is stored as integer (e.g., YYYYMMDD or ordinal)
+        let has_date_col = df.get_column_names().iter().any(|c| {
+            c.to_lowercase().contains("date")
+                || c.to_lowercase().contains("time")
+                || c.to_lowercase() == "dt"
+        });
+
+        if !has_date_col {
+            return None;
+        }
+
+        // Find the date column
+        let date_col_name = df
+            .get_column_names()
+            .iter()
+            .find(|c| {
+                c.to_lowercase().contains("date")
+                    || c.to_lowercase().contains("time")
+                    || c.to_lowercase() == "dt"
+            })?
+            .to_string();
+
+        // Find a categorical column that could be the group
+        let group_col = profile.columns.iter().find(|c| {
+            c.dtype == crate::analysis::ColumnDataType::Categorical
+                && c.cardinality >= 2
+                && c.cardinality <= 10000
+                && c.cardinality_ratio < 0.5
+        })?;
+
+        // Compute statistics
+        let num_groups = group_col.cardinality;
+        let avg_obs = df.height() as f32 / num_groups as f32;
+
+        Some(PanelDataInfo {
+            group_column: group_col.name.clone(),
+            date_column: date_col_name,
+            num_groups,
+            avg_observations_per_group: avg_obs,
+            min_observations_per_group: (avg_obs * 0.5) as usize,
+            max_observations_per_group: (avg_obs * 1.5) as usize,
+            confidence: 0.7, // Lower confidence for heuristic detection
+            time_granularity: crate::analysis::TimeGranularity::Daily, // Default assumption
+        })
+    }
+
 }
 
 impl Default for AutoBuilder {
