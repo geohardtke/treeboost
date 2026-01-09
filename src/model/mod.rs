@@ -12,7 +12,7 @@ mod progress;
 mod tuning;
 mod universal;
 
-pub use auto::AutoModel;
+pub use auto::{AutoModel, AutoModelUpdateReport};
 pub use builder::AutoBuilder;
 pub use config::{
     AutoConfig, AutoEnsembleConfig, AutoEnsembleMethod, BuildPhaseTimes, BuildResult,
@@ -22,5 +22,6 @@ pub use progress::{
     ConsoleProgress, ProgressCallback, ProgressUpdate, QuietProgress, TrainingPhase,
 };
 pub use universal::{
-    BoostingMode, ModeSelection, StackingStrategy, UniversalConfig, UniversalModel, UniversalPreset,
+    BoostingMode, IncrementalUpdateReport, ModeSelection, StackingStrategy, UniversalConfig,
+    UniversalModel, UniversalPreset,
 };

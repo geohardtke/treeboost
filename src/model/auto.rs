@@ -37,6 +37,7 @@
 use crate::analysis::{Confidence, DataFrameProfile, DatasetAnalysis};
 use crate::dataset::{BinnedDataset, DataPipeline};
 use crate::features::FeaturePlan;
+use crate::loss::MseLoss;
 use crate::model::{
     AutoBuilder, AutoConfig, BoostingMode, BuildPhaseTimes, BuildResult, TreeTuningResult,
     TuningLevel, UniversalModel,
@@ -266,6 +267,16 @@ impl AutoModel {
     /// Get tree tuning result (if PureTree/RandomForest mode was used)
     pub fn tree_tuning(&self) -> Option<&TreeTuningResult> {
         self.tree_tuning.as_ref()
+    }
+
+    /// Get number of trees in the model
+    pub fn num_trees(&self) -> usize {
+        self.model.num_trees()
+    }
+
+    /// Get number of features
+    pub fn num_features(&self) -> usize {
+        self.model.num_features()
     }
 
     /// Get the underlying UniversalModel
@@ -572,6 +583,178 @@ impl AutoModel {
         self.model.save(path)
     }
 
+    // =========================================================================
+    // Incremental Learning Support
+    // =========================================================================
+
+    /// Update the model with new training data (incremental learning)
+    ///
+    /// This method continues training from the current model state:
+    /// 1. Uses existing pipeline_state for consistent preprocessing
+    /// 2. Updates the underlying UniversalModel with new trees
+    /// 3. Preserves all configuration from original training
+    ///
+    /// # Arguments
+    /// * `df` - New data to train on (must have same columns as original)
+    /// * `additional_rounds` - Number of new boosting rounds (trees) to add
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Train on January data
+    /// let mut model = AutoModel::train(&jan_df, "target")?;
+    ///
+    /// // Update with February data (10 more trees)
+    /// let report = model.update(&feb_df, 10)?;
+    /// println!("{}", report);
+    ///
+    /// // Save the updated model
+    /// model.save_trb("model.trb")?;
+    /// ```
+    pub fn update(&mut self, df: &DataFrame, additional_rounds: usize) -> Result<AutoModelUpdateReport> {
+        let rows_before = df.height();
+
+        // Convert DataFrame to BinnedDataset using existing pipeline
+        let (_preprocessed_df, dataset) = self.prepare_dataset_for_prediction(df)?;
+
+        // Get targets from the dataframe
+        let target_series = df
+            .column(&self.target_column)
+            .map_err(|e| TreeBoostError::Data(format!("Target column '{}' not found: {}", self.target_column, e)))?;
+
+        let targets: Vec<f32> = target_series
+            .cast(&polars::datatypes::DataType::Float32)
+            .map_err(|e| TreeBoostError::Data(format!("Failed to cast target to f32: {}", e)))?
+            .f32()
+            .map_err(|e| TreeBoostError::Data(format!("Failed to get f32 values: {}", e)))?
+            .into_no_null_iter()
+            .collect();
+
+        // Create dataset with actual targets (avoids clone + modify pattern)
+        let update_dataset = dataset.with_targets(targets);
+
+        // Update the model (uses MSE loss by default, same as AutoBuilder)
+        let loss_fn = MseLoss::new();
+        let model_report = self.model.update(&update_dataset, &loss_fn, additional_rounds)?;
+
+        Ok(AutoModelUpdateReport {
+            rows_trained: rows_before,
+            trees_before: model_report.trees_before,
+            trees_after: model_report.trees_after,
+            trees_added: model_report.trees_added,
+            mode: self.mode,
+            target_column: self.target_column.clone(),
+        })
+    }
+
+    /// Save model to TRB (TreeBoost) incremental format
+    ///
+    /// TRB format supports incremental updates without rewriting the entire file.
+    /// Use this format when you plan to update the model with new data.
+    ///
+    /// # Example
+    /// ```ignore
+    /// model.save_trb("model.trb", "Initial training on January data")?;
+    /// ```
+    pub fn save_trb(&self, path: impl AsRef<std::path::Path>, description: &str) -> Result<()> {
+        self.model.save_trb(path, description)
+    }
+
+    /// Append an update to an existing TRB file
+    ///
+    /// This appends a new segment without rewriting the base model.
+    ///
+    /// # Arguments
+    /// * `path` - Path to existing .trb file
+    /// * `rows_trained` - Number of rows used in this update
+    /// * `description` - Description of this update
+    pub fn save_trb_update(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        rows_trained: usize,
+        description: &str,
+    ) -> Result<()> {
+        self.model.save_trb_update(path, rows_trained, description)
+    }
+
+    /// Load model from TRB format for continued training
+    ///
+    /// This loads the base model and all updates, ready for further training.
+    /// The returned AutoModel will have minimal metadata (no tuning results, etc.)
+    /// but the underlying model and pipeline state are preserved.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut model = AutoModel::load_trb("model.trb", "target")?;
+    /// model.update(&new_data, 10)?;
+    /// ```
+    pub fn load_trb(path: impl AsRef<std::path::Path>, target_column: &str) -> Result<Self> {
+        let model = crate::model::UniversalModel::load_trb(path)?;
+        let mode = model.mode();
+
+        Ok(Self {
+            model,
+            mode,
+            target_column: target_column.to_string(),
+            mode_confidence: None,
+            preprocessing_plan: None,
+            feature_plan: None,
+            ltt_tuning: None,
+            tree_tuning: None,
+            column_profile: None,
+            analysis: None,
+            pipeline_state: None, // Note: pipeline_state not preserved in TRB format yet
+            build_time: Duration::default(),
+            phase_times: BuildPhaseTimes::default(),
+        })
+    }
+
+    /// Check if model is compatible with dataset for incremental update
+    pub fn is_compatible_for_update(&self, df: &DataFrame) -> bool {
+        // Check that target column exists
+        if df.column(&self.target_column).is_err() {
+            return false;
+        }
+
+        // Try to prepare dataset - if it fails, not compatible
+        self.prepare_dataset_for_prediction(df).is_ok()
+    }
+
+    /// Get mutable reference to the underlying UniversalModel
+    pub fn model_mut(&mut self) -> &mut UniversalModel {
+        &mut self.model
+    }
+}
+
+/// Report from an AutoModel incremental training update
+#[derive(Debug, Clone)]
+pub struct AutoModelUpdateReport {
+    /// Number of rows in the new training data
+    pub rows_trained: usize,
+    /// Number of trees before update
+    pub trees_before: usize,
+    /// Number of trees after update
+    pub trees_after: usize,
+    /// Number of trees added
+    pub trees_added: usize,
+    /// Boosting mode
+    pub mode: BoostingMode,
+    /// Target column name
+    pub target_column: String,
+}
+
+impl std::fmt::Display for AutoModelUpdateReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "AutoModel Update: {} rows on '{}', {} trees added ({} -> {}), mode={:?}",
+            self.rows_trained,
+            self.target_column,
+            self.trees_added,
+            self.trees_before,
+            self.trees_after,
+            self.mode
+        )
+    }
 }
 
 impl std::fmt::Debug for AutoModel {

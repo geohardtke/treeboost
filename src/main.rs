@@ -1,12 +1,13 @@
 //! TreeBoost CLI
 //!
-//! Command-line interface for training, prediction, and model inspection.
+//! Command-line interface for training, prediction, model inspection, and incremental updates.
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use treeboost::booster::{GBDTConfig, GBDTModel};
 use treeboost::dataset::DatasetLoader;
-use treeboost::serialize::{load_model, save_model};
+use treeboost::model::AutoModel;
+use treeboost::serialize::{load_model, save_model, TrbReader};
 use treeboost::tree::MonotonicConstraint;
 use treeboost::Result;
 
@@ -155,13 +156,40 @@ enum Commands {
 
     /// Display model information
     Info {
-        /// Model path
+        /// Model path (.rkyv or .trb)
         #[arg(short, long)]
         model: PathBuf,
 
         /// Show feature importance
         #[arg(long)]
         importances: bool,
+
+        /// Force loading despite corrupted updates (loads base only)
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Update an existing model with new data (incremental learning)
+    Update {
+        /// Existing model path (.trb format required)
+        #[arg(short, long)]
+        model: PathBuf,
+
+        /// Input data file (Parquet or CSV)
+        #[arg(short, long)]
+        data: PathBuf,
+
+        /// Target column name
+        #[arg(short, long)]
+        target: String,
+
+        /// Number of additional boosting rounds
+        #[arg(long, default_value_t = 10)]
+        rounds: usize,
+
+        /// Description of this update
+        #[arg(long, default_value = "")]
+        description: String,
     },
 }
 
@@ -360,10 +388,30 @@ fn main() -> Result<()> {
                 println!("Conformal quantile: {:.4}", q);
             }
 
-            println!("\nSaving model to {:?}...", output);
-            save_model(&model, &output)?;
+            // Determine output format from extension
+            let output_ext = output.extension().and_then(|s| s.to_str()).unwrap_or("");
 
-            println!("Model saved successfully.");
+            if output_ext == "trb" {
+                // TRB format requires AutoModel/UniversalModel for full incremental support
+                // The CLI train command uses GBDTModel directly, so we save as rkyv
+                // and inform the user about using the Rust API for TRB format
+                eprintln!("Note: CLI train command saves to rkyv format (.rkyv extension).");
+                eprintln!("      For TRB incremental format, use the Rust API with AutoModel:");
+                eprintln!("        let model = AutoModel::train(&df, \"target\")?;");
+                eprintln!("        model.save_trb(\"model.trb\", \"description\")?;");
+                eprintln!();
+
+                // Change extension to .rkyv
+                let mut rkyv_output = output.clone();
+                rkyv_output.set_extension("rkyv");
+                println!("Saving model to {:?} (rkyv format)...", rkyv_output);
+                save_model(&model, &rkyv_output)?;
+                println!("Model saved successfully.");
+            } else {
+                println!("\nSaving model to {:?} (rkyv format)...", output);
+                save_model(&model, &output)?;
+                println!("Model saved successfully.");
+            }
             Ok(())
         }
 
@@ -502,44 +550,263 @@ fn main() -> Result<()> {
             Ok(())
         }
 
-        Commands::Info { model, importances } => {
-            println!("Loading model from {:?}...", model);
-            let model = load_model(&model)?;
+        Commands::Info {
+            model,
+            importances,
+            force,
+        } => {
+            let model_ext = model.extension().and_then(|s| s.to_str()).unwrap_or("");
 
-            println!("\nModel Information:");
-            println!("  Number of trees: {}", model.num_trees());
-            println!("  Base prediction: {:.4}", model.base_prediction());
+            if model_ext == "trb" {
+                // Handle TRB format with update history
+                println!("Loading TRB model from {:?}...", model);
 
-            let config = model.config();
-            println!("\nTraining Configuration:");
-            println!("  Rounds: {}", config.num_rounds);
-            println!("  Max depth: {}", config.max_depth);
-            println!("  Max leaves: {}", config.max_leaves);
-            println!("  Learning rate: {}", config.learning_rate);
-            println!("  Lambda: {}", config.lambda);
-            println!("  Min samples/leaf: {}", config.min_samples_leaf);
-            println!("  Subsample: {}", config.subsample);
-            println!("  Loss: {:?}", config.loss_type);
+                let mut reader = TrbReader::open(&model)?;
+                let header = reader.header().clone();
 
-            if config.entropy_weight > 0.0 {
-                println!("  Entropy weight: {}", config.entropy_weight);
-            }
-
-            if let Some(q) = model.conformal_quantile() {
-                println!("\nConformal Prediction:");
-                println!("  Quantile: {:.4}", q);
-                println!("  Coverage: {:.1}%", config.conformal_quantile * 100.0);
-            }
-
-            if importances {
-                println!("\nFeature Importance:");
-                let imps = model.feature_importance();
-                for (i, imp) in imps.iter().enumerate() {
-                    println!("  Feature {}: {:.4}", i, imp);
+                println!("\nTRB Model Information:");
+                println!("  Format version: {}", header.format_version);
+                println!("  Model type: {}", header.model_type);
+                println!("  Boosting mode: {}", header.boosting_mode);
+                println!("  Number of features: {}", header.num_features);
+                println!(
+                    "  Created: {}",
+                    format_timestamp(header.created_at)
+                );
+                if !header.metadata.is_empty() {
+                    println!("  Description: {}", header.metadata);
                 }
+                println!("  Base model size: {} bytes", header.base_blob_size);
+
+                // Read base blob to validate CRC
+                match reader.read_base_blob() {
+                    Ok(_) => println!("  Base model CRC: OK"),
+                    Err(e) => {
+                        eprintln!("  Base model CRC: FAILED - {}", e);
+                        if !force {
+                            eprintln!(
+                                "\nError: Base model is corrupted. Use --force to skip validation."
+                            );
+                            return Err(e);
+                        }
+                        eprintln!("  (--force: continuing despite corruption)");
+                    }
+                }
+
+                // Read updates
+                println!("\nUpdate History:");
+                let updates = reader.iter_updates()?;
+                if updates.is_empty() {
+                    println!("  No updates (base model only)");
+                } else {
+                    let mut total_rows = 0usize;
+                    for (i, (update_header, _blob)) in updates.iter().enumerate() {
+                        total_rows += update_header.rows_trained;
+                        println!("  Update {}:", i + 1);
+                        println!("    Type: {:?}", update_header.update_type);
+                        println!(
+                            "    Created: {}",
+                            format_timestamp(update_header.created_at)
+                        );
+                        println!("    Rows trained: {}", update_header.rows_trained);
+                        if !update_header.description.is_empty() {
+                            println!("    Description: {}", update_header.description);
+                        }
+                    }
+                    println!("\n  Total updates: {}", updates.len());
+                    println!("  Total rows across updates: {}", total_rows);
+                }
+
+                // Load the actual model for tree count
+                use treeboost::model::UniversalModel;
+                match UniversalModel::load_trb(&model) {
+                    Ok(loaded_model) => {
+                        println!("\nModel State:");
+                        println!("  Current tree count: {}", loaded_model.num_trees());
+                    }
+                    Err(e) => {
+                        if !force {
+                            eprintln!("\nError loading model: {}", e);
+                            return Err(e);
+                        }
+                        eprintln!("\nWarning: Could not load full model state: {}", e);
+                    }
+                }
+
+                Ok(())
+            } else {
+                // Handle rkyv format
+                println!("Loading model from {:?}...", model);
+                let model = load_model(&model)?;
+
+                println!("\nModel Information:");
+                println!("  Number of trees: {}", model.num_trees());
+                println!("  Base prediction: {:.4}", model.base_prediction());
+
+                let config = model.config();
+                println!("\nTraining Configuration:");
+                println!("  Rounds: {}", config.num_rounds);
+                println!("  Max depth: {}", config.max_depth);
+                println!("  Max leaves: {}", config.max_leaves);
+                println!("  Learning rate: {}", config.learning_rate);
+                println!("  Lambda: {}", config.lambda);
+                println!("  Min samples/leaf: {}", config.min_samples_leaf);
+                println!("  Subsample: {}", config.subsample);
+                println!("  Loss: {:?}", config.loss_type);
+
+                if config.entropy_weight > 0.0 {
+                    println!("  Entropy weight: {}", config.entropy_weight);
+                }
+
+                if let Some(q) = model.conformal_quantile() {
+                    println!("\nConformal Prediction:");
+                    println!("  Quantile: {:.4}", q);
+                    println!("  Coverage: {:.1}%", config.conformal_quantile * 100.0);
+                }
+
+                if importances {
+                    println!("\nFeature Importance:");
+                    let imps = model.feature_importance();
+                    for (i, imp) in imps.iter().enumerate() {
+                        println!("  Feature {}: {:.4}", i, imp);
+                    }
+                }
+
+                Ok(())
             }
+        }
+
+        Commands::Update {
+            model,
+            data,
+            target,
+            rounds,
+            description,
+        } => {
+            // Verify .trb extension
+            let model_ext = model.extension().and_then(|s| s.to_str()).unwrap_or("");
+            if model_ext != "trb" {
+                eprintln!(
+                    "Error: Update command requires .trb format. Got: {:?}",
+                    model
+                );
+                eprintln!("Hint: Train with .trb extension: treeboost train ... --output model.trb");
+                return Err(treeboost::TreeBoostError::Config(
+                    "Update requires .trb format".to_string(),
+                ));
+            }
+
+            println!("Loading model from {:?}...", model);
+            let mut auto_model = AutoModel::load_trb(&model, &target)?;
+            let trees_before = auto_model.num_trees();
+
+            println!(
+                "Model loaded: {} trees, {} features",
+                trees_before,
+                auto_model.num_features()
+            );
+
+            println!("Loading data from {:?}...", data);
+            let df = if data.extension().and_then(|s| s.to_str()) == Some("parquet") {
+                use polars::prelude::*;
+                let pl_path = PlPath::new(&data.to_string_lossy());
+                LazyFrame::scan_parquet(pl_path, Default::default())?.collect()?
+            } else {
+                use polars::prelude::*;
+                CsvReadOptions::default()
+                    .try_into_reader_with_file_path(Some(data.clone()))?
+                    .finish()?
+            };
+
+            let num_rows = df.height();
+            println!("Loaded {} rows", num_rows);
+
+            println!("\nUpdating model with {} additional rounds...", rounds);
+            let report = auto_model.update(&df, rounds)?;
+
+            println!("Update complete:");
+            println!("  Rows trained: {}", report.rows_trained);
+            println!(
+                "  Trees: {} -> {} (+{})",
+                report.trees_before, report.trees_after, report.trees_added
+            );
+            println!("  Mode: {:?}", report.mode);
+
+            // Save update to TRB file
+            let update_desc = if description.is_empty() {
+                format!(
+                    "Update: +{} trees from {} rows",
+                    report.trees_added, report.rows_trained
+                )
+            } else {
+                description
+            };
+
+            println!("\nSaving update to {:?}...", model);
+            auto_model.save_trb_update(&model, report.rows_trained, &update_desc)?;
+
+            println!("Update saved successfully.");
+            println!("  Model now has {} trees (was {})", report.trees_after, report.trees_before);
 
             Ok(())
         }
     }
+}
+
+/// Format a Unix timestamp as a human-readable date string
+fn format_timestamp(timestamp: u64) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let datetime = UNIX_EPOCH + Duration::from_secs(timestamp);
+    // Simple ISO-8601-ish format without external crate
+    let elapsed = datetime
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO);
+    let secs = elapsed.as_secs();
+
+    // Calculate date components (simplified, doesn't handle leap seconds perfectly)
+    let days_since_epoch = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Calculate year/month/day (simplified algorithm)
+    let mut year = 1970i32;
+    let mut remaining_days = days_since_epoch as i32;
+
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        year += 1;
+    }
+
+    let mut month = 1;
+    let days_in_months = if is_leap_year(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    for days in days_in_months.iter() {
+        if remaining_days < *days {
+            break;
+        }
+        remaining_days -= *days;
+        month += 1;
+    }
+
+    let day = remaining_days + 1;
+
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        year, month, day, hours, minutes, seconds
+    )
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }

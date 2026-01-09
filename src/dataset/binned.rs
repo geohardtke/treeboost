@@ -473,6 +473,38 @@ impl BinnedDataset {
         &mut self.targets
     }
 
+    /// Create a new dataset with replaced targets, sharing feature data
+    ///
+    /// This is more efficient than `clone()` followed by target modification
+    /// because it avoids cloning the targets vector only to overwrite it.
+    ///
+    /// # Arguments
+    /// * `new_targets` - New target values (must have same length as num_rows)
+    ///
+    /// # Panics
+    /// Panics if `new_targets.len() != self.num_rows`
+    pub fn with_targets(&self, new_targets: Vec<f32>) -> Self {
+        assert_eq!(
+            new_targets.len(),
+            self.num_rows,
+            "new_targets length ({}) must match num_rows ({})",
+            new_targets.len(),
+            self.num_rows
+        );
+
+        Self {
+            num_rows: self.num_rows,
+            features: self.features.clone(),
+            targets: new_targets, // Use provided targets directly, no clone
+            feature_info: self.feature_info.clone(),
+            sparse_columns: self.sparse_columns.clone(),
+            era_indices: self.era_indices.clone(),
+            num_eras: self.num_eras,
+            row_major_cache: OnceLock::new(),
+            row_major_4bit_cache: OnceLock::new(),
+        }
+    }
+
     /// Get raw bin value for original feature value using binary search
     pub fn bin_value(&self, feature_idx: usize, value: f64) -> u8 {
         let info = &self.feature_info[feature_idx];

@@ -1910,6 +1910,125 @@ impl GBDTModel {
     pub fn create_packed_dataset(&self, dataset: &BinnedDataset) -> crate::dataset::PackedDataset {
         crate::dataset::PackedDataset::from_binned(dataset)
     }
+
+    // =========================================================================
+    // Incremental Learning Support
+    // =========================================================================
+
+    /// Get number of completed rounds
+    ///
+    /// For regression/binary: num_rounds == num_trees
+    /// For multi-class: num_rounds = num_trees / num_classes
+    pub fn num_rounds(&self) -> usize {
+        if self.num_classes == 0 {
+            self.trees.len()
+        } else {
+            self.trees.len() / self.num_classes.max(1)
+        }
+    }
+
+    /// Append new trees to the ensemble (incremental learning)
+    ///
+    /// # Arguments
+    /// * `new_trees` - Trees trained on residuals from current ensemble
+    ///
+    /// # Multi-class Note
+    /// For multi-class classification, trees must be provided in round-major order:
+    /// `[round_n_class_0, round_n_class_1, ..., round_n_class_k, round_n+1_class_0, ...]`
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Get current predictions
+    /// let preds = model.predict(&dataset);
+    ///
+    /// // Compute residuals (new_targets - preds)
+    /// let residuals: Vec<f32> = targets.iter().zip(&preds)
+    ///     .map(|(t, p)| t - p).collect();
+    ///
+    /// // Compute gradients/hessians for new trees
+    /// // ... train new trees on residuals ...
+    ///
+    /// // Append to model
+    /// model.append_trees(new_trees);
+    /// ```
+    pub fn append_trees(&mut self, new_trees: Vec<Tree>) {
+        self.trees.extend(new_trees);
+    }
+
+    /// Append a single tree to the ensemble
+    ///
+    /// Convenience method for adding one tree at a time.
+    pub fn append_tree(&mut self, tree: Tree) {
+        self.trees.push(tree);
+    }
+
+    /// Compute residuals from current ensemble predictions
+    ///
+    /// Residuals are `target - prediction`, which become the training targets
+    /// for new trees in incremental learning.
+    ///
+    /// # Arguments
+    /// * `dataset` - Binned dataset for prediction
+    /// * `targets` - Original target values
+    ///
+    /// # Returns
+    /// Residuals (target - prediction) for each sample
+    pub fn compute_residuals(&self, dataset: &BinnedDataset, targets: &[f32]) -> Vec<f32> {
+        let predictions = self.predict(dataset);
+        predictions
+            .iter()
+            .zip(targets)
+            .map(|(p, t)| t - p)
+            .collect()
+    }
+
+    /// Compute residuals from raw feature data
+    ///
+    /// # Arguments
+    /// * `features` - Row-major feature matrix (f64 for raw prediction API)
+    /// * `targets` - Original target values
+    ///
+    /// # Returns
+    /// Residuals (target - prediction) for each sample
+    pub fn compute_residuals_raw(&self, features: &[f64], targets: &[f32]) -> Vec<f32> {
+        let predictions = self.predict_raw(features);
+        predictions
+            .iter()
+            .zip(targets)
+            .map(|(p, t)| t - p)
+            .collect()
+    }
+
+    /// Check if incremental update is compatible
+    ///
+    /// Verifies that new data has the same number of features as the trained model.
+    pub fn is_compatible_for_update(&self, num_features: usize) -> bool {
+        self.num_features() == num_features
+    }
+
+    /// Get mutable reference to trees (for advanced manipulation)
+    ///
+    /// Use with caution - modifying trees directly may break model invariants.
+    pub fn trees_mut(&mut self) -> &mut Vec<Tree> {
+        &mut self.trees
+    }
+
+    /// Truncate trees to a specific number of rounds
+    ///
+    /// Useful for early stopping or reducing model complexity.
+    ///
+    /// # Arguments
+    /// * `num_rounds` - Number of rounds to keep
+    ///
+    /// # Multi-class Note
+    /// Truncates to `num_rounds * num_classes` trees for multi-class models.
+    pub fn truncate_to_rounds(&mut self, num_rounds: usize) {
+        let trees_per_round = if self.num_classes == 0 { 1 } else { self.num_classes };
+        let target_trees = num_rounds * trees_per_round;
+        if target_trees < self.trees.len() {
+            self.trees.truncate(target_trees);
+        }
+    }
 }
 
 // =============================================================================
@@ -2644,5 +2763,172 @@ mod tests {
         assert!((parsed["subsample"].as_f64().unwrap() - 0.8).abs() < 0.001);
         assert!((parsed["lambda"].as_f64().unwrap() - 2.0).abs() < 0.001);
         assert!((parsed["entropy_weight"].as_f64().unwrap() - 0.1).abs() < 0.001);
+    }
+
+    // =========================================================================
+    // Incremental Learning Tests
+    // =========================================================================
+
+    #[test]
+    fn test_tree_residual_appending() {
+        let dataset = create_regression_dataset(100, 0.1);
+
+        // Train initial model with 5 trees
+        let config = GBDTConfig::new()
+            .with_num_rounds(5)
+            .with_max_depth(3)
+            .with_learning_rate(0.1);
+
+        let mut model = GBDTModel::train_binned(&dataset, config.clone()).unwrap();
+        assert_eq!(model.num_trees(), 5);
+
+        let initial_preds = model.predict(&dataset);
+        let initial_mse: f32 = initial_preds
+            .iter()
+            .zip(dataset.targets())
+            .map(|(p, t)| (p - t).powi(2))
+            .sum::<f32>()
+            / 100.0;
+
+        // Compute residuals
+        let residuals = model.compute_residuals(&dataset, dataset.targets());
+        assert_eq!(residuals.len(), 100);
+
+        // Train additional trees on residuals
+        // (In practice, you'd use the full training pipeline, but for testing
+        // we just verify the append functionality works)
+
+        // For now, just verify we can append trees
+        let second_model = GBDTModel::train_binned(&dataset, config).unwrap();
+        let trees_to_append: Vec<_> = second_model.trees().to_vec();
+
+        model.append_trees(trees_to_append);
+        assert_eq!(model.num_trees(), 10);
+
+        // Predictions should use all 10 trees
+        let new_preds = model.predict(&dataset);
+        assert_eq!(new_preds.len(), 100);
+
+        // MSE may change (could be better or worse depending on the data)
+        let new_mse: f32 = new_preds
+            .iter()
+            .zip(dataset.targets())
+            .map(|(p, t)| (p - t).powi(2))
+            .sum::<f32>()
+            / 100.0;
+
+        // Both MSEs should be finite and reasonable
+        assert!(initial_mse.is_finite());
+        assert!(new_mse.is_finite());
+    }
+
+    #[test]
+    fn test_tree_ensemble_growth() {
+        let dataset = create_regression_dataset(100, 0.1);
+
+        // Train with 5 trees
+        let config = GBDTConfig::new()
+            .with_num_rounds(5)
+            .with_max_depth(3);
+
+        let mut model = GBDTModel::train_binned(&dataset, config.clone()).unwrap();
+        assert_eq!(model.num_trees(), 5);
+        assert_eq!(model.num_rounds(), 5);
+
+        // Train another batch and append
+        let second_model = GBDTModel::train_binned(&dataset, config).unwrap();
+        model.append_trees(second_model.trees().to_vec());
+
+        assert_eq!(model.num_trees(), 10);
+        assert_eq!(model.num_rounds(), 10);
+
+        // Predictions should use all trees
+        let predictions = model.predict(&dataset);
+        assert_eq!(predictions.len(), 100);
+        assert!(predictions.iter().all(|p| p.is_finite()));
+    }
+
+    #[test]
+    fn test_append_single_tree() {
+        let dataset = create_regression_dataset(100, 0.1);
+
+        let config = GBDTConfig::new()
+            .with_num_rounds(1)
+            .with_max_depth(3);
+
+        let mut model = GBDTModel::train_binned(&dataset, config.clone()).unwrap();
+        assert_eq!(model.num_trees(), 1);
+
+        // Append single tree
+        let second_model = GBDTModel::train_binned(&dataset, config).unwrap();
+        model.append_tree(second_model.trees()[0].clone());
+
+        assert_eq!(model.num_trees(), 2);
+    }
+
+    #[test]
+    fn test_compute_residuals_correctness() {
+        let dataset = create_regression_dataset(50, 0.1);
+
+        let config = GBDTConfig::new()
+            .with_num_rounds(5)
+            .with_max_depth(3);
+
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
+
+        let predictions = model.predict(&dataset);
+        let residuals = model.compute_residuals(&dataset, dataset.targets());
+
+        // Verify residuals = targets - predictions
+        for (i, (r, (p, t))) in residuals
+            .iter()
+            .zip(predictions.iter().zip(dataset.targets()))
+            .enumerate()
+        {
+            let expected = t - p;
+            assert!(
+                (r - expected).abs() < 1e-5,
+                "Residual {} mismatch: got {}, expected {}",
+                i,
+                r,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_truncate_to_rounds() {
+        let dataset = create_regression_dataset(100, 0.1);
+
+        let config = GBDTConfig::new()
+            .with_num_rounds(10)
+            .with_max_depth(3);
+
+        let mut model = GBDTModel::train_binned(&dataset, config).unwrap();
+        assert_eq!(model.num_trees(), 10);
+
+        // Truncate to 5 rounds
+        model.truncate_to_rounds(5);
+        assert_eq!(model.num_trees(), 5);
+        assert_eq!(model.num_rounds(), 5);
+
+        // Truncating to more rounds than exist should be no-op
+        model.truncate_to_rounds(20);
+        assert_eq!(model.num_trees(), 5);
+    }
+
+    #[test]
+    fn test_is_compatible_for_update() {
+        let dataset = create_regression_dataset(100, 0.1);
+
+        let config = GBDTConfig::new().with_num_rounds(3);
+        let model = GBDTModel::train_binned(&dataset, config).unwrap();
+
+        // Should be compatible with same number of features
+        assert!(model.is_compatible_for_update(3));
+
+        // Should not be compatible with different number
+        assert!(!model.is_compatible_for_update(5));
+        assert!(!model.is_compatible_for_update(2));
     }
 }

@@ -952,6 +952,38 @@ impl UniversalModel {
         dataset.extract_raw_features_from_bins()
     }
 
+    /// Extract linear features for LinearThenTree mode
+    ///
+    /// Combines raw feature extraction with optional feature selection.
+    /// Returns (linear_features, num_linear_features).
+    fn get_linear_features(&self, dataset: &BinnedDataset) -> (Vec<f32>, usize) {
+        let num_rows = dataset.num_rows();
+
+        // Get raw features (from stored or extract from bins)
+        let raw_features = self
+            .raw_features_for_linear
+            .clone()
+            .unwrap_or_else(|| Self::extract_raw_features(dataset));
+
+        let num_raw_features = if num_rows > 0 {
+            raw_features.len() / num_rows
+        } else {
+            self.num_features
+        };
+
+        // Extract selected features if feature selection was used
+        let linear_features = crate::utils::features::extract_selected_features(
+            &raw_features,
+            num_rows,
+            num_raw_features,
+            self.linear_feature_indices.as_deref(),
+        );
+
+        let num_linear_features = self.num_linear_features.unwrap_or(num_raw_features);
+
+        (linear_features, num_linear_features)
+    }
+
     /// Extract raw feature values for a single row
     ///
     /// More efficient than extract_raw_features() when only predicting one row.
@@ -1730,6 +1762,415 @@ impl UniversalModel {
             )),
         }
     }
+
+    // =========================================================================
+    // Incremental Learning Support
+    // =========================================================================
+
+    /// Update the model with new training data (incremental learning)
+    ///
+    /// This method continues training from the current model state:
+    /// - **PureTree**: Appends new trees trained on residuals
+    /// - **LinearThenTree**: Updates linear weights (warm_fit) + appends new trees
+    /// - **RandomForest**: Appends new bootstrap trees
+    ///
+    /// # Arguments
+    /// * `dataset` - New data to train on (must have same feature schema)
+    /// * `loss_fn` - Loss function (should match original training)
+    /// * `additional_rounds` - Number of new boosting rounds (trees) to add
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Train on January data
+    /// let model = UniversalModel::train(&jan_data, config, &MseLoss)?;
+    ///
+    /// // Update with February data (10 more trees)
+    /// model.update(&feb_data, &MseLoss, 10)?;
+    /// ```
+    pub fn update(
+        &mut self,
+        dataset: &BinnedDataset,
+        loss_fn: &dyn LossFunction,
+        additional_rounds: usize,
+    ) -> Result<IncrementalUpdateReport> {
+        // Validate feature compatibility
+        if dataset.num_features() != self.num_features {
+            return Err(crate::TreeBoostError::Config(format!(
+                "Feature count mismatch: model has {} features, dataset has {}",
+                self.num_features,
+                dataset.num_features()
+            )));
+        }
+
+        let num_rows = dataset.num_rows();
+        let trees_before = self.num_trees();
+
+        match self.config.mode {
+            BoostingMode::PureTree => {
+                self.update_pure_tree(dataset, loss_fn, additional_rounds)?;
+            }
+            BoostingMode::LinearThenTree => {
+                self.update_linear_then_tree(dataset, loss_fn, additional_rounds)?;
+            }
+            BoostingMode::RandomForest => {
+                self.update_random_forest(dataset, loss_fn, additional_rounds)?;
+            }
+        }
+
+        let trees_after = self.num_trees();
+
+        Ok(IncrementalUpdateReport {
+            rows_trained: num_rows,
+            trees_before,
+            trees_after,
+            trees_added: trees_after - trees_before,
+            mode: self.config.mode,
+        })
+    }
+
+    /// Update PureTree model by appending trees trained on residuals
+    fn update_pure_tree(
+        &mut self,
+        dataset: &BinnedDataset,
+        loss_fn: &dyn LossFunction,
+        additional_rounds: usize,
+    ) -> Result<()> {
+        let gbdt = self.gbdt_model.as_mut().ok_or_else(|| {
+            crate::TreeBoostError::Config("No GBDTModel available for update".to_string())
+        })?;
+
+        // Compute current predictions
+        let predictions = gbdt.predict(dataset);
+
+        // Create residual targets (avoids cloning targets only to overwrite)
+        let residual_targets: Vec<f32> = dataset
+            .targets()
+            .iter()
+            .zip(predictions.iter())
+            .map(|(target, pred)| target - pred)
+            .collect();
+
+        // Create residual dataset with new targets
+        let residual_dataset = dataset.with_targets(residual_targets);
+
+        // Train new trees on residuals using same config
+        let mut update_config = self.config.clone();
+        update_config.num_rounds = additional_rounds;
+        let gbdt_config = Self::to_gbdt_config(&update_config, loss_fn);
+        let new_model = GBDTModel::train_binned(&residual_dataset, gbdt_config)?;
+
+        // Append new trees
+        gbdt.append_trees(new_model.trees().to_vec());
+
+        Ok(())
+    }
+
+    /// Update LinearThenTree model
+    fn update_linear_then_tree(
+        &mut self,
+        dataset: &BinnedDataset,
+        loss_fn: &dyn LossFunction,
+        additional_rounds: usize,
+    ) -> Result<()> {
+        use crate::learner::incremental::IncrementalLearner;
+
+        let num_rows = dataset.num_rows();
+        let targets = dataset.targets();
+
+        // Compute current predictions BEFORE borrowing linear_booster mutably
+        let current_preds = self.predict(dataset);
+
+        // Extract linear features once (avoids duplication)
+        let (linear_features, num_linear_features) = self.get_linear_features(dataset);
+
+        // Update linear booster with warm_fit if present
+        if let Some(ref mut linear_booster) = self.linear_booster {
+            // Compute gradients
+            let (gradients, hessians): (Vec<f32>, Vec<f32>) = targets
+                .iter()
+                .zip(current_preds.iter())
+                .map(|(t, p)| loss_fn.gradient_hessian(*t, *p))
+                .unzip();
+
+            // Warm fit linear booster
+            linear_booster.warm_fit(&linear_features, num_linear_features, &gradients, &hessians)?;
+        }
+
+        // Now update trees on residuals from full ensemble
+        if let Some(ref mut gbdt) = self.gbdt_model {
+            // Get linear predictions (using already-extracted features)
+            let linear_preds = if let Some(ref linear_booster) = self.linear_booster {
+                linear_booster.predict_batch(&linear_features, num_linear_features)
+            } else {
+                vec![0.0; num_rows]
+            };
+
+            // Get existing tree predictions
+            let tree_preds = gbdt.predict(dataset);
+
+            // Compute residual targets: target - base - shrinkage*linear - tree
+            let shrinkage = self.config.linear_config.shrinkage_factor;
+            let residual_targets: Vec<f32> = targets
+                .iter()
+                .zip(linear_preds.iter())
+                .zip(tree_preds.iter())
+                .map(|((t, lp), tp)| t - self.base_prediction - shrinkage * lp - tp)
+                .collect();
+
+            // Create residual dataset with new targets (avoids full clone)
+            let residual_dataset = dataset.with_targets(residual_targets);
+
+            // Train new trees on residuals
+            let mut update_config = self.config.clone();
+            update_config.num_rounds = additional_rounds;
+            let gbdt_config = Self::to_gbdt_config(&update_config, loss_fn);
+            let new_model = GBDTModel::train_binned(&residual_dataset, gbdt_config)?;
+
+            gbdt.append_trees(new_model.trees().to_vec());
+        }
+
+        Ok(())
+    }
+
+    /// Update RandomForest by adding more bootstrap trees
+    fn update_random_forest(
+        &mut self,
+        dataset: &BinnedDataset,
+        loss_fn: &dyn LossFunction,
+        additional_rounds: usize,
+    ) -> Result<()> {
+        use crate::learner::TreeBooster;
+
+        let num_rows = dataset.num_rows();
+        let targets = dataset.targets();
+
+        // RF trees are trained on bootstrap samples from base prediction
+        let tree_config = self.config.tree_config.clone().with_learning_rate(1.0);
+
+        // Use next seed offset based on current tree count
+        let seed_offset_start = self.trees.len() as u64;
+
+        let new_trees: Vec<Tree> = (0..additional_rounds)
+            .into_par_iter()
+            .filter_map(|i| {
+                let mut rng = rand::rngs::StdRng::seed_from_u64(
+                    self.config.seed + seed_offset_start + i as u64
+                );
+
+                // Bootstrap sample
+                let bootstrap_indices: Vec<usize> = (0..num_rows)
+                    .map(|_| {
+                        use rand::Rng;
+                        rng.gen_range(0..num_rows)
+                    })
+                    .collect();
+
+                // Compute gradients for bootstrap sample
+                let mut gradients = vec![0.0f32; num_rows];
+                let mut hessians = vec![0.0f32; num_rows];
+
+                for &idx in &bootstrap_indices {
+                    let (g, h) = loss_fn.gradient_hessian(targets[idx], self.base_prediction);
+                    gradients[idx] = g;
+                    hessians[idx] = h;
+                }
+
+                // Grow tree
+                let mut booster = TreeBooster::new(tree_config.clone());
+                if booster
+                    .fit_on_gradients(dataset, &gradients, &hessians, Some(&bootstrap_indices))
+                    .is_ok()
+                {
+                    booster.take_tree()
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        self.trees.extend(new_trees);
+
+        Ok(())
+    }
+
+    /// Save model to TRB (TreeBoost) incremental format
+    ///
+    /// TRB format supports incremental updates without rewriting the entire file.
+    /// Use this format when you plan to update the model with new data.
+    ///
+    /// # Example
+    /// ```ignore
+    /// model.save_trb("model.trb", "Initial training on January data")?;
+    ///
+    /// // Later, after updating:
+    /// model.save_trb_update("model.trb", 1000, "February update")?;
+    /// ```
+    pub fn save_trb(&self, path: impl AsRef<std::path::Path>, description: &str) -> Result<()> {
+        use crate::serialize::{TrbHeader, TrbWriter, FORMAT_VERSION};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let header = TrbHeader {
+            format_version: FORMAT_VERSION,
+            model_type: "universal".to_string(),
+            created_at: timestamp,
+            boosting_mode: format!("{:?}", self.config.mode),
+            num_features: self.num_features,
+            base_blob_size: 0, // Will be filled by TrbWriter
+            metadata: description.to_string(),
+        };
+
+        // Serialize the model to rkyv bytes
+        let blob = crate::serialize::rkyv_io::serialize_universal_model(self)?;
+
+        TrbWriter::new(path, header, &blob)?;
+
+        Ok(())
+    }
+
+    /// Append an update to an existing TRB file
+    ///
+    /// This appends a new segment without rewriting the base model.
+    /// The model must be loaded with `load_trb()` before calling this.
+    ///
+    /// # Arguments
+    /// * `path` - Path to existing .trb file
+    /// * `rows_trained` - Number of rows used in this update
+    /// * `description` - Description of this update
+    pub fn save_trb_update(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        rows_trained: usize,
+        description: &str,
+    ) -> Result<()> {
+        use crate::serialize::{open_for_append, TrbUpdateHeader, UpdateType};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        // Use Snapshot type for all modes - stores full model state
+        // This is simpler and more robust than incremental tree-only updates
+        let update_type = UpdateType::Snapshot;
+
+        let header = TrbUpdateHeader {
+            update_type,
+            created_at: timestamp,
+            rows_trained,
+            description: description.to_string(),
+        };
+
+        // Serialize the updated model
+        let blob = crate::serialize::rkyv_io::serialize_universal_model(self)?;
+
+        // Open and append
+        let mut writer = open_for_append(path)?;
+        writer.append_update(&header, &blob)?;
+
+        Ok(())
+    }
+
+    /// Load model from TRB format
+    ///
+    /// Loads the base model and applies all update segments.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let model = UniversalModel::load_trb("model.trb")?;
+    /// ```
+    pub fn load_trb(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        use crate::serialize::{TrbReader, TrbSegment, UpdateType};
+
+        let mut reader = TrbReader::open(path)?;
+
+        // Load all segments
+        let segments = reader.load_all_segments()?;
+
+        // The last snapshot-type segment (or base if no snapshots) is the current state
+        let mut model: Option<Self> = None;
+
+        for segment in segments {
+            match segment {
+                TrbSegment::Base { blob, .. } => {
+                    model = Some(crate::serialize::rkyv_io::deserialize_universal_model(&blob)?);
+                }
+                TrbSegment::Update { header, blob } => {
+                    match header.update_type {
+                        UpdateType::Snapshot => {
+                            // Replace with snapshot
+                            model = Some(crate::serialize::rkyv_io::deserialize_universal_model(&blob)?);
+                        }
+                        UpdateType::Trees => {
+                            // For trees-only updates, we'd need to deserialize and merge
+                            // For now, we just use snapshots for simplicity
+                            if model.is_none() {
+                                model = Some(crate::serialize::rkyv_io::deserialize_universal_model(&blob)?);
+                            }
+                        }
+                        UpdateType::Linear | UpdateType::Preprocessor => {
+                            // These would need specialized handling
+                            // For now, fall through
+                        }
+                    }
+                }
+            }
+        }
+
+        model.ok_or_else(|| {
+            crate::TreeBoostError::Serialization("No valid model found in TRB file".to_string())
+        })
+    }
+
+    /// Check if model is compatible with dataset for incremental update
+    pub fn is_compatible_for_update(&self, dataset: &BinnedDataset) -> bool {
+        self.num_features == dataset.num_features()
+    }
+
+    /// Get mutable reference to underlying GBDTModel (for advanced manipulation)
+    pub fn gbdt_model_mut(&mut self) -> Option<&mut GBDTModel> {
+        self.gbdt_model.as_mut()
+    }
+
+    /// Get mutable reference to linear booster (for advanced manipulation)
+    pub fn linear_booster_mut(&mut self) -> Option<&mut LinearBooster> {
+        self.linear_booster.as_mut()
+    }
+
+    /// Get mutable reference to trees (for RandomForest mode)
+    pub fn trees_mut(&mut self) -> &mut Vec<Tree> {
+        &mut self.trees
+    }
+}
+
+/// Report from an incremental training update
+#[derive(Debug, Clone)]
+pub struct IncrementalUpdateReport {
+    /// Number of rows in the new training data
+    pub rows_trained: usize,
+    /// Number of trees before update
+    pub trees_before: usize,
+    /// Number of trees after update
+    pub trees_after: usize,
+    /// Number of trees added
+    pub trees_added: usize,
+    /// Boosting mode
+    pub mode: BoostingMode,
+}
+
+impl std::fmt::Display for IncrementalUpdateReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Incremental Update: {} rows, {} trees added ({} -> {}), mode={:?}",
+            self.rows_trained, self.trees_added, self.trees_before, self.trees_after, self.mode
+        )
+    }
 }
 
 // =============================================================================
@@ -2340,6 +2781,192 @@ mod tests {
         let loaded: UniversalModel = rkyv::from_bytes::<_, RkyvError>(&bytes).unwrap();
         assert_eq!(loaded.mode(), BoostingMode::RandomForest);
 
+        assert_model_predictions_match(&model, &loaded, &dataset, 1e-4);
+    }
+
+    // ========================================
+    // Incremental Learning Tests
+    // ========================================
+
+    #[test]
+    fn test_puretree_incremental_update() {
+        let dataset = create_test_dataset(100, 3);
+        let loss = MseLoss;
+
+        let config = UniversalConfig::new()
+            .with_mode(BoostingMode::PureTree)
+            .with_num_rounds(5);
+
+        let mut model = UniversalModel::train(&dataset, config, &loss).unwrap();
+        let trees_before = model.num_trees();
+        assert_eq!(trees_before, 5);
+
+        // Update with 5 more trees
+        let report = model.update(&dataset, &loss, 5).unwrap();
+
+        assert_eq!(report.trees_before, 5);
+        assert_eq!(report.trees_after, 10);
+        assert_eq!(report.trees_added, 5);
+        assert_eq!(model.num_trees(), 10);
+    }
+
+    #[test]
+    fn test_linear_then_tree_incremental_update() {
+        let dataset = create_test_dataset(100, 3);
+        let loss = MseLoss;
+
+        let config = UniversalConfig::new()
+            .with_mode(BoostingMode::LinearThenTree)
+            .with_num_rounds(5)
+            .with_linear_rounds(2);
+
+        let mut model = UniversalModel::train(&dataset, config, &loss).unwrap();
+        let trees_before = model.num_trees();
+        assert_eq!(trees_before, 5);
+        assert!(model.has_linear());
+
+        // Update with 5 more trees
+        let report = model.update(&dataset, &loss, 5).unwrap();
+
+        assert_eq!(report.trees_before, 5);
+        assert_eq!(report.trees_after, 10);
+        assert_eq!(report.trees_added, 5);
+    }
+
+    #[test]
+    fn test_random_forest_incremental_update() {
+        let dataset = create_test_dataset(100, 3);
+        let loss = MseLoss;
+
+        let config = UniversalConfig::new()
+            .with_mode(BoostingMode::RandomForest)
+            .with_num_rounds(5);
+
+        let mut model = UniversalModel::train(&dataset, config, &loss).unwrap();
+        let trees_before = model.num_trees();
+        assert_eq!(trees_before, 5);
+
+        // Update with 5 more trees
+        let report = model.update(&dataset, &loss, 5).unwrap();
+
+        assert_eq!(report.trees_before, 5);
+        assert_eq!(report.trees_after, 10);
+        assert_eq!(report.trees_added, 5);
+    }
+
+    #[test]
+    fn test_incremental_update_report_display() {
+        let report = IncrementalUpdateReport {
+            rows_trained: 1000,
+            trees_before: 10,
+            trees_after: 20,
+            trees_added: 10,
+            mode: BoostingMode::PureTree,
+        };
+
+        let display = format!("{}", report);
+        assert!(display.contains("1000 rows"));
+        assert!(display.contains("10 trees added"));
+    }
+
+    #[test]
+    fn test_incremental_update_feature_mismatch() {
+        let dataset1 = create_test_dataset(100, 3);
+        let dataset2 = create_test_dataset(100, 5); // Different feature count
+        let loss = MseLoss;
+
+        let config = UniversalConfig::new()
+            .with_mode(BoostingMode::PureTree)
+            .with_num_rounds(5);
+
+        let mut model = UniversalModel::train(&dataset1, config, &loss).unwrap();
+
+        // Update with mismatched features should fail
+        let result = model.update(&dataset2, &loss, 5);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Feature count mismatch"));
+    }
+
+    #[test]
+    fn test_is_compatible_for_update() {
+        let dataset1 = create_test_dataset(100, 3);
+        let dataset2 = create_test_dataset(50, 3); // Same features, different rows
+        let dataset3 = create_test_dataset(100, 5); // Different features
+        let loss = MseLoss;
+
+        let config = UniversalConfig::new()
+            .with_mode(BoostingMode::PureTree)
+            .with_num_rounds(5);
+
+        let model = UniversalModel::train(&dataset1, config, &loss).unwrap();
+
+        assert!(model.is_compatible_for_update(&dataset1));
+        assert!(model.is_compatible_for_update(&dataset2));
+        assert!(!model.is_compatible_for_update(&dataset3));
+    }
+
+    #[test]
+    fn test_trb_save_and_load() {
+        let dataset = create_test_dataset(100, 3);
+        let loss = MseLoss;
+
+        let config = UniversalConfig::new()
+            .with_mode(BoostingMode::PureTree)
+            .with_num_rounds(5);
+
+        let model = UniversalModel::train(&dataset, config, &loss).unwrap();
+
+        // Save to temp file
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.trb");
+
+        model.save_trb(&path, "Test model").unwrap();
+
+        // Load back
+        let loaded = UniversalModel::load_trb(&path).unwrap();
+
+        assert_eq!(loaded.mode(), BoostingMode::PureTree);
+        assert_eq!(loaded.num_features(), 3);
+        assert_eq!(loaded.num_trees(), 5);
+
+        // Predictions should match
+        assert_model_predictions_match(&model, &loaded, &dataset, 1e-4);
+    }
+
+    #[test]
+    fn test_trb_save_update_and_load() {
+        let dataset = create_test_dataset(100, 3);
+        let loss = MseLoss;
+
+        let config = UniversalConfig::new()
+            .with_mode(BoostingMode::PureTree)
+            .with_num_rounds(5);
+
+        let mut model = UniversalModel::train(&dataset, config, &loss).unwrap();
+
+        // Save initial model
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.trb");
+        model.save_trb(&path, "Initial training").unwrap();
+
+        let initial_size = std::fs::metadata(&path).unwrap().len();
+
+        // Update model
+        model.update(&dataset, &loss, 5).unwrap();
+        assert_eq!(model.num_trees(), 10);
+
+        // Save update
+        model.save_trb_update(&path, 100, "Update batch").unwrap();
+
+        // File should be larger
+        let updated_size = std::fs::metadata(&path).unwrap().len();
+        assert!(updated_size > initial_size, "TRB file should grow after update");
+
+        // Load and verify
+        let loaded = UniversalModel::load_trb(&path).unwrap();
+        assert_eq!(loaded.num_trees(), 10);
+
+        // Predictions should match
         assert_model_predictions_match(&model, &loaded, &dataset, 1e-4);
     }
 }

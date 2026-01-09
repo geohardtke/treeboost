@@ -70,6 +70,7 @@
 
 pub mod encoding;
 pub mod imputer;
+pub mod incremental;
 pub mod outliers;
 pub mod pipeline;
 pub mod polars_ext;

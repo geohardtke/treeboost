@@ -46,6 +46,7 @@
 
 use std::collections::HashMap;
 
+use crate::preprocessing::incremental::IncrementalEncoder;
 use crate::{Result, TreeBoostError};
 
 // =============================================================================
@@ -194,6 +195,21 @@ impl FrequencyEncoder {
 impl Default for FrequencyEncoder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl IncrementalEncoder for FrequencyEncoder {
+    fn partial_fit(&mut self, categories: &[&str]) -> Result<()> {
+        for cat in categories {
+            *self.counts.entry(cat.to_string()).or_insert(0) += 1;
+            self.total_count += 1;
+        }
+        self.fitted = true;
+        Ok(())
+    }
+
+    fn n_samples(&self) -> u64 {
+        self.total_count as u64
     }
 }
 
@@ -639,6 +655,25 @@ impl Default for OneHotEncoder {
     }
 }
 
+impl OneHotEncoder {
+    /// Attempt incremental fitting (NOT SUPPORTED)
+    ///
+    /// OneHotEncoder does NOT support incremental fitting because adding new
+    /// categories would change the output dimension, breaking any model weights
+    /// trained on the previous encoding.
+    ///
+    /// # Alternatives
+    /// - Use [`FrequencyEncoder`] which handles new categories gracefully
+    /// - Use target encoding via [`crate::encoding::OrderedTargetEncoder`]
+    /// - Pre-define all expected categories before first fit
+    ///
+    /// # Returns
+    /// Always returns `Err(TreeBoostError::Config)` with explanation
+    pub fn partial_fit(&mut self, _categories: &[&str]) -> Result<()> {
+        Err(crate::preprocessing::incremental::not_supported_error("OneHotEncoder"))
+    }
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -870,5 +905,56 @@ mod tests {
         let small_categories = vec!["A", "B", "C"];
         let mut encoder4 = OneHotEncoder::new();
         assert!(encoder4.fit(&small_categories).is_ok());
+    }
+
+    // -------------------------------------------------------------------------
+    // Incremental Encoder Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_frequency_encoder_partial_fit() {
+        let mut encoder = FrequencyEncoder::new();
+
+        // Batch 1: ["A", "A", "B"]
+        encoder.partial_fit(&["A", "A", "B"]).unwrap();
+        assert_eq!(encoder.n_samples(), 3);
+        assert_eq!(encoder.transform_single("A"), Some(2.0)); // A appears 2 times
+        assert_eq!(encoder.transform_single("B"), Some(1.0)); // B appears 1 time
+
+        // Batch 2: ["A", "C"]
+        encoder.partial_fit(&["A", "C"]).unwrap();
+        assert_eq!(encoder.n_samples(), 5);
+        assert_eq!(encoder.transform_single("A"), Some(3.0)); // A now appears 3 times
+        assert_eq!(encoder.transform_single("B"), Some(1.0)); // B still 1 time
+        assert_eq!(encoder.transform_single("C"), Some(1.0)); // C is new
+
+        // Unknown category should use default
+        assert_eq!(encoder.transform_single("D"), Some(0.0));
+    }
+
+    #[test]
+    fn test_frequency_encoder_partial_fit_normalized() {
+        let mut encoder = FrequencyEncoder::new().with_normalize(true);
+
+        // Batch 1: ["A", "A", "B"] - total 3
+        encoder.partial_fit(&["A", "A", "B"]).unwrap();
+        assert!((encoder.transform_single("A").unwrap() - 2.0 / 3.0).abs() < 1e-6);
+
+        // Batch 2: ["A", "C"] - total now 5
+        encoder.partial_fit(&["A", "C"]).unwrap();
+        assert!((encoder.transform_single("A").unwrap() - 3.0 / 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_onehot_encoder_partial_fit_not_supported() {
+        let mut encoder = OneHotEncoder::new();
+
+        // partial_fit should always fail with clear error
+        let result = encoder.partial_fit(&["A", "B"]);
+        assert!(result.is_err());
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("does not support incremental"));
+        assert!(err_msg.contains("FrequencyEncoder")); // Should suggest alternative
     }
 }

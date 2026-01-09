@@ -13,6 +13,9 @@
 //! 2. **Inference-time**: Comparing feature distributions between training data
 //!    and new inference data using metrics like PSI, KL divergence, and KS test.
 //!
+//! 3. **Incremental learning**: Monitoring distribution changes between training
+//!    batches during model updates. Warns when drift may degrade model performance.
+//!
 //! # Example
 //!
 //! ```ignore
@@ -29,11 +32,28 @@
 //!     println!("Critical drift: {:?}", result.drifted_features);
 //! }
 //! ```
+//!
+//! # Incremental Learning Drift Detection
+//!
+//! ```ignore
+//! use treeboost::monitoring::{IncrementalDriftDetector, check_drift};
+//!
+//! // Before updating a model, check for drift
+//! let drift_result = check_drift(&training_data, &update_data);
+//! if drift_result.has_significant_drift() {
+//!     println!("Warning: {}", drift_result);
+//!     println!("Recommendation: {}", drift_result.recommendation);
+//! }
+//! ```
 
 mod detector;
+pub mod incremental;
 mod metrics;
 mod tracker;
 
 pub use detector::{AlertLevel, ShiftDetector, ShiftResult};
+pub use incremental::{
+    check_drift, DriftHistory, DriftRecommendation, IncrementalDriftDetector, IncrementalDriftResult,
+};
 pub use metrics::{DistributionMetric, JensenShannon, KolmogorovSmirnov, PSI};
 pub use tracker::{CVHoldoutTracker, GapRecord, Trend};

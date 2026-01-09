@@ -63,7 +63,7 @@ pub mod mode;
 mod core;
 
 // Re-export everything from core
-pub use core::UniversalModel;
+pub use core::{IncrementalUpdateReport, UniversalModel};
 
 // Re-export key types
 pub use config::{StackingStrategy, UniversalConfig, UniversalPreset};

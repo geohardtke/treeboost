@@ -41,6 +41,7 @@
 //! // Fit and predict (using appropriate data format for each type)
 //! ```
 
+pub mod incremental;
 mod linear;
 mod linear_tree;
 mod traits;

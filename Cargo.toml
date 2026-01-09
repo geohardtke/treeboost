@@ -77,6 +77,12 @@ csv = "1.3"
 # Binary serialization for model files
 bincode = "1.3"
 
+# CRC32 for integrity checks in .trb files
+crc32fast = "1.5"
+
+# File locking for concurrent access prevention
+fs4 = "0.13"
+
 # Timestamp for run directories
 chrono = "0.4"
 

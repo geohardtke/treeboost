@@ -138,10 +138,11 @@ pub use loss::{
     sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, PseudoHuberLoss,
 };
 pub use model::{
-    AutoBuilder, AutoConfig, AutoEnsembleConfig, AutoEnsembleMethod, AutoModel, BoostingMode,
-    BuildPhaseTimes, BuildResult, ConsoleProgress, ModeSelection, ProgressCallback, ProgressUpdate,
-    QuietProgress, StackingStrategy, TrainingPhase, TreeTunerPreset, TuningLevel, UniversalConfig,
-    UniversalModel, UniversalPreset,
+    AutoBuilder, AutoConfig, AutoEnsembleConfig, AutoEnsembleMethod, AutoModel,
+    AutoModelUpdateReport, BoostingMode, BuildPhaseTimes, BuildResult, ConsoleProgress,
+    IncrementalUpdateReport, ModeSelection, ProgressCallback, ProgressUpdate, QuietProgress,
+    StackingStrategy, TrainingPhase, TreeTunerPreset, TuningLevel, UniversalConfig, UniversalModel,
+    UniversalPreset,
 };
 pub use monitoring::{AlertLevel, CVHoldoutTracker, ShiftDetector, ShiftResult};
 

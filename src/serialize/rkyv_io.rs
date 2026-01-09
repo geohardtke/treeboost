@@ -64,6 +64,24 @@ pub fn load_universal_model(path: impl AsRef<Path>) -> Result<UniversalModel> {
     Ok(model)
 }
 
+/// Serialize a UniversalModel to bytes (for TRB format)
+pub fn serialize_universal_model(model: &UniversalModel) -> Result<Vec<u8>> {
+    let bytes = rkyv::to_bytes::<RkyvError>(model)
+        .map_err(|e| TreeBoostError::Serialization(format!("Failed to serialize: {}", e)))?;
+    Ok(bytes.to_vec())
+}
+
+/// Deserialize a UniversalModel from bytes (for TRB format)
+pub fn deserialize_universal_model(bytes: &[u8]) -> Result<UniversalModel> {
+    let archived = rkyv::access::<rkyv::Archived<UniversalModel>, RkyvError>(bytes)
+        .map_err(|e| TreeBoostError::Serialization(format!("Failed to access archive: {}", e)))?;
+
+    let model: UniversalModel = rkyv::deserialize::<UniversalModel, RkyvError>(archived)
+        .map_err(|e| TreeBoostError::Serialization(format!("Failed to deserialize: {}", e)))?;
+
+    Ok(model)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

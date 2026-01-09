@@ -394,6 +394,11 @@ pub struct LinearBooster {
 
     /// Target mean (for prediction shrinkage)
     target_mean: f32,
+
+    /// Total optimization iterations completed across all fits
+    /// (for incremental learning tracking)
+    #[serde(default)]
+    iterations_completed: usize,
 }
 
 impl LinearBooster {
@@ -412,6 +417,7 @@ impl LinearBooster {
             num_features,
             scaler_fitted: false,
             target_mean: 0.0,
+            iterations_completed: 0,
         }
     }
 
@@ -502,16 +508,24 @@ impl LinearBooster {
     ///
     /// IMPORTANT: For MSE loss, gradient = pred - target, hessian = 1.
     /// We fit to NEGATIVE gradients (the residuals = target - pred).
+    ///
+    /// # Arguments
+    /// * `update_bias` - If true, recompute bias from data. If false, keep current bias
+    ///                   (for warm start where we want to continue from current state)
+    ///
+    /// # Returns
+    /// Number of iterations actually executed (may be less than max_iter due to convergence)
     fn coordinate_descent(
         &mut self,
         features: &[f32],
         num_features: usize,
         gradients: &[f32],
         hessians: &[f32],
-    ) {
+        update_bias: bool,
+    ) -> usize {
         let num_rows = gradients.len();
         if num_rows == 0 {
-            return;
+            return 0;
         }
 
         let l2_penalty = self.config.l2_penalty();
@@ -537,7 +551,8 @@ impl LinearBooster {
 
         // Set bias = mean(targets) ONCE at the start (like sklearn Ridge)
         // This is the optimal bias for standardized features (X_mean = 0)
-        {
+        // For warm start (update_bias=false), we keep current bias
+        if update_bias {
             let sum_residuals: f32 = residuals.iter().sum();
             let sum_hessians: f32 = hessians.iter().sum();
             self.bias = (sum_residuals / sum_hessians.max(1e-10))
@@ -545,15 +560,17 @@ impl LinearBooster {
 
             // Store target mean for prediction shrinkage
             self.target_mean = self.bias;
+        }
 
-            // Center residuals around 0 for weight fitting
-            for r in residuals.iter_mut() {
-                *r -= self.bias;
-            }
+        // Center residuals around current bias for weight fitting
+        for r in residuals.iter_mut() {
+            *r -= self.bias;
         }
 
         // Coordinate Descent iterations (weights only, bias is fixed)
+        let mut actual_iterations = 0;
         for _iter in 0..self.config.max_iter {
+            actual_iterations += 1;
             let mut max_change = 0.0f32;
 
             // Update each weight with Elastic Net
@@ -596,6 +613,8 @@ impl LinearBooster {
                 break;
             }
         }
+
+        actual_iterations
     }
 
     /// Get the number of non-zero weights (sparsity measure)
@@ -794,8 +813,9 @@ impl WeakLearner for LinearBooster {
             self.fit_scaler(features, num_features);
         }
 
-        // Run coordinate descent
-        self.coordinate_descent(features, num_features, gradients, hessians);
+        // Run coordinate descent (update_bias=true for cold start)
+        let iters = self.coordinate_descent(features, num_features, gradients, hessians, true);
+        self.iterations_completed += iters;
 
         Ok(())
     }
@@ -874,7 +894,72 @@ impl WeakLearner for LinearBooster {
         self.weights.fill(0.0);
         self.bias = 0.0;
         self.target_mean = 0.0;
+        self.iterations_completed = 0;
         // Scaler preserved: based on data distribution, reusable across CV folds
+    }
+}
+
+// =============================================================================
+// Incremental Learning Support
+// =============================================================================
+
+impl crate::learner::incremental::IncrementalLearner for LinearBooster {
+    fn warm_fit(
+        &mut self,
+        features: &[f32],
+        num_features: usize,
+        gradients: &[f32],
+        hessians: &[f32],
+    ) -> Result<()> {
+        // Validate inputs
+        if num_features != self.num_features {
+            return Err(TreeBoostError::Config(format!(
+                "Feature count mismatch: expected {}, got {}",
+                self.num_features, num_features
+            )));
+        }
+
+        let num_rows = gradients.len();
+        if features.len() != num_rows * num_features {
+            return Err(TreeBoostError::Data(format!(
+                "Feature matrix size mismatch: expected {}, got {}",
+                num_rows * num_features,
+                features.len()
+            )));
+        }
+
+        if hessians.len() != num_rows {
+            return Err(TreeBoostError::Data(format!(
+                "Hessian size mismatch: expected {}, got {}",
+                num_rows,
+                hessians.len()
+            )));
+        }
+
+        // For warm start, scaler MUST already be fitted
+        // (we don't want to change statistics mid-training)
+        if !self.scaler_fitted {
+            return Err(TreeBoostError::Config(
+                "Cannot warm_fit on unfitted LinearBooster. \
+                 Call fit_on_gradients first to initialize the scaler."
+                    .to_string(),
+            ));
+        }
+
+        // Run coordinate descent with update_bias=false (keep current bias)
+        // This continues from current weights rather than starting fresh
+        let iters = self.coordinate_descent(features, num_features, gradients, hessians, false);
+        self.iterations_completed += iters;
+
+        Ok(())
+    }
+
+    fn iterations_completed(&self) -> usize {
+        self.iterations_completed
+    }
+
+    fn reset_iterations(&mut self) {
+        self.iterations_completed = 0;
     }
 }
 
@@ -1332,5 +1417,180 @@ mod tests {
 
         assert_eq!(config2.shrinkage_factor, 0.5);
         assert_eq!(config2.extrapolation_damping, 0.0);
+    }
+
+    // =========================================================================
+    // Incremental Learning Tests
+    // =========================================================================
+
+    #[test]
+    fn test_linear_warm_start() {
+        use crate::learner::incremental::IncrementalLearner;
+
+        // Train on Data A: trend y = 2x
+        let features_a = vec![1.0, 2.0, 3.0, 4.0, 5.0]; // 5 rows, 1 feature
+        let targets_a: Vec<f32> = features_a.iter().map(|&x| 2.0 * x).collect();
+        let gradients_a: Vec<f32> = targets_a.iter().map(|&t| -t).collect();
+        let hessians_a = vec![1.0; 5];
+
+        let config = LinearConfig::default()
+            .with_lambda(0.01)
+            .with_max_iter(100);
+        let mut booster = LinearBooster::new(1, config);
+
+        // Initial fit
+        booster
+            .fit_on_gradients(&features_a, 1, &gradients_a, &hessians_a)
+            .unwrap();
+
+        let initial_weight = booster.weights()[0];
+        let initial_iters = booster.iterations_completed();
+
+        // Verify initial fit learned approximately weight ≈ 2.0
+        assert!(
+            initial_weight > 1.0,
+            "Initial weight {} should be > 1.0",
+            initial_weight
+        );
+
+        // Train on Data B: trend y = 3x (weights should shift toward 3.0)
+        let features_b = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let targets_b: Vec<f32> = features_b.iter().map(|&x| 3.0 * x).collect();
+        let gradients_b: Vec<f32> = targets_b.iter().map(|&t| -t).collect();
+        let hessians_b = vec![1.0; 5];
+
+        // Warm fit continues from current weights
+        booster
+            .warm_fit(&features_b, 1, &gradients_b, &hessians_b)
+            .unwrap();
+
+        let new_weight = booster.weights()[0];
+        let total_iters = booster.iterations_completed();
+
+        // Weight should have shifted toward 3.0
+        assert!(
+            new_weight > initial_weight,
+            "Warm start weight {} should be > initial {}",
+            new_weight,
+            initial_weight
+        );
+
+        // Total iterations should have accumulated
+        assert!(
+            total_iters > initial_iters,
+            "Total iterations {} should be > initial {}",
+            total_iters,
+            initial_iters
+        );
+    }
+
+    #[test]
+    fn test_linear_scaler_preserved_on_warm_fit() {
+        use crate::learner::incremental::IncrementalLearner;
+
+        let features_a = vec![1.0, 2.0, 3.0, 4.0];
+        let gradients_a = vec![-1.0, -2.0, -3.0, -4.0];
+        let hessians_a = vec![1.0; 4];
+
+        let config = LinearConfig::default();
+        let mut booster = LinearBooster::new(1, config);
+
+        // Initial fit (fits scaler)
+        booster
+            .fit_on_gradients(&features_a, 1, &gradients_a, &hessians_a)
+            .unwrap();
+
+        // Get scaler parameters after first fit
+        let mean_after_first = booster.means[0];
+        let std_after_first = booster.stds[0];
+
+        // Warm fit with different data distribution
+        let features_b = vec![100.0, 200.0, 300.0, 400.0]; // Very different scale
+        let gradients_b = vec![-1.0, -2.0, -3.0, -4.0];
+        let hessians_b = vec![1.0; 4];
+
+        booster
+            .warm_fit(&features_b, 1, &gradients_b, &hessians_b)
+            .unwrap();
+
+        // Scaler should be unchanged (frozen after first fit)
+        assert_eq!(
+            booster.means[0], mean_after_first,
+            "Mean should be preserved after warm_fit"
+        );
+        assert_eq!(
+            booster.stds[0], std_after_first,
+            "Std should be preserved after warm_fit"
+        );
+    }
+
+    #[test]
+    fn test_warm_fit_requires_prior_fit() {
+        use crate::learner::incremental::IncrementalLearner;
+
+        let features = vec![1.0, 2.0, 3.0, 4.0];
+        let gradients = vec![-1.0, -2.0, -3.0, -4.0];
+        let hessians = vec![1.0; 4];
+
+        let config = LinearConfig::default();
+        let mut booster = LinearBooster::new(1, config);
+
+        // Warm fit without prior fit should fail
+        let result = booster.warm_fit(&features, 1, &gradients, &hessians);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unfitted"));
+    }
+
+    #[test]
+    fn test_iterations_tracking() {
+        use crate::learner::incremental::IncrementalLearner;
+
+        let features = vec![1.0, 2.0, 3.0, 4.0];
+        let gradients = vec![-1.0, -2.0, -3.0, -4.0];
+        let hessians = vec![1.0; 4];
+
+        let config = LinearConfig::default().with_max_iter(10);
+        let mut booster = LinearBooster::new(1, config);
+
+        assert_eq!(booster.iterations_completed(), 0);
+
+        // First fit
+        booster
+            .fit_on_gradients(&features, 1, &gradients, &hessians)
+            .unwrap();
+        let iters_after_first = booster.iterations_completed();
+        assert!(iters_after_first > 0);
+
+        // Second fit (should accumulate)
+        booster
+            .fit_on_gradients(&features, 1, &gradients, &hessians)
+            .unwrap();
+        let iters_after_second = booster.iterations_completed();
+        assert!(iters_after_second > iters_after_first);
+
+        // Reset iterations
+        booster.reset_iterations();
+        assert_eq!(booster.iterations_completed(), 0);
+    }
+
+    #[test]
+    fn test_reset_clears_iterations() {
+        use crate::learner::incremental::IncrementalLearner;
+
+        let features = vec![1.0, 2.0, 3.0, 4.0];
+        let gradients = vec![-1.0, -2.0, -3.0, -4.0];
+        let hessians = vec![1.0; 4];
+
+        let config = LinearConfig::default();
+        let mut booster = LinearBooster::new(1, config);
+
+        booster
+            .fit_on_gradients(&features, 1, &gradients, &hessians)
+            .unwrap();
+        assert!(booster.iterations_completed() > 0);
+
+        // Full reset (via WeakLearner trait)
+        booster.reset();
+        assert_eq!(booster.iterations_completed(), 0);
     }
 }
