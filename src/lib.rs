@@ -106,7 +106,7 @@ pub mod preprocessing;
 pub mod serialize;
 pub mod tree;
 pub mod tuner;
-pub(crate) mod utils;
+pub mod utils;
 
 // Kernel re-exported from scalar backend (canonical location for CPU kernels)
 pub use backend::scalar::kernel;

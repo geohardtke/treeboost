@@ -3,6 +3,18 @@
 //! This module provides shared utility functions for feature selection and extraction
 //! that are used across different parts of the codebase (AutoBuilder, UniversalModel, etc.).
 
+use crate::analysis::PanelDataInfo;
+use crate::features::{
+    FeatureGenerator, InteractionGenerator, PolynomialGenerator, RatioGenerator,
+    TimeSeriesFeaturePlan,
+};
+use crate::preprocessing::{
+    polars_ext::is_numeric, GroupedTimeSeriesConfig, GroupedTimeSeriesGenerator, NaNStrategy,
+};
+use crate::Result;
+use polars::prelude::*;
+use std::collections::HashMap;
+
 /// Extract selected features from raw feature array based on feature indices.
 ///
 /// This utility is used in LinearThenTree mode to select a subset of features for
@@ -44,6 +56,486 @@ pub fn extract_selected_features(
     } else {
         raw_features.to_vec()
     }
+}
+
+/// Apply time-series features to a DataFrame (panel data with groups × time)
+///
+/// This is a public utility that can be used by AutoBuilder, examples, or user code.
+/// Generates lag, rolling, and EWMA features within each group using the efficient
+/// GroupedTimeSeriesGenerator.
+///
+/// # Arguments
+///
+/// * `df` - Input DataFrame with panel data (groups × time)
+/// * `ts_plan` - Time-series feature configuration (lag periods, rolling windows, etc.)
+/// * `panel_info` - Panel structure info (group column, date column)
+/// * `fast_mode` - If true, uses reduced features for large datasets (>1M rows)
+///
+/// # Returns
+///
+/// New DataFrame with original columns + generated time-series features
+///
+/// # Example
+///
+/// ```ignore
+/// use treeboost::utils::apply_timeseries_features;
+///
+/// let df_with_ts = apply_timeseries_features(
+///     df,
+///     &ts_plan,
+///     &panel_info,
+///     false, // Use full feature set
+/// )?;
+/// ```
+pub fn apply_timeseries_features(
+    df: DataFrame,
+    ts_plan: &TimeSeriesFeaturePlan,
+    panel_info: &PanelDataInfo,
+    fast_mode: bool,
+) -> Result<DataFrame> {
+    let num_rows = df.height();
+
+    // Extract group IDs (convert string codes to u32 indices)
+    let code_col = df.column(&panel_info.group_column)?;
+    let code_series = code_col.as_materialized_series();
+
+    // Build code -> group_id mapping
+    let mut code_to_id: HashMap<String, u32> = HashMap::new();
+    let mut next_id = 0u32;
+
+    let group_ids: Vec<u32> = code_series
+        .str()?
+        .into_iter()
+        .map(|v| {
+            let code = v.unwrap_or("");
+            *code_to_id.entry(code.to_string()).or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                id
+            })
+        })
+        .collect();
+
+    // Extract timestamps (convert date column to f64)
+    let date_col = df.column(&panel_info.date_column)?;
+    let timestamps: Vec<f64> = date_col
+        .as_materialized_series()
+        .cast(&DataType::Float64)?
+        .f64()?
+        .into_iter()
+        .map(|v| v.unwrap_or(0.0))
+        .collect();
+
+    // Get numeric feature columns to transform
+    let feature_cols: Vec<String> = ts_plan.lag_columns.clone();
+    let num_features = feature_cols.len();
+
+    if num_features == 0 {
+        return Ok(df);
+    }
+
+    // OPTIMIZED: Extract columns ONCE, not millions of times!
+    let mut columns: Vec<_> = Vec::with_capacity(num_features);
+    for col_name in &feature_cols {
+        let col = df
+            .column(col_name)?
+            .as_materialized_series()
+            .cast(&DataType::Float32)?
+            .f32()?
+            .into_iter()
+            .map(|v| v.unwrap_or(0.0))
+            .collect::<Vec<f32>>();
+        columns.push(col);
+    }
+
+    // Interleave to row-major format
+    #[allow(clippy::needless_range_loop)]
+    let mut feature_data: Vec<f32> = Vec::with_capacity(num_rows * num_features);
+    for row_idx in 0..num_rows {
+        for col_idx in 0..num_features {
+            feature_data.push(columns[col_idx][row_idx]);
+        }
+    }
+
+    // Create and configure the generator
+    let config = if fast_mode && num_rows > 1_000_000 {
+        // Fast mode for large datasets: fewer features
+        GroupedTimeSeriesConfig {
+            lag_periods: vec![1, 7],
+            rolling_windows: vec![7],
+            rolling_stats: vec![crate::preprocessing::RollingStat::Mean],
+            ewma_alphas: vec![0.1],
+            nan_strategy: NaNStrategy::Keep,
+            min_periods: 1,
+        }
+    } else {
+        // Full feature set
+        GroupedTimeSeriesConfig {
+            lag_periods: ts_plan.lag_periods.clone(),
+            rolling_windows: ts_plan.rolling_windows.clone(),
+            rolling_stats: ts_plan.rolling_stats.clone(),
+            ewma_alphas: ts_plan.ewma_alphas.clone(),
+            nan_strategy: NaNStrategy::Keep,
+            min_periods: 1,
+        }
+    };
+
+    let mut generator = GroupedTimeSeriesGenerator::new(config);
+
+    // Fit and transform
+    generator.fit(&group_ids, &timestamps, (0..num_features).collect(), feature_cols)?;
+    let (new_features, new_names) = generator.transform(&feature_data, num_features)?;
+
+    if new_features.is_empty() {
+        return Ok(df);
+    }
+
+    let num_new_features = new_names.len();
+
+    // OPTIMIZED: Build all Series at once, then horizontal stack
+    let mut all_series: Vec<Series> = Vec::with_capacity(num_new_features);
+
+    for feat_idx in 0..num_new_features {
+        let mut col_data = Vec::with_capacity(num_rows);
+        for row in 0..num_rows {
+            col_data.push(new_features[row * num_new_features + feat_idx]);
+        }
+        let series = Series::new(new_names[feat_idx].clone().into(), col_data);
+        all_series.push(series);
+    }
+
+    // Create new DataFrame with all time-series features
+    let columns: Vec<_> = all_series.into_iter().map(|s| s.into_column()).collect();
+    let ts_df = DataFrame::new(columns)?;
+
+    // Horizontal stack - much faster than repeated with_column()
+    let new_df = df.hstack(ts_df.get_columns())?;
+
+    Ok(new_df)
+}
+
+/// Apply polynomial features to a DataFrame (x², x³, √x, log(x+1))
+///
+/// This is a public utility that can be used by AutoBuilder, examples, or user code.
+/// Generates polynomial transformations of numeric columns using PolynomialGenerator.
+///
+/// # Arguments
+///
+/// * `df` - Input DataFrame
+/// * `generator` - Configured PolynomialGenerator (use PolynomialGenerator::new(), .all(), etc.)
+/// * `columns` - Column names to transform (None = all numeric columns)
+///
+/// # Returns
+///
+/// New DataFrame with original columns + generated polynomial features
+///
+/// # Example
+///
+/// ```ignore
+/// use treeboost::utils::apply_polynomial_features;
+/// use treeboost::features::PolynomialGenerator;
+///
+/// let poly = PolynomialGenerator::new() // x² and √x
+///     .with_cube()                      // Add x³
+///     .with_log1p();                    // Add log(x+1)
+///
+/// let df_with_poly = apply_polynomial_features(
+///     df,
+///     &poly,
+///     Some(vec!["price".to_string(), "volume".to_string()]), // Transform only these
+/// )?;
+/// ```
+pub fn apply_polynomial_features(
+    df: DataFrame,
+    generator: &PolynomialGenerator,
+    columns: Option<Vec<String>>,
+) -> Result<DataFrame> {
+    let num_rows = df.height();
+
+    // Determine which columns to transform
+    let feature_cols: Vec<String> = if let Some(cols) = columns {
+        cols
+    } else {
+        // Auto-detect numeric columns
+        df.get_columns()
+            .iter()
+            .filter(|col| is_numeric(col))
+            .map(|col| col.name().to_string())
+            .collect()
+    };
+
+    let num_features = feature_cols.len();
+    if num_features == 0 {
+        return Ok(df);
+    }
+
+    // Extract columns ONCE to avoid O(n²) lookups
+    let mut columns: Vec<_> = Vec::with_capacity(num_features);
+    for col_name in &feature_cols {
+        let col = df
+            .column(col_name)?
+            .as_materialized_series()
+            .cast(&DataType::Float32)?
+            .f32()?
+            .into_iter()
+            .map(|v| v.unwrap_or(0.0))
+            .collect::<Vec<f32>>();
+        columns.push(col);
+    }
+
+    // Interleave to row-major format
+    #[allow(clippy::needless_range_loop)]
+    let mut feature_data: Vec<f32> = Vec::with_capacity(num_rows * num_features);
+    for row_idx in 0..num_rows {
+        for col_idx in 0..num_features {
+            feature_data.push(columns[col_idx][row_idx]);
+        }
+    }
+
+    // Generate polynomial features
+    let (new_features, new_names) = generator.generate(&feature_data, num_features, &feature_cols);
+
+    if new_features.is_empty() {
+        return Ok(df);
+    }
+
+    let num_new_features = new_names.len();
+
+    // Build all Series at once, then horizontal stack
+    let mut all_series: Vec<Series> = Vec::with_capacity(num_new_features);
+
+    for feat_idx in 0..num_new_features {
+        let mut col_data = Vec::with_capacity(num_rows);
+        for row in 0..num_rows {
+            col_data.push(new_features[row * num_new_features + feat_idx]);
+        }
+        let series = Series::new(new_names[feat_idx].clone().into(), col_data);
+        all_series.push(series);
+    }
+
+    // Create new DataFrame with polynomial features
+    let columns: Vec<_> = all_series.into_iter().map(|s| s.into_column()).collect();
+    let poly_df = DataFrame::new(columns)?;
+
+    // Horizontal stack - O(n) operation
+    let new_df = df.hstack(poly_df.get_columns())?;
+
+    Ok(new_df)
+}
+
+/// Apply ratio features to a DataFrame (x_i / x_j)
+///
+/// This is a public utility that can be used by AutoBuilder, examples, or user code.
+/// Generates ratio features for pairs of numeric columns using RatioGenerator.
+///
+/// # Arguments
+///
+/// * `df` - Input DataFrame
+/// * `generator` - Configured RatioGenerator (use RatioGenerator::from_pairs(), .auto_select(), etc.)
+/// * `columns` - Column names to use for ratios (None = all numeric columns)
+///
+/// # Returns
+///
+/// New DataFrame with original columns + generated ratio features
+///
+/// # Example
+///
+/// ```ignore
+/// use treeboost::utils::apply_ratio_features;
+/// use treeboost::features::RatioGenerator;
+///
+/// // Option 1: Explicit pairs
+/// let ratio = RatioGenerator::from_pairs(vec![(0, 1), (1, 2)]);
+///
+/// // Option 2: Auto-select based on correlation
+/// let ratio = RatioGenerator::auto_select(&data, num_features, 3);
+///
+/// let df_with_ratios = apply_ratio_features(df, &ratio, None)?;
+/// ```
+pub fn apply_ratio_features(
+    df: DataFrame,
+    generator: &RatioGenerator,
+    columns: Option<Vec<String>>,
+) -> Result<DataFrame> {
+    let num_rows = df.height();
+
+    // Determine which columns to use
+    let feature_cols: Vec<String> = if let Some(cols) = columns {
+        cols
+    } else {
+        // Auto-detect numeric columns
+        df.get_columns()
+            .iter()
+            .filter(|col| is_numeric(col))
+            .map(|col| col.name().to_string())
+            .collect()
+    };
+
+    let num_features = feature_cols.len();
+    if num_features == 0 {
+        return Ok(df);
+    }
+
+    // Extract columns ONCE to avoid O(n²) lookups
+    let mut columns: Vec<_> = Vec::with_capacity(num_features);
+    for col_name in &feature_cols {
+        let col = df
+            .column(col_name)?
+            .as_materialized_series()
+            .cast(&DataType::Float32)?
+            .f32()?
+            .into_iter()
+            .map(|v| v.unwrap_or(0.0))
+            .collect::<Vec<f32>>();
+        columns.push(col);
+    }
+
+    // Interleave to row-major format
+    #[allow(clippy::needless_range_loop)]
+    let mut feature_data: Vec<f32> = Vec::with_capacity(num_rows * num_features);
+    for row_idx in 0..num_rows {
+        for col_idx in 0..num_features {
+            feature_data.push(columns[col_idx][row_idx]);
+        }
+    }
+
+    // Generate ratio features
+    let (new_features, new_names) = generator.generate(&feature_data, num_features, &feature_cols);
+
+    if new_features.is_empty() {
+        return Ok(df);
+    }
+
+    let num_new_features = new_names.len();
+
+    // Build all Series at once, then horizontal stack
+    let mut all_series: Vec<Series> = Vec::with_capacity(num_new_features);
+
+    for feat_idx in 0..num_new_features {
+        let mut col_data = Vec::with_capacity(num_rows);
+        for row in 0..num_rows {
+            col_data.push(new_features[row * num_new_features + feat_idx]);
+        }
+        let series = Series::new(new_names[feat_idx].clone().into(), col_data);
+        all_series.push(series);
+    }
+
+    // Create new DataFrame with ratio features
+    let columns: Vec<_> = all_series.into_iter().map(|s| s.into_column()).collect();
+    let ratio_df = DataFrame::new(columns)?;
+
+    // Horizontal stack - O(n) operation
+    let new_df = df.hstack(ratio_df.get_columns())?;
+
+    Ok(new_df)
+}
+
+/// Apply interaction features to a DataFrame (x_i × x_j, x_i + x_j, etc.)
+///
+/// This is a public utility that can be used by AutoBuilder, examples, or user code.
+/// Generates interaction features for pairs of numeric columns using InteractionGenerator.
+///
+/// # Arguments
+///
+/// * `df` - Input DataFrame
+/// * `generator` - Configured InteractionGenerator (use InteractionGenerator::from_pairs(), .top_correlated(), etc.)
+/// * `columns` - Column names to use for interactions (None = all numeric columns)
+///
+/// # Returns
+///
+/// New DataFrame with original columns + generated interaction features
+///
+/// # Example
+///
+/// ```ignore
+/// use treeboost::utils::apply_interaction_features;
+/// use treeboost::features::{InteractionGenerator, InteractionType};
+///
+/// // Option 1: Explicit pairs with multiple interaction types
+/// let inter = InteractionGenerator::from_pairs(vec![(0, 1), (1, 2)])
+///     .with_types(vec![InteractionType::Multiply, InteractionType::Add]);
+///
+/// // Option 2: Auto-select top correlated pairs
+/// let inter = InteractionGenerator::top_correlated(20);
+///
+/// let df_with_interactions = apply_interaction_features(df, &inter, None)?;
+/// ```
+pub fn apply_interaction_features(
+    df: DataFrame,
+    generator: &InteractionGenerator,
+    columns: Option<Vec<String>>,
+) -> Result<DataFrame> {
+    let num_rows = df.height();
+
+    // Determine which columns to use
+    let feature_cols: Vec<String> = if let Some(cols) = columns {
+        cols
+    } else {
+        // Auto-detect numeric columns
+        df.get_columns()
+            .iter()
+            .filter(|col| is_numeric(col))
+            .map(|col| col.name().to_string())
+            .collect()
+    };
+
+    let num_features = feature_cols.len();
+    if num_features == 0 {
+        return Ok(df);
+    }
+
+    // Extract columns ONCE to avoid O(n²) lookups
+    let mut columns: Vec<_> = Vec::with_capacity(num_features);
+    for col_name in &feature_cols {
+        let col = df
+            .column(col_name)?
+            .as_materialized_series()
+            .cast(&DataType::Float32)?
+            .f32()?
+            .into_iter()
+            .map(|v| v.unwrap_or(0.0))
+            .collect::<Vec<f32>>();
+        columns.push(col);
+    }
+
+    // Interleave to row-major format
+    #[allow(clippy::needless_range_loop)]
+    let mut feature_data: Vec<f32> = Vec::with_capacity(num_rows * num_features);
+    for row_idx in 0..num_rows {
+        for col_idx in 0..num_features {
+            feature_data.push(columns[col_idx][row_idx]);
+        }
+    }
+
+    // Generate interaction features
+    let (new_features, new_names) = generator.generate(&feature_data, num_features, &feature_cols);
+
+    if new_features.is_empty() {
+        return Ok(df);
+    }
+
+    let num_new_features = new_names.len();
+
+    // Build all Series at once, then horizontal stack
+    let mut all_series: Vec<Series> = Vec::with_capacity(num_new_features);
+
+    for feat_idx in 0..num_new_features {
+        let mut col_data = Vec::with_capacity(num_rows);
+        for row in 0..num_rows {
+            col_data.push(new_features[row * num_new_features + feat_idx]);
+        }
+        let series = Series::new(new_names[feat_idx].clone().into(), col_data);
+        all_series.push(series);
+    }
+
+    // Create new DataFrame with interaction features
+    let columns: Vec<_> = all_series.into_iter().map(|s| s.into_column()).collect();
+    let interaction_df = DataFrame::new(columns)?;
+
+    // Horizontal stack - O(n) operation
+    let new_df = df.hstack(interaction_df.get_columns())?;
+
+    Ok(new_df)
 }
 
 #[cfg(test)]
@@ -92,5 +584,61 @@ mod tests {
         let indices = vec![2, 0]; // Reverse order
         let result = extract_selected_features(&raw, 2, 3, Some(&indices));
         assert_eq!(result, vec![3.0, 1.0, 6.0, 4.0]);
+    }
+
+    #[test]
+    fn test_apply_polynomial_features() {
+        let df = df! {
+            "x" => &[1.0f32, 2.0, 4.0],
+            "y" => &[10.0f32, 20.0, 30.0],
+        }
+        .unwrap();
+
+        let gen = PolynomialGenerator::new(); // Default: x², sqrt
+        let result = apply_polynomial_features(df.clone(), &gen, Some(vec!["x".to_string()]))
+            .unwrap();
+
+        // Should have original 2 columns + 2 new polynomial features for 'x'
+        assert_eq!(result.width(), 4);
+        assert_eq!(result.height(), 3);
+        let col_names: Vec<String> = result.get_column_names().iter().map(|s| s.to_string()).collect();
+        assert!(col_names.contains(&"x_sq".to_string()));
+        assert!(col_names.contains(&"x_sqrt".to_string()));
+    }
+
+    #[test]
+    fn test_apply_ratio_features() {
+        let df = df! {
+            "a" => &[10.0f32, 20.0, 30.0],
+            "b" => &[2.0f32, 4.0, 5.0],
+        }
+        .unwrap();
+
+        let gen = RatioGenerator::from_pairs(vec![(0, 1)]); // a / b
+        let result = apply_ratio_features(df.clone(), &gen, None).unwrap();
+
+        // Should have original 2 columns + 1 ratio column
+        assert_eq!(result.width(), 3);
+        assert_eq!(result.height(), 3);
+        let col_names: Vec<String> = result.get_column_names().iter().map(|s| s.to_string()).collect();
+        assert!(col_names.contains(&"a_div_b".to_string()));
+    }
+
+    #[test]
+    fn test_apply_interaction_features() {
+        let df = df! {
+            "a" => &[1.0f32, 2.0, 3.0],
+            "b" => &[4.0f32, 5.0, 6.0],
+        }
+        .unwrap();
+
+        let gen = InteractionGenerator::from_pairs(vec![(0, 1)]); // a * b by default
+        let result = apply_interaction_features(df.clone(), &gen, None).unwrap();
+
+        // Should have original 2 columns + 1 interaction column
+        assert_eq!(result.width(), 3);
+        assert_eq!(result.height(), 3);
+        let col_names: Vec<String> = result.get_column_names().iter().map(|s| s.to_string()).collect();
+        assert!(col_names.contains(&"a_mul_b".to_string()));
     }
 }
