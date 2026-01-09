@@ -24,9 +24,76 @@
 //! ```
 
 use crate::analysis::profiler::{ColumnDataType, ColumnProfile, DataFrameProfile};
-use crate::analysis::DatasetAnalysis;
+use crate::analysis::{DatasetAnalysis, PanelDataInfo};
 use crate::defaults::features as feature_defaults;
+use crate::preprocessing::timeseries::RollingStat;
 use std::collections::HashSet;
+
+/// Time-series feature engineering plan
+///
+/// Defines lag, rolling, and EWMA features to generate for panel/time-series data.
+/// All features are computed within groups to prevent data leakage.
+#[derive(Debug, Clone)]
+pub struct TimeSeriesFeaturePlan {
+    /// Name of the group/entity column (e.g., "stock_code")
+    pub group_column: String,
+    /// Name of the date/time column
+    pub date_column: String,
+    /// Columns to generate lag features for
+    pub lag_columns: Vec<String>,
+    /// Lag periods to use (e.g., [1, 3, 7, 14])
+    pub lag_periods: Vec<usize>,
+    /// Columns to generate rolling features for
+    pub rolling_columns: Vec<String>,
+    /// Rolling window sizes (e.g., [7, 14, 28])
+    pub rolling_windows: Vec<usize>,
+    /// Rolling statistics to compute
+    pub rolling_stats: Vec<RollingStat>,
+    /// Columns to generate EWMA features for
+    pub ewma_columns: Vec<String>,
+    /// EWMA alpha values (e.g., [0.1, 0.3])
+    pub ewma_alphas: Vec<f32>,
+    /// Estimated number of features to generate
+    pub estimated_features: usize,
+    /// Reasoning for feature selections
+    pub reasoning: Vec<String>,
+}
+
+impl TimeSeriesFeaturePlan {
+    /// Create an empty plan
+    pub fn new(group_column: String, date_column: String) -> Self {
+        Self {
+            group_column,
+            date_column,
+            lag_columns: Vec::new(),
+            lag_periods: Vec::new(),
+            rolling_columns: Vec::new(),
+            rolling_windows: Vec::new(),
+            rolling_stats: Vec::new(),
+            ewma_columns: Vec::new(),
+            ewma_alphas: Vec::new(),
+            estimated_features: 0,
+            reasoning: Vec::new(),
+        }
+    }
+
+    /// Check if plan is empty (no features to generate)
+    pub fn is_empty(&self) -> bool {
+        self.lag_columns.is_empty()
+            && self.rolling_columns.is_empty()
+            && self.ewma_columns.is_empty()
+    }
+
+    /// Compute estimated feature count
+    pub fn compute_estimated_features(&mut self) {
+        let lag_count = self.lag_columns.len() * self.lag_periods.len();
+        let rolling_count =
+            self.rolling_columns.len() * self.rolling_windows.len() * self.rolling_stats.len();
+        let ewma_count = self.ewma_columns.len() * self.ewma_alphas.len();
+
+        self.estimated_features = lag_count + rolling_count + ewma_count;
+    }
+}
 
 /// Feature generation plan
 #[derive(Debug, Clone)]
@@ -39,6 +106,8 @@ pub struct FeaturePlan {
     pub interaction_pairs: Vec<(String, String)>,
     /// DateTime columns for seasonal feature extraction
     pub time_features: Vec<(String, TimeFeatureType)>,
+    /// Time-series feature plan (lag, rolling, EWMA) - group-aware
+    pub timeseries_features: Option<TimeSeriesFeaturePlan>,
     /// Human-readable reasoning for decisions
     pub reasoning: Vec<String>,
 }
@@ -51,6 +120,7 @@ impl FeaturePlan {
             ratio_pairs: Vec::new(),
             interaction_pairs: Vec::new(),
             time_features: Vec::new(),
+            timeseries_features: None,
             reasoning: Vec::new(),
         }
     }
@@ -61,6 +131,7 @@ impl FeaturePlan {
             && self.ratio_pairs.is_empty()
             && self.interaction_pairs.is_empty()
             && self.time_features.is_empty()
+            && self.timeseries_features.as_ref().map(|ts| ts.is_empty()).unwrap_or(true)
     }
 
     /// Total number of features to be generated (estimate)
@@ -70,8 +141,21 @@ impl FeaturePlan {
         let ratio_count = self.ratio_pairs.len();
         let interaction_count = self.interaction_pairs.len();
         let time_count = self.time_features.len() * 4; // Typical seasonal components
+        let timeseries_count = self
+            .timeseries_features
+            .as_ref()
+            .map(|ts| ts.estimated_features)
+            .unwrap_or(0);
 
-        poly_count + ratio_count + interaction_count + time_count
+        poly_count + ratio_count + interaction_count + time_count + timeseries_count
+    }
+
+    /// Check if time-series features are planned
+    pub fn has_timeseries_features(&self) -> bool {
+        self.timeseries_features
+            .as_ref()
+            .map(|ts| !ts.is_empty())
+            .unwrap_or(false)
     }
 }
 
@@ -146,6 +230,8 @@ pub struct SmartFeatureConfig {
     pub enable_interactions: bool,
     /// Enable time feature extraction
     pub enable_time_features: bool,
+    /// Enable time-series feature generation (lag, rolling, EWMA)
+    pub enable_timeseries: bool,
     /// Maximum new features to generate
     pub max_new_features: usize,
     /// Linear R² threshold below which to add interactions
@@ -156,6 +242,16 @@ pub struct SmartFeatureConfig {
     pub top_n_polynomial: usize,
     /// Top N pairs for interaction generation
     pub top_n_interactions: usize,
+    /// Top N columns for time-series features (by target correlation)
+    pub top_n_timeseries: usize,
+    /// Override group column detection (None = auto-detect)
+    pub group_column: Option<String>,
+    /// Override date column detection (None = auto-detect)
+    pub date_column: Option<String>,
+    /// Custom lag periods (None = use granularity-based defaults)
+    pub custom_lag_periods: Option<Vec<usize>>,
+    /// Custom rolling windows (None = use granularity-based defaults)
+    pub custom_rolling_windows: Option<Vec<usize>>,
     /// Features to skip
     pub skip_features: HashSet<String>,
 }
@@ -178,11 +274,17 @@ impl Default for SmartFeatureConfig {
             enable_ratios: true,
             enable_interactions: true,
             enable_time_features: true,
+            enable_timeseries: true, // Auto-enabled when panel data detected
             max_new_features: feature_defaults::DEFAULT_MAX_NEW_FEATURES,
             low_linear_r2_threshold: feature_defaults::LOW_LINEAR_R2_THRESHOLD,
             ratio_correlation_threshold: feature_defaults::RATIO_CORRELATION_THRESHOLD,
             top_n_polynomial: feature_defaults::TOP_N_POLYNOMIAL,
             top_n_interactions: feature_defaults::TOP_N_INTERACTIONS,
+            top_n_timeseries: 10, // Default: top 10 columns by correlation
+            group_column: None,
+            date_column: None,
+            custom_lag_periods: None,
+            custom_rolling_windows: None,
             skip_features: HashSet::new(),
         }
     }
@@ -198,6 +300,7 @@ impl SmartFeatureConfig {
                 self.enable_ratios = true;
                 self.enable_interactions = false;
                 self.enable_time_features = false;
+                self.enable_timeseries = false;
                 self.max_new_features = feature_defaults::MINIMAL_MAX_NEW_FEATURES;
             }
             SmartFeaturePreset::Aggressive => {
@@ -205,14 +308,40 @@ impl SmartFeatureConfig {
                 self.enable_ratios = true;
                 self.enable_interactions = true;
                 self.enable_time_features = true;
+                self.enable_timeseries = true;
                 self.max_new_features = feature_defaults::AGGRESSIVE_MAX_NEW_FEATURES;
                 self.low_linear_r2_threshold = feature_defaults::AGGRESSIVE_LOW_LINEAR_R2_THRESHOLD;
                 self.ratio_correlation_threshold =
                     feature_defaults::AGGRESSIVE_RATIO_CORRELATION_THRESHOLD;
                 self.top_n_polynomial = feature_defaults::AGGRESSIVE_TOP_N_POLYNOMIAL;
                 self.top_n_interactions = feature_defaults::AGGRESSIVE_TOP_N_INTERACTIONS;
+                self.top_n_timeseries = 15; // More columns for aggressive mode
             }
         }
+        self
+    }
+
+    /// Set group column override
+    pub fn with_group_column(mut self, col: impl Into<String>) -> Self {
+        self.group_column = Some(col.into());
+        self
+    }
+
+    /// Set date column override
+    pub fn with_date_column(mut self, col: impl Into<String>) -> Self {
+        self.date_column = Some(col.into());
+        self
+    }
+
+    /// Set custom lag periods
+    pub fn with_lag_periods(mut self, periods: Vec<usize>) -> Self {
+        self.custom_lag_periods = Some(periods);
+        self
+    }
+
+    /// Set custom rolling windows
+    pub fn with_rolling_windows(mut self, windows: Vec<usize>) -> Self {
+        self.custom_rolling_windows = Some(windows);
         self
     }
 }
@@ -457,6 +586,148 @@ impl SmartFeatureEngine {
         }
     }
 
+    /// Infer feature plan with panel data awareness
+    ///
+    /// When panel data info is provided, this method also generates time-series
+    /// features (lags, rolling, EWMA) that respect group boundaries.
+    pub fn infer_with_panel(
+        profile: &DataFrameProfile,
+        analysis: Option<&DatasetAnalysis>,
+        panel_info: Option<&PanelDataInfo>,
+    ) -> FeaturePlan {
+        let config = SmartFeatureConfig::default();
+        Self::infer_with_panel_and_config(profile, analysis, panel_info, &config)
+    }
+
+    /// Infer feature plan with panel data awareness and custom configuration
+    pub fn infer_with_panel_and_config(
+        profile: &DataFrameProfile,
+        analysis: Option<&DatasetAnalysis>,
+        panel_info: Option<&PanelDataInfo>,
+        config: &SmartFeatureConfig,
+    ) -> FeaturePlan {
+        // Start with standard feature inference
+        let mut plan = Self::infer_with_config(profile, analysis, config);
+
+        // Add time-series features if panel data detected and enabled
+        if config.enable_timeseries {
+            if let Some(info) = panel_info {
+                let ts_plan = Self::plan_timeseries_features(profile, info, config);
+                if !ts_plan.is_empty() {
+                    plan.reasoning.push(format!(
+                        "Panel data detected: {} groups by '{}', ordered by '{}'",
+                        info.num_groups, info.group_column, info.date_column
+                    ));
+                    plan.reasoning.push(format!(
+                        "Adding {} time-series features (lag, rolling, EWMA)",
+                        ts_plan.estimated_features
+                    ));
+                    plan.timeseries_features = Some(ts_plan);
+                }
+            }
+        }
+
+        plan
+    }
+
+    /// Plan time-series features for panel data
+    ///
+    /// Selects top N numeric columns by target correlation and generates:
+    /// - Lag features at granularity-appropriate periods
+    /// - Rolling statistics (mean, std) at granularity-appropriate windows
+    /// - EWMA features with multiple alpha values
+    pub fn plan_timeseries_features(
+        profile: &DataFrameProfile,
+        panel_info: &PanelDataInfo,
+        config: &SmartFeatureConfig,
+    ) -> TimeSeriesFeaturePlan {
+        let mut plan = TimeSeriesFeaturePlan::new(
+            config
+                .group_column
+                .clone()
+                .unwrap_or_else(|| panel_info.group_column.clone()),
+            config
+                .date_column
+                .clone()
+                .unwrap_or_else(|| panel_info.date_column.clone()),
+        );
+
+        // Get numeric columns sorted by target correlation (exclude group/date)
+        let mut numeric_cols: Vec<&ColumnProfile> = profile
+            .columns
+            .iter()
+            .filter(|c| c.dtype == ColumnDataType::Numeric)
+            .filter(|c| !config.skip_features.contains(&c.name))
+            .filter(|c| c.name != panel_info.group_column && c.name != panel_info.date_column)
+            .collect();
+
+        numeric_cols.sort_by(|a, b| {
+            let corr_a = a.target_correlation.map(|c| c.abs()).unwrap_or(0.0);
+            let corr_b = b.target_correlation.map(|c| c.abs()).unwrap_or(0.0);
+            corr_b
+                .partial_cmp(&corr_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Select top N columns
+        let top_cols: Vec<String> = numeric_cols
+            .iter()
+            .take(config.top_n_timeseries)
+            .map(|c| c.name.clone())
+            .collect();
+
+        if top_cols.is_empty() {
+            plan.reasoning
+                .push("No numeric columns available for time-series features".to_string());
+            return plan;
+        }
+
+        // Configure lag periods based on granularity or custom
+        plan.lag_periods = config
+            .custom_lag_periods
+            .clone()
+            .unwrap_or_else(|| panel_info.time_granularity.suggested_lag_periods());
+
+        // Configure rolling windows based on granularity or custom
+        plan.rolling_windows = config
+            .custom_rolling_windows
+            .clone()
+            .unwrap_or_else(|| panel_info.time_granularity.suggested_rolling_windows());
+
+        // Default rolling stats: Mean and Std
+        plan.rolling_stats = vec![RollingStat::Mean, RollingStat::Std];
+
+        // Default EWMA alphas
+        plan.ewma_alphas = vec![0.1, 0.3];
+
+        // Assign columns to each feature type
+        plan.lag_columns = top_cols.clone();
+        plan.rolling_columns = top_cols.clone();
+        plan.ewma_columns = top_cols;
+
+        // Compute estimated features
+        plan.compute_estimated_features();
+
+        // Add reasoning
+        plan.reasoning.push(format!(
+            "Time granularity: {} -> lag periods {:?}, rolling windows {:?}",
+            panel_info.time_granularity, plan.lag_periods, plan.rolling_windows
+        ));
+        plan.reasoning.push(format!(
+            "Selected top {} columns by target correlation for time-series features",
+            plan.lag_columns.len()
+        ));
+        plan.reasoning.push(format!(
+            "Estimated {} time-series features ({} lag + {} rolling + {} EWMA)",
+            plan.estimated_features,
+            plan.lag_columns.len() * plan.lag_periods.len(),
+            plan.rolling_columns.len() * plan.rolling_windows.len() * plan.rolling_stats.len(),
+            plan.ewma_columns.len() * plan.ewma_alphas.len()
+        ));
+
+        plan
+    }
+
     /// Create separate feature plans for LTT mode
     ///
     /// # LTT Feature Matrix
@@ -626,6 +897,30 @@ impl SmartFeatureEngine {
             plan.polynomial_features.len()
         ));
         summary.push_str(&format!("  Ratio pairs: {}\n", plan.ratio_pairs.len()));
+
+        // Time-series features summary
+        if let Some(ref ts) = plan.timeseries_features {
+            summary.push_str(&format!(
+                "  Time-series features: {} (group='{}', date='{}')\n",
+                ts.estimated_features, ts.group_column, ts.date_column
+            ));
+            summary.push_str(&format!(
+                "    - Lag: {} columns × {} periods\n",
+                ts.lag_columns.len(),
+                ts.lag_periods.len()
+            ));
+            summary.push_str(&format!(
+                "    - Rolling: {} columns × {} windows × {} stats\n",
+                ts.rolling_columns.len(),
+                ts.rolling_windows.len(),
+                ts.rolling_stats.len()
+            ));
+            summary.push_str(&format!(
+                "    - EWMA: {} columns × {} alphas\n",
+                ts.ewma_columns.len(),
+                ts.ewma_alphas.len()
+            ));
+        }
         summary.push_str(&format!(
             "  Interaction pairs: {}\n",
             plan.interaction_pairs.len()
@@ -768,5 +1063,118 @@ mod tests {
         assert!(!plan
             .polynomial_features
             .contains(&"negative_feature".to_string()));
+    }
+
+    #[test]
+    fn test_timeseries_feature_plan() {
+        use crate::analysis::{PanelDataInfo, TimeGranularity};
+
+        let profile = create_test_profile();
+
+        // Create mock panel data info
+        let panel_info = PanelDataInfo {
+            group_column: "group".to_string(),
+            date_column: "date".to_string(),
+            num_groups: 5,
+            avg_observations_per_group: 100.0,
+            min_observations_per_group: 80,
+            max_observations_per_group: 120,
+            confidence: 0.9,
+            time_granularity: TimeGranularity::Daily,
+        };
+
+        let ts_plan = SmartFeatureEngine::plan_timeseries_features(
+            &profile,
+            &panel_info,
+            &SmartFeatureConfig::default(),
+        );
+
+        // Should have generated time-series features
+        assert!(!ts_plan.is_empty());
+
+        // Should have daily-appropriate lag periods
+        assert!(ts_plan.lag_periods.contains(&1));
+        assert!(ts_plan.lag_periods.contains(&7));
+
+        // Should have daily-appropriate rolling windows
+        assert!(ts_plan.rolling_windows.contains(&7));
+        assert!(ts_plan.rolling_windows.contains(&14));
+
+        // Should have estimated features count
+        assert!(ts_plan.estimated_features > 0);
+
+        // Should use the correct group/date columns
+        assert_eq!(ts_plan.group_column, "group");
+        assert_eq!(ts_plan.date_column, "date");
+    }
+
+    #[test]
+    fn test_infer_with_panel() {
+        use crate::analysis::{PanelDataInfo, TimeGranularity};
+
+        let profile = create_test_profile();
+
+        // Create mock panel data info
+        let panel_info = PanelDataInfo {
+            group_column: "group".to_string(),
+            date_column: "date".to_string(),
+            num_groups: 5,
+            avg_observations_per_group: 100.0,
+            min_observations_per_group: 80,
+            max_observations_per_group: 120,
+            confidence: 0.9,
+            time_granularity: TimeGranularity::Daily,
+        };
+
+        let plan = SmartFeatureEngine::infer_with_panel(&profile, None, Some(&panel_info));
+
+        // Should have time-series features
+        assert!(plan.has_timeseries_features());
+
+        // Should also have regular features
+        assert!(!plan.polynomial_features.is_empty());
+
+        // Check that time-series features count is in the total
+        let ts_count = plan
+            .timeseries_features
+            .as_ref()
+            .map(|ts| ts.estimated_features)
+            .unwrap_or(0);
+        assert!(ts_count > 0);
+        assert!(plan.estimated_feature_count() > ts_count);
+    }
+
+    #[test]
+    fn test_timeseries_feature_plan_empty_without_numerics() {
+        use crate::analysis::{PanelDataInfo, TimeGranularity};
+
+        // Profile with only categorical (no numerics)
+        let df = DataFrame::new(vec![
+            Series::new("cat1".into(), vec!["a", "b", "c", "d", "e"]).into(),
+            Series::new("target".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
+        ])
+        .unwrap();
+
+        let profile = DataFrameProfile::analyze(&df, "target").unwrap();
+
+        let panel_info = PanelDataInfo {
+            group_column: "group".to_string(),
+            date_column: "date".to_string(),
+            num_groups: 5,
+            avg_observations_per_group: 100.0,
+            min_observations_per_group: 80,
+            max_observations_per_group: 120,
+            confidence: 0.9,
+            time_granularity: TimeGranularity::Daily,
+        };
+
+        let ts_plan = SmartFeatureEngine::plan_timeseries_features(
+            &profile,
+            &panel_info,
+            &SmartFeatureConfig::default(),
+        );
+
+        // Should be empty (no numeric columns)
+        assert!(ts_plan.is_empty());
     }
 }

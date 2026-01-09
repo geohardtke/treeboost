@@ -41,7 +41,7 @@ pub use ratio::RatioGenerator;
 pub use selector::{FeatureSelector, SelectionConfig};
 pub use smart::{
     FeaturePlan, LttFeaturePlan, SmartFeatureConfig, SmartFeatureEngine, SmartFeaturePreset,
-    TimeFeatureType,
+    TimeFeatureType, TimeSeriesFeaturePlan,
 };
 
 /// Trait for feature generation strategies
