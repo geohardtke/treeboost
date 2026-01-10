@@ -3,8 +3,9 @@
 //! Provides a unified `Preprocessor` enum that wraps all preprocessing transformations.
 //! This enables:
 //! - **Serialization**: Easy to serialize/deserialize with serde/rkyv
-//! - **Static dispatch**: No trait object overhead
+//! - **Static dispatch**: No trait object overhead for built-in types
 //! - **Pipeline composition**: Chain multiple preprocessors
+//! - **Extensibility**: Custom preprocessors via the `Custom` variant
 //!
 //! # Example
 //!
@@ -20,12 +21,37 @@
 //! // Serialize the entire pipeline
 //! let json = serde_json::to_string(&pipeline).unwrap();
 //! ```
+//!
+//! # Custom Preprocessors
+//!
+//! You can create custom preprocessors by implementing [`PreprocessorTrait`](super::traits::PreprocessorTrait)
+//! and registering them with [`register_preprocessor`](super::registry::register_preprocessor):
+//!
+//! ```ignore
+//! use treeboost::preprocessing::{Preprocessor, PreprocessorTrait, register_preprocessor};
+//!
+//! #[derive(Clone, Default)]
+//! struct MyScaler { /* ... */ }
+//!
+//! impl PreprocessorTrait for MyScaler {
+//!     fn type_id(&self) -> &'static str { "my_crate::MyScaler" }
+//!     // ... implement other methods
+//! }
+//!
+//! // Register at startup
+//! register_preprocessor::<MyScaler>();
+//!
+//! // Use in pipeline
+//! let custom = Preprocessor::custom(MyScaler::default())?;
+//! ```
 
 use crate::{Result, TreeBoostError};
 
 use super::encoding::{FrequencyEncoder, LabelEncoder, OneHotEncoder};
 use super::imputer::SimpleImputer;
+use super::registry;
 use super::scaler::{MinMaxScaler, RobustScaler, Scaler, StandardScaler};
+use super::traits::{CustomPreprocessorDyn, PreprocessorTrait, PreprocessorWrapper};
 use super::transforms::YeoJohnsonTransform;
 
 // =============================================================================
@@ -35,16 +61,19 @@ use super::transforms::YeoJohnsonTransform;
 /// Unified preprocessor enum for pipeline composition and serialization
 ///
 /// This enum wraps all preprocessing transformations, enabling:
-/// - Static dispatch (better performance than trait objects)
-/// - Easy serialization (no `dyn` complications)
+/// - Static dispatch (better performance than trait objects) for built-in types
+/// - Easy serialization (no `dyn` complications for built-ins)
 /// - Pipeline composition (via `Preprocessor::Pipeline`)
+/// - Custom preprocessors (via `Preprocessor::Custom`)
 ///
 /// # Design Rationale
 ///
 /// In Rust, `Box<dyn Trait>` is problematic for serialization (especially with rkyv).
-/// The enum dispatch pattern provides the same polymorphism with trivial serialization.
+/// The enum dispatch pattern provides the same polymorphism with trivial serialization
+/// for built-in types. Custom preprocessors use a registry-based approach for
+/// serialization.
 ///
-/// # Example
+/// # Example: Built-in Preprocessor
 ///
 /// ```rust
 /// use treeboost::preprocessing::{Preprocessor, StandardScaler};
@@ -56,9 +85,30 @@ use super::transforms::YeoJohnsonTransform;
 /// scaler.fit_numerical(&data, 3).unwrap();
 /// scaler.transform_numerical(&mut data, 3).unwrap();
 /// ```
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+///
+/// # Example: Custom Preprocessor
+///
+/// ```ignore
+/// use treeboost::preprocessing::{Preprocessor, PreprocessorTrait, register_preprocessor};
+///
+/// // Define custom type
+/// #[derive(Clone, Default)]
+/// struct MyScaler { fitted: bool }
+///
+/// impl PreprocessorTrait for MyScaler {
+///     fn type_id(&self) -> &'static str { "my_crate::MyScaler" }
+///     // ... implement methods
+/// }
+///
+/// // Register and use
+/// register_preprocessor::<MyScaler>();
+/// let custom = Preprocessor::custom(MyScaler::default())?;
+/// ```
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum Preprocessor {
+    // -------------------------------------------------------------------------
     // Scalers (numerical)
+    // -------------------------------------------------------------------------
     /// StandardScaler: (x - μ) / σ
     Standard(StandardScaler),
     /// MinMaxScaler: scale to [min, max] range
@@ -66,7 +116,9 @@ pub enum Preprocessor {
     /// RobustScaler: (x - median) / IQR
     Robust(RobustScaler),
 
+    // -------------------------------------------------------------------------
     // Encoders (categorical)
+    // -------------------------------------------------------------------------
     /// FrequencyEncoder: category → count (optimal for trees)
     Frequency(FrequencyEncoder),
     /// LabelEncoder: category → integer label
@@ -74,29 +126,183 @@ pub enum Preprocessor {
     /// OneHotEncoder: category → binary columns (for linear models)
     OneHot(OneHotEncoder),
 
+    // -------------------------------------------------------------------------
     // Imputers (missing values)
+    // -------------------------------------------------------------------------
     /// SimpleImputer: Mean/Median/Mode/Constant strategies
     Imputer(SimpleImputer),
 
+    // -------------------------------------------------------------------------
     // Power transforms
+    // -------------------------------------------------------------------------
     /// YeoJohnsonTransform: Normalize skewed distributions
     YeoJohnson(YeoJohnsonTransform),
 
+    // -------------------------------------------------------------------------
     // Composition
+    // -------------------------------------------------------------------------
     /// Pipeline: chain multiple preprocessors sequentially
     Pipeline(Box<Vec<Preprocessor>>),
+
+    // -------------------------------------------------------------------------
+    // Custom (user-defined)
+    // -------------------------------------------------------------------------
+    /// Custom preprocessor from user code
+    ///
+    /// This variant stores:
+    /// - `type_id`: Unique identifier for registry lookup (e.g., "my_crate::MyScaler")
+    /// - `serialized_state`: The preprocessor's state as bytes (produced by `serialize_state()`)
+    /// - `instance`: Cached runtime instance (not serialized, reconstructed on load)
+    ///
+    /// To create a custom preprocessor:
+    /// 1. Implement [`PreprocessorTrait`](super::traits::PreprocessorTrait)
+    /// 2. Call [`register_preprocessor`](super::registry::register_preprocessor) at startup
+    /// 3. Use [`Preprocessor::custom()`] to create the Custom variant
+    Custom {
+        /// Type identifier for registry lookup
+        type_id: String,
+        /// Serialized state (produced by `PreprocessorTrait::serialize_state()`)
+        serialized_state: Vec<u8>,
+        /// Cached runtime instance (reconstructed from registry on deserialize)
+        #[serde(skip)]
+        instance: Option<Box<dyn CustomPreprocessorDyn>>,
+    },
+}
+
+impl std::fmt::Debug for Preprocessor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Standard(s) => f.debug_tuple("Standard").field(s).finish(),
+            Self::MinMax(s) => f.debug_tuple("MinMax").field(s).finish(),
+            Self::Robust(s) => f.debug_tuple("Robust").field(s).finish(),
+            Self::Frequency(e) => f.debug_tuple("Frequency").field(e).finish(),
+            Self::Label(e) => f.debug_tuple("Label").field(e).finish(),
+            Self::OneHot(e) => f.debug_tuple("OneHot").field(e).finish(),
+            Self::Imputer(i) => f.debug_tuple("Imputer").field(i).finish(),
+            Self::YeoJohnson(t) => f.debug_tuple("YeoJohnson").field(t).finish(),
+            Self::Pipeline(steps) => f.debug_tuple("Pipeline").field(steps).finish(),
+            Self::Custom { type_id, .. } => f
+                .debug_struct("Custom")
+                .field("type_id", type_id)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 impl Preprocessor {
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // Constructors
+    // =========================================================================
+
+    /// Create a Custom variant from any [`PreprocessorTrait`] implementor.
+    ///
+    /// This serializes the preprocessor's state and stores it in the Custom variant.
+    /// The type must be registered with [`register_preprocessor`](super::registry::register_preprocessor)
+    /// before models containing it can be loaded.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use treeboost::preprocessing::{Preprocessor, PreprocessorTrait, register_preprocessor};
+    ///
+    /// #[derive(Clone, Default)]
+    /// struct MyScaler { fitted: bool }
+    ///
+    /// impl PreprocessorTrait for MyScaler {
+    ///     fn type_id(&self) -> &'static str { "my_crate::MyScaler" }
+    ///     // ... other methods
+    /// }
+    ///
+    /// // Register the type
+    /// register_preprocessor::<MyScaler>();
+    ///
+    /// // Create a custom preprocessor
+    /// let mut scaler = MyScaler::default();
+    /// scaler.fit_numerical(&data, num_features)?;
+    ///
+    /// // Wrap in Preprocessor::Custom
+    /// let custom = Preprocessor::custom(scaler)?;
+    /// ```
+    pub fn custom<T: PreprocessorTrait>(preprocessor: T) -> Result<Self> {
+        let type_id = preprocessor.type_id().to_string();
+        let serialized_state = preprocessor.serialize_state()?;
+
+        Ok(Preprocessor::Custom {
+            type_id,
+            serialized_state,
+            instance: Some(Box::new(PreprocessorWrapper(preprocessor))),
+        })
+    }
+
+    /// Ensure Custom variant has its runtime instance populated.
+    ///
+    /// After deserializing a `Preprocessor` (via serde or rkyv), the Custom variant's
+    /// `instance` field will be `None`. Call this method to reconstruct the instance
+    /// from the registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The type_id is not registered (call `register_preprocessor` first)
+    /// - The serialized state cannot be deserialized
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Register types before loading
+    /// register_preprocessor::<MyScaler>();
+    ///
+    /// // Load and initialize
+    /// let mut preprocessor: Preprocessor = serde_json::from_str(&json)?;
+    /// preprocessor.ensure_initialized()?;
+    /// ```
+    pub fn ensure_initialized(&mut self) -> Result<()> {
+        if let Preprocessor::Custom {
+            type_id,
+            serialized_state,
+            instance,
+        } = self
+        {
+            if instance.is_none() {
+                *instance = Some(registry::construct_preprocessor(type_id, serialized_state)?);
+            }
+        }
+
+        // Recursively initialize pipeline steps
+        if let Preprocessor::Pipeline(steps) = self {
+            for step in steps.iter_mut() {
+                step.ensure_initialized()?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Update the serialized state after fitting/transforming a Custom preprocessor.
+    ///
+    /// This is called internally after operations that modify the Custom's state.
+    fn sync_custom_state(&mut self) -> Result<()> {
+        if let Preprocessor::Custom {
+            serialized_state,
+            instance: Some(inst),
+            ..
+        } = self
+        {
+            *serialized_state = inst.serialize_state()?;
+        }
+        Ok(())
+    }
+
+    // =========================================================================
     // Numerical Operations (for scalers)
-    // -------------------------------------------------------------------------
+    // =========================================================================
 
     /// Fit on numerical data (for scalers)
     ///
     /// This operation is valid for:
     /// - StandardScaler, MinMaxScaler, RobustScaler
     /// - Pipeline (fits all numerical preprocessors in sequence)
+    /// - Custom preprocessors that support numerical operations
     ///
     /// Returns error for categorical encoders (use `fit_categorical` instead).
     pub fn fit_numerical(&mut self, data: &[f32], num_features: usize) -> Result<()> {
@@ -115,6 +321,16 @@ impl Preprocessor {
                     step.transform_numerical(&mut current_data, num_features)?;
                 }
                 Ok(())
+            }
+            Preprocessor::Custom { instance, .. } => {
+                let inst = instance.as_mut().ok_or_else(|| {
+                    TreeBoostError::Config(
+                        "Custom preprocessor not initialized. Call ensure_initialized() first."
+                            .into(),
+                    )
+                })?;
+                inst.fit_numerical(data, num_features)?;
+                self.sync_custom_state()
             }
             _ => Err(TreeBoostError::Config(
                 "fit_numerical not supported for categorical encoders".into(),
@@ -136,6 +352,15 @@ impl Preprocessor {
                 }
                 Ok(())
             }
+            Preprocessor::Custom { instance, .. } => {
+                let inst = instance.as_ref().ok_or_else(|| {
+                    TreeBoostError::Config(
+                        "Custom preprocessor not initialized. Call ensure_initialized() first."
+                            .into(),
+                    )
+                })?;
+                inst.transform_numerical(data, num_features)
+            }
             _ => Err(TreeBoostError::Config(
                 "transform_numerical not supported for categorical encoders".into(),
             )),
@@ -143,20 +368,25 @@ impl Preprocessor {
     }
 
     /// Fit and transform numerical data (convenience)
-    pub fn fit_transform_numerical(&mut self, data: &mut [f32], num_features: usize) -> Result<()> {
+    pub fn fit_transform_numerical(
+        &mut self,
+        data: &mut [f32],
+        num_features: usize,
+    ) -> Result<()> {
         self.fit_numerical(data, num_features)?;
         self.transform_numerical(data, num_features)?;
         Ok(())
     }
 
-    // -------------------------------------------------------------------------
+    // =========================================================================
     // Categorical Operations (for encoders)
-    // -------------------------------------------------------------------------
+    // =========================================================================
 
     /// Fit on categorical data (for encoders)
     ///
     /// This operation is valid for:
     /// - FrequencyEncoder, LabelEncoder, OneHotEncoder
+    /// - Custom preprocessors that support categorical operations
     ///
     /// Returns error for scalers (use `fit_numerical` instead).
     pub fn fit_categorical(&mut self, categories: &[impl AsRef<str>]) -> Result<()> {
@@ -172,6 +402,18 @@ impl Preprocessor {
             Preprocessor::OneHot(e) => {
                 e.fit(categories)?;
                 Ok(())
+            }
+            Preprocessor::Custom { instance, .. } => {
+                let inst = instance.as_mut().ok_or_else(|| {
+                    TreeBoostError::Config(
+                        "Custom preprocessor not initialized. Call ensure_initialized() first."
+                            .into(),
+                    )
+                })?;
+                // Convert to &[&str] for the trait method
+                let cats: Vec<&str> = categories.iter().map(|s| s.as_ref()).collect();
+                inst.fit_categorical(&cats)?;
+                self.sync_custom_state()
             }
             _ => Err(TreeBoostError::Config(
                 "fit_categorical not supported for numerical scalers".into(),
@@ -189,6 +431,17 @@ impl Preprocessor {
             Preprocessor::Frequency(e) => e.transform(categories),
             Preprocessor::Label(e) => e.transform_f32(categories),
             Preprocessor::OneHot(e) => e.transform(categories),
+            Preprocessor::Custom { instance, .. } => {
+                let inst = instance.as_ref().ok_or_else(|| {
+                    TreeBoostError::Config(
+                        "Custom preprocessor not initialized. Call ensure_initialized() first."
+                            .into(),
+                    )
+                })?;
+                // Convert to &[&str] for the trait method
+                let cats: Vec<&str> = categories.iter().map(|s| s.as_ref()).collect();
+                inst.transform_categorical(&cats)
+            }
             _ => Err(TreeBoostError::Config(
                 "transform_categorical not supported for numerical scalers".into(),
             )),
@@ -204,9 +457,9 @@ impl Preprocessor {
         self.transform_categorical(categories)
     }
 
-    // -------------------------------------------------------------------------
+    // =========================================================================
     // Utility Methods
-    // -------------------------------------------------------------------------
+    // =========================================================================
 
     /// Check if the preprocessor has been fitted
     pub fn is_fitted(&self) -> bool {
@@ -220,27 +473,36 @@ impl Preprocessor {
             Preprocessor::Imputer(i) => i.is_fitted(),
             Preprocessor::YeoJohnson(t) => t.is_fitted(),
             Preprocessor::Pipeline(steps) => steps.iter().all(|s| s.is_fitted()),
+            Preprocessor::Custom { instance, .. } => {
+                instance.as_ref().map(|i| i.is_fitted()).unwrap_or(false)
+            }
         }
     }
 
     /// Check if this is a numerical preprocessor (scaler, imputer, or transform)
     pub fn is_numerical(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Preprocessor::Standard(_)
-                | Preprocessor::MinMax(_)
-                | Preprocessor::Robust(_)
-                | Preprocessor::Imputer(_)
-                | Preprocessor::YeoJohnson(_)
-        )
+            | Preprocessor::MinMax(_)
+            | Preprocessor::Robust(_)
+            | Preprocessor::Imputer(_)
+            | Preprocessor::YeoJohnson(_) => true,
+            Preprocessor::Custom { instance, .. } => {
+                instance.as_ref().map(|i| i.supports_numerical()).unwrap_or(false)
+            }
+            _ => false,
+        }
     }
 
     /// Check if this is a categorical preprocessor (encoder)
     pub fn is_categorical(&self) -> bool {
-        matches!(
-            self,
-            Preprocessor::Frequency(_) | Preprocessor::Label(_) | Preprocessor::OneHot(_)
-        )
+        match self {
+            Preprocessor::Frequency(_) | Preprocessor::Label(_) | Preprocessor::OneHot(_) => true,
+            Preprocessor::Custom { instance, .. } => {
+                instance.as_ref().map(|i| i.supports_categorical()).unwrap_or(false)
+            }
+            _ => false,
+        }
     }
 
     /// Check if this is an imputer
@@ -256,6 +518,11 @@ impl Preprocessor {
     /// Check if this is a pipeline
     pub fn is_pipeline(&self) -> bool {
         matches!(self, Preprocessor::Pipeline(_))
+    }
+
+    /// Check if this is a custom preprocessor
+    pub fn is_custom(&self) -> bool {
+        matches!(self, Preprocessor::Custom { .. })
     }
 
     /// Get the number of output columns for categorical encoders
@@ -353,6 +620,35 @@ impl PipelineBuilder {
     pub fn with_preprocessor(mut self, preprocessor: Preprocessor) -> Self {
         self.steps.push(preprocessor);
         self
+    }
+
+    /// Add a custom preprocessor to the pipeline
+    ///
+    /// This wraps the preprocessor in a `Preprocessor::Custom` variant.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use treeboost::preprocessing::{PipelineBuilder, PreprocessorTrait, register_preprocessor};
+    ///
+    /// #[derive(Clone, Default)]
+    /// struct MyScaler { /* ... */ }
+    ///
+    /// impl PreprocessorTrait for MyScaler {
+    ///     fn type_id(&self) -> &'static str { "my_crate::MyScaler" }
+    ///     // ... other methods
+    /// }
+    ///
+    /// register_preprocessor::<MyScaler>();
+    ///
+    /// let pipeline = PipelineBuilder::new()
+    ///     .with_custom(MyScaler::default())?
+    ///     .with_standard_scaler()
+    ///     .build();
+    /// ```
+    pub fn with_custom<T: PreprocessorTrait>(mut self, preprocessor: T) -> Result<Self> {
+        self.steps.push(Preprocessor::custom(preprocessor)?);
+        Ok(self)
     }
 
     /// Build the pipeline
@@ -521,5 +817,183 @@ mod tests {
 
         let result = preprocessor.fit_categorical(&categories);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_is_custom() {
+        let standard = Preprocessor::Standard(StandardScaler::new());
+        assert!(!standard.is_custom());
+
+        // Note: Testing Custom variant requires a registered type
+        // See registry.rs tests for Custom variant tests
+    }
+
+    #[test]
+    fn test_debug_impl() {
+        let preprocessor = Preprocessor::Standard(StandardScaler::new());
+        let debug_str = format!("{:?}", preprocessor);
+        assert!(debug_str.contains("Standard"));
+    }
+
+    // =========================================================================
+    // Custom Preprocessor Integration Tests
+    // =========================================================================
+
+    /// Test preprocessor for integration tests
+    #[derive(Clone, Default)]
+    struct TestCustomScaler {
+        mean: f32,
+        fitted: bool,
+    }
+
+    impl super::super::traits::PreprocessorTrait for TestCustomScaler {
+        fn type_id(&self) -> &'static str {
+            "test::TestCustomScaler"
+        }
+
+        fn supports_numerical(&self) -> bool {
+            true
+        }
+
+        fn fit_numerical(&mut self, data: &[f32], _num_features: usize) -> crate::Result<()> {
+            if data.is_empty() {
+                return Err(crate::TreeBoostError::Config("Empty data".into()));
+            }
+            self.mean = data.iter().sum::<f32>() / data.len() as f32;
+            self.fitted = true;
+            Ok(())
+        }
+
+        fn transform_numerical(&self, data: &mut [f32], _num_features: usize) -> crate::Result<()> {
+            if !self.fitted {
+                return Err(crate::TreeBoostError::Config("Not fitted".into()));
+            }
+            for x in data.iter_mut() {
+                *x -= self.mean;
+            }
+            Ok(())
+        }
+
+        fn is_fitted(&self) -> bool {
+            self.fitted
+        }
+
+        fn serialize_state(&self) -> crate::Result<Vec<u8>> {
+            Ok(format!("{}|{}", self.mean, self.fitted).into_bytes())
+        }
+
+        fn deserialize_state(&mut self, data: &[u8]) -> crate::Result<()> {
+            let s = std::str::from_utf8(data)
+                .map_err(|e| crate::TreeBoostError::Serialization(e.to_string()))?;
+            let parts: Vec<&str> = s.split('|').collect();
+            if parts.len() != 2 {
+                return Err(crate::TreeBoostError::Serialization("Invalid format".into()));
+            }
+            self.mean = parts[0]
+                .parse()
+                .map_err(|e: std::num::ParseFloatError| {
+                    crate::TreeBoostError::Serialization(e.to_string())
+                })?;
+            self.fitted = parts[1] == "true";
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_custom_preprocessor_create_and_use() {
+        // Register the test type
+        super::super::registry::register_preprocessor::<TestCustomScaler>();
+
+        // Create a custom preprocessor
+        let mut scaler = TestCustomScaler::default();
+        scaler.fit_numerical(&[1.0, 2.0, 3.0, 4.0], 2).unwrap();
+        assert!(scaler.is_fitted());
+
+        // Wrap in Preprocessor::Custom
+        let custom = Preprocessor::custom(scaler).unwrap();
+        assert!(custom.is_custom());
+        assert!(custom.is_fitted());
+        assert!(custom.is_numerical());
+
+        // Use for transformation
+        let mut data = vec![5.0, 6.0];
+        custom.transform_numerical(&mut data, 2).unwrap();
+        // mean was 2.5, so 5.0 - 2.5 = 2.5, 6.0 - 2.5 = 3.5
+        assert!((data[0] - 2.5).abs() < 0.001);
+        assert!((data[1] - 3.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_custom_preprocessor_serde_roundtrip() {
+        // Register the test type
+        super::super::registry::register_preprocessor::<TestCustomScaler>();
+
+        // Create and fit a custom preprocessor
+        let mut scaler = TestCustomScaler::default();
+        scaler.fit_numerical(&[10.0, 20.0, 30.0, 40.0], 2).unwrap();
+        let custom = Preprocessor::custom(scaler).unwrap();
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&custom).unwrap();
+        assert!(json.contains("test::TestCustomScaler"));
+
+        // Deserialize
+        let mut loaded: Preprocessor = serde_json::from_str(&json).unwrap();
+
+        // Instance is None after deserialize (due to #[serde(skip)])
+        // Must call ensure_initialized() to reconstruct
+        loaded.ensure_initialized().unwrap();
+
+        // Now it should work
+        assert!(loaded.is_fitted());
+        assert!(loaded.is_custom());
+
+        let mut data = vec![25.0, 35.0];
+        loaded.transform_numerical(&mut data, 2).unwrap();
+        // mean was 25.0, so 25.0 - 25.0 = 0.0, 35.0 - 25.0 = 10.0
+        assert!((data[0] - 0.0).abs() < 0.001);
+        assert!((data[1] - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_custom_preprocessor_in_pipeline() {
+        // Register the test type
+        super::super::registry::register_preprocessor::<TestCustomScaler>();
+
+        // Create a pipeline with custom and built-in preprocessors
+        let pipeline = PipelineBuilder::new()
+            .with_custom(TestCustomScaler::default())
+            .unwrap()
+            .with_standard_scaler()
+            .build();
+
+        assert!(pipeline.is_pipeline());
+
+        // Fit and transform
+        let mut data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut pipeline = pipeline; // need mut for fit
+        pipeline.fit_numerical(&data, 3).unwrap();
+        assert!(pipeline.is_fitted());
+
+        pipeline.transform_numerical(&mut data, 3).unwrap();
+    }
+
+    #[test]
+    fn test_custom_preprocessor_uninitialized_error() {
+        // Create a Custom variant directly without instance
+        let custom = Preprocessor::Custom {
+            type_id: "test::TestCustomScaler".to_string(),
+            serialized_state: vec![],
+            instance: None,
+        };
+
+        // Trying to use it without initialization should fail
+        let mut data = vec![1.0, 2.0];
+        let result = custom.transform_numerical(&mut data, 2);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not initialized"));
     }
 }

@@ -69,8 +69,10 @@ pub mod incremental;
 pub mod outliers;
 pub mod pipeline;
 pub mod polars_ext;
+pub mod registry;
 pub mod scaler;
 pub mod smart;
+pub mod traits;
 pub mod transforms;
 
 pub use dataframe::{
@@ -84,6 +86,8 @@ pub use imputer::{ImputeStrategy, IndicatorImputer, SimpleImputer};
 pub use crate::encoding::{EncodingMap, OrderedTargetEncoder};
 pub use outliers::{FeatureBounds, OutlierAction, OutlierDetector, OutlierMethod, TransformResult};
 pub use pipeline::{PipelineBuilder, Preprocessor};
+pub use registry::{is_registered, register_preprocessor, registered_types};
+pub use traits::{CustomPreprocessorDyn, PreprocessorTrait};
 pub use polars_ext::{
     column_to_f32, column_to_strings, df_column_names, df_to_features, df_to_target,
     features_to_df, is_categorical, is_numeric, series_to_f32, series_to_strings, split_by_dtype,
