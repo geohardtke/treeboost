@@ -41,7 +41,7 @@ fn create_synthetic_dataset(n_samples: usize, n_features: usize, seed: u64) -> B
     BinnedDataset::new(n_samples, features, targets, feature_info)
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "=".repeat(60));
     println!("TreeBoost: Basic Regression Example");
     println!("{}", "=".repeat(60));
@@ -161,4 +161,5 @@ fn main() {
     println!("{}", "=".repeat(60));
     println!("Example completed successfully!");
     println!("{}", "=".repeat(60));
+    Ok(())
 }

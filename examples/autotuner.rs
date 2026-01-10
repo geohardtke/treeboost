@@ -23,7 +23,7 @@ use treeboost::booster::{GBDTConfig, GBDTModel};
 use treeboost::dataset::BinnedDataset;
 use treeboost::tuner::{
     AutoTuner, EvalStrategy, GridStrategy, ModelFormat, ParamBounds, ParameterSpace, SpacePreset,
-    TunerConfig,
+    TunableParam, TunerConfig,
 };
 
 /// Generate a synthetic regression dataset for demonstration
@@ -54,7 +54,7 @@ fn create_synthetic_dataset(n: usize, num_features: usize, seed: u64) -> BinnedD
     BinnedDataset::new(n, features, targets, feature_info)
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=============================================================");
     println!("TreeBoost AutoTuner Example");
     println!("=============================================================\n");
@@ -133,14 +133,14 @@ fn main() {
 
     // Define custom parameter space
     let custom_space = ParameterSpace::new()
-        .with_param("max_depth", ParamBounds::discrete(3, 10), 6.0)
+        .with_param(TunableParam::MaxDepth, ParamBounds::discrete(3, 10), 6.0)
         .with_param(
-            "learning_rate",
+            TunableParam::LearningRate,
             ParamBounds::log_continuous(0.005, 0.5),
             0.05,
         )
-        .with_param("subsample", ParamBounds::continuous(0.6, 1.0), 0.8)
-        .with_param("lambda", ParamBounds::continuous(0.0, 5.0), 1.0);
+        .with_param(TunableParam::Subsample, ParamBounds::continuous(0.6, 1.0), 0.8)
+        .with_param(TunableParam::Lambda, ParamBounds::continuous(0.0, 5.0), 1.0);
 
     let tuner_config = TunerConfig::new()
         .with_iterations(2)
@@ -406,4 +406,5 @@ fn main() {
     println!("  - Early stopping to prevent overfitting");
     println!("  - with_save_rkyv() for fastest model loading");
     println!("  - with_save_all_formats() for flexibility");
+    Ok(())
 }

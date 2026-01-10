@@ -71,7 +71,7 @@ fn mse(predictions: &[f32], targets: &[f32]) -> f32 {
         / predictions.len() as f32
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "=".repeat(70));
     println!("TreeBoost: UniversalModel Example - Three Boosting Modes");
     println!("{}", "=".repeat(70));
@@ -181,7 +181,7 @@ fn main() {
     let config = UniversalConfig::new()
         .with_mode(BoostingMode::RandomForest)
         .with_num_rounds(100) // Number of trees
-        .with_subsample(0.7)? // Bootstrap sample ratio
+        .with_subsample(0.7) // Bootstrap sample ratio
         .with_seed(42);
 
     let start = std::time::Instant::now();
@@ -212,4 +212,5 @@ fn main() {
     println!("| RandomForest   | Robustness, variance reduction, noisy data    |");
     println!();
     println!("Example completed successfully!");
+    Ok(())
 }

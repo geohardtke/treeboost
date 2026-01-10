@@ -57,7 +57,7 @@ fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "=".repeat(60));
     println!("TreeBoost: Binary Classification Example");
     println!("{}", "=".repeat(60));
@@ -214,4 +214,5 @@ fn main() {
     println!("{}", "=".repeat(60));
     println!("Example completed successfully!");
     println!("{}", "=".repeat(60));
+    Ok(())
 }

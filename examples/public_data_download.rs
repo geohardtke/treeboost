@@ -104,7 +104,7 @@ fn generate_synthetic_housing_data(n_samples: usize, seed: u64) -> BinnedDataset
     BinnedDataset::new(n_samples, features, targets, feature_info)
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "=".repeat(70));
     println!("TreeBoost: Public Dataset Example");
     println!("{}", "=".repeat(70));
@@ -275,4 +275,5 @@ fn main() {
     println!("2. Save as: datasets/california_housing.csv");
     println!("3. Use DatasetLoader::load_csv() to load the data");
     println!("{}", "=".repeat(70));
+    Ok(())
 }
