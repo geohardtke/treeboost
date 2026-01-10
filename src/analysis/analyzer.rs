@@ -18,7 +18,7 @@ use super::stats::{
 // =============================================================================
 
 /// Configuration for dataset analysis
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AnalysisConfig {
     /// Maximum rows to sample for analysis (for speed)
     pub max_sample_rows: usize,

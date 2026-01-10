@@ -86,7 +86,7 @@ pub enum BoostingMode {
 ///     .with_mode_selection(ModeSelection::Fixed(BoostingMode::LinearThenTree))
 ///     .with_num_rounds(100);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ModeSelection {
     /// Automatically analyze the dataset and pick the best mode
     ///
@@ -121,5 +121,20 @@ impl Default for ModeSelection {
         // Default is Fixed(PureTree) for backwards compatibility
         // Users who want auto should explicitly opt in
         ModeSelection::Fixed(BoostingMode::PureTree)
+    }
+}
+
+impl ModeSelection {
+    /// Check if this is automatic mode selection
+    pub fn is_auto(&self) -> bool {
+        matches!(self, Self::Auto | Self::AutoWithConfig(_))
+    }
+
+    /// Get the fixed mode, if any
+    pub fn fixed_mode(&self) -> Option<BoostingMode> {
+        match self {
+            Self::Fixed(mode) => Some(*mode),
+            _ => None,
+        }
     }
 }

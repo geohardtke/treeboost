@@ -51,6 +51,7 @@ use crate::features::{FeaturePlan, SmartFeatureEngine};
 use crate::model::config::{
     AutoConfig, AutoEnsembleConfig, AutoEnsembleMethod, BuildPhaseTimes, BuildResult, TuningLevel,
 };
+use crate::model::universal::ModeSelection;
 use crate::model::progress::{ProgressCallback, ProgressUpdate, TrainingPhase};
 use crate::model::{BoostingMode, UniversalConfig, UniversalModel};
 use crate::preprocessing::{ModelType, PreprocessingPlan, SmartPreprocessor};
@@ -181,8 +182,7 @@ impl AutoBuilder {
 
     /// Force a specific mode
     pub fn with_mode(mut self, mode: BoostingMode) -> Self {
-        self.config.force_mode = Some(mode);
-        self.config.auto_mode = false;
+        self.config.mode_selection = ModeSelection::Fixed(mode);
         self
     }
 
@@ -738,8 +738,8 @@ impl AutoBuilder {
 
     /// Profile a DataFrame to understand column types
     fn profile_dataframe(&self, df: &DataFrame, target_col: &str) -> Result<DataFrameProfile> {
-        // Skip correlations when mode is forced and auto features disabled
-        let skip_correlations = self.config.force_mode.is_some() && !self.config.auto_features;
+        // Skip correlations when mode is fixed and auto features disabled
+        let skip_correlations = !self.config.mode_selection.is_auto() && !self.config.auto_features;
         DataFrameProfile::analyze_with_options(df, target_col, skip_correlations)
     }
 
@@ -826,15 +826,12 @@ impl AutoBuilder {
             return Ok((custom.mode, None, Confidence::High));
         }
 
-        // If mode is forced, use it
-        if let Some(mode) = self.config.force_mode {
+        // If mode is fixed, use it
+        if let Some(mode) = self.config.mode_selection.fixed_mode() {
             return Ok((mode, None, Confidence::High));
         }
 
-        // If auto mode is disabled, use PureTree
-        if !self.config.auto_mode {
-            return Ok((BoostingMode::PureTree, None, Confidence::Medium));
-        }
+        // Auto mode is enabled - run analysis
 
         // Run analysis
         let analysis = DatasetAnalysis::analyze(dataset)?;
@@ -951,7 +948,7 @@ mod tests {
         assert!((config.val_ratio - 0.2).abs() < 0.01);
         assert!(config.auto_features);
         assert!(config.auto_preprocessing);
-        assert!(config.auto_mode);
+        assert_eq!(config.mode_selection, ModeSelection::Auto);
     }
 
     #[test]
@@ -965,8 +962,10 @@ mod tests {
         assert_eq!(config.tuning_level, TuningLevel::Thorough);
         assert!((config.val_ratio - 0.3).abs() < 0.01);
         assert!(!config.auto_features);
-        assert_eq!(config.force_mode, Some(BoostingMode::LinearThenTree));
-        assert!(!config.auto_mode);
+        assert_eq!(
+            config.mode_selection,
+            ModeSelection::Fixed(BoostingMode::LinearThenTree)
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ use crate::defaults::{auto as auto_defaults, seeds as seeds_defaults};
 use crate::ensemble::{MultiSeedConfig, SelectionConfig, StackingConfig};
 use crate::features::FeaturePlan;
 use crate::model::progress::{ProgressCallback, QuietProgress};
+use crate::model::universal::ModeSelection;
 use crate::model::{BoostingMode, UniversalModel};
 use crate::preprocessing::PreprocessingPlan;
 use crate::tuner::ltt::LttTuningResult;
@@ -246,11 +247,8 @@ pub struct AutoConfig {
     /// Whether to enable automatic preprocessing
     pub auto_preprocessing: bool,
 
-    /// Whether to enable automatic mode selection
-    pub auto_mode: bool,
-
-    /// Force a specific mode (overrides auto_mode if set)
-    pub force_mode: Option<BoostingMode>,
+    /// Mode selection strategy (Auto or Fixed)
+    pub mode_selection: ModeSelection,
 
     /// Maximum number of features to generate
     pub max_generated_features: usize,
@@ -291,8 +289,7 @@ impl Clone for AutoConfig {
             val_ratio: self.val_ratio,
             auto_features: self.auto_features,
             auto_preprocessing: self.auto_preprocessing,
-            auto_mode: self.auto_mode,
-            force_mode: self.force_mode,
+            mode_selection: self.mode_selection.clone(),
             max_generated_features: self.max_generated_features,
             seed: self.seed,
             verbose: self.verbose,
@@ -314,8 +311,7 @@ impl std::fmt::Debug for AutoConfig {
             .field("val_ratio", &self.val_ratio)
             .field("auto_features", &self.auto_features)
             .field("auto_preprocessing", &self.auto_preprocessing)
-            .field("auto_mode", &self.auto_mode)
-            .field("force_mode", &self.force_mode)
+            .field("mode_selection", &self.mode_selection)
             .field("max_generated_features", &self.max_generated_features)
             .field("seed", &self.seed)
             .field("verbose", &self.verbose)
@@ -336,8 +332,7 @@ impl Default for AutoConfig {
             val_ratio: auto_defaults::DEFAULT_VALIDATION_RATIO,
             auto_features: true,
             auto_preprocessing: true,
-            auto_mode: true,
-            force_mode: None,
+            mode_selection: ModeSelection::Auto,  // AutoBuilder defaults to automatic mode selection
             max_generated_features: auto_defaults::AUTO_FEATURES_DEFAULT_COUNT,
             seed: seeds_defaults::DEFAULT_SEED,
             verbose: false,
@@ -385,16 +380,40 @@ impl AutoConfig {
         self
     }
 
-    /// Enable/disable automatic mode selection
-    pub fn with_auto_mode(mut self, enabled: bool) -> Self {
-        self.auto_mode = enabled;
+    /// Set mode selection strategy
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use treeboost::model::{AutoConfig, ModeSelection, BoostingMode};
+    ///
+    /// // Automatic mode selection (default)
+    /// let config = AutoConfig::default()
+    ///     .with_mode_selection(ModeSelection::Auto);
+    ///
+    /// // Force a specific mode
+    /// let config = AutoConfig::default()
+    ///     .with_mode_selection(ModeSelection::Fixed(BoostingMode::PureTree));
+    /// ```
+    pub fn with_mode_selection(mut self, selection: ModeSelection) -> Self {
+        self.mode_selection = selection;
         self
     }
 
-    /// Force a specific boosting mode
+    /// Force a specific boosting mode (convenience method)
+    ///
+    /// Equivalent to `with_mode_selection(ModeSelection::Fixed(mode))`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use treeboost::model::{AutoConfig, BoostingMode};
+    ///
+    /// let config = AutoConfig::default()
+    ///     .with_mode(BoostingMode::LinearThenTree);
+    /// ```
     pub fn with_mode(mut self, mode: BoostingMode) -> Self {
-        self.force_mode = Some(mode);
-        self.auto_mode = false;
+        self.mode_selection = ModeSelection::Fixed(mode);
         self
     }
 
