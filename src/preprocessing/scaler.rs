@@ -276,7 +276,8 @@ impl StandardScaler {
         // Check feature count consistency
         if self.means.len() != num_features {
             return Err(TreeBoostError::Data(format!(
-                "num_features mismatch: initialized with {}, partial_fit with {}",
+                "StandardScaler::partial_fit_ema() feature count mismatch: previously initialized with {} features, \
+                 but partial_fit_ema() called with {} features. All EMA updates must have consistent feature count.",
                 self.means.len(),
                 num_features
             )));
@@ -318,13 +319,18 @@ impl Default for StandardScaler {
 impl Scaler for StandardScaler {
     fn fit(&mut self, data: &[f32], num_features: usize) -> Result<()> {
         if num_features == 0 {
-            return Err(TreeBoostError::Data("num_features must be > 0".into()));
+            return Err(TreeBoostError::Data(
+                "StandardScaler::fit() requires num_features > 0, got 0".into(),
+            ));
         }
 
         if !data.len().is_multiple_of(num_features) {
             return Err(TreeBoostError::Data(format!(
-                "Data length {} not divisible by num_features {}",
+                "StandardScaler::fit() received invalid data layout: {} elements not divisible by {} features. \
+                 Ensure data is row-major: num_rows × num_features = {} × {}",
                 data.len(),
+                num_features,
+                data.len() / num_features.max(1),
                 num_features
             )));
         }
@@ -332,7 +338,9 @@ impl Scaler for StandardScaler {
         let num_rows = data.len() / num_features;
 
         if num_rows == 0 {
-            return Err(TreeBoostError::Data("No rows to fit".into()));
+            return Err(TreeBoostError::Data(
+                "StandardScaler::fit() received empty dataset (0 rows). Provide data with at least 1 row.".into(),
+            ));
         }
 
         self.means = vec![0.0; num_features];
@@ -368,13 +376,14 @@ impl Scaler for StandardScaler {
     fn transform(&self, data: &mut [f32], num_features: usize) -> Result<()> {
         if !self.fitted {
             return Err(TreeBoostError::Data(
-                "StandardScaler not fitted. Call fit() first.".into(),
+                "StandardScaler not fitted. Call fit() first to learn scaling parameters.".into(),
             ));
         }
 
         if num_features != self.means.len() {
             return Err(TreeBoostError::Data(format!(
-                "num_features mismatch: fit with {}, transform with {}",
+                "StandardScaler::transform() feature count mismatch: fitted with {} features, \
+                 but transform() called with {} features. Ensure transform data has same feature count as training data.",
                 self.means.len(),
                 num_features
             )));
@@ -382,8 +391,11 @@ impl Scaler for StandardScaler {
 
         if !data.len().is_multiple_of(num_features) {
             return Err(TreeBoostError::Data(format!(
-                "Data length {} not divisible by num_features {}",
+                "StandardScaler::transform() received invalid data layout: {} elements not divisible by {} features. \
+                 Ensure data is row-major: num_rows × num_features = {} × {}",
                 data.len(),
+                num_features,
+                data.len() / num_features.max(1),
                 num_features
             )));
         }
@@ -411,13 +423,18 @@ impl Scaler for StandardScaler {
 impl IncrementalScaler for StandardScaler {
     fn partial_fit(&mut self, data: &[f32], num_features: usize) -> Result<()> {
         if num_features == 0 {
-            return Err(TreeBoostError::Data("num_features must be > 0".into()));
+            return Err(TreeBoostError::Data(
+                "StandardScaler::partial_fit() requires num_features > 0, got 0".into(),
+            ));
         }
 
         if !data.len().is_multiple_of(num_features) {
             return Err(TreeBoostError::Data(format!(
-                "Data length {} not divisible by num_features {}",
+                "StandardScaler::partial_fit() received invalid data layout: {} elements not divisible by {} features. \
+                 Ensure data is row-major: num_rows × num_features = {} × {}",
                 data.len(),
+                num_features,
+                data.len() / num_features.max(1),
                 num_features
             )));
         }
@@ -439,7 +456,8 @@ impl IncrementalScaler for StandardScaler {
             self.welford_states = vec![WelfordState::new(); num_features];
         } else if self.welford_states.len() != num_features {
             return Err(TreeBoostError::Data(format!(
-                "num_features mismatch: initialized with {}, partial_fit with {}",
+                "StandardScaler::partial_fit() feature count mismatch: previously initialized with {} features, \
+                 but partial_fit() called with {} features. All partial_fit() calls must have consistent feature count.",
                 self.welford_states.len(),
                 num_features
             )));
@@ -481,7 +499,8 @@ impl IncrementalScaler for StandardScaler {
 
         if self.welford_states.len() != other.welford_states.len() {
             return Err(TreeBoostError::Data(format!(
-                "Cannot merge scalers with different num_features: {} vs {}",
+                "StandardScaler::merge() feature count mismatch: left scaler has {} features, \
+                 right scaler has {} features. Both scalers must be initialized with the same feature count.",
                 self.welford_states.len(),
                 other.welford_states.len()
             )));
@@ -570,13 +589,18 @@ impl Default for MinMaxScaler {
 impl Scaler for MinMaxScaler {
     fn fit(&mut self, data: &[f32], num_features: usize) -> Result<()> {
         if num_features == 0 {
-            return Err(TreeBoostError::Data("num_features must be > 0".into()));
+            return Err(TreeBoostError::Data(
+                "MinMaxScaler::fit() requires num_features > 0, got 0".into(),
+            ));
         }
 
         if !data.len().is_multiple_of(num_features) {
             return Err(TreeBoostError::Data(format!(
-                "Data length {} not divisible by num_features {}",
+                "MinMaxScaler::fit() received invalid data layout: {} elements not divisible by {} features. \
+                 Ensure data is row-major: num_rows × num_features = {} × {}",
                 data.len(),
+                num_features,
+                data.len() / num_features.max(1),
                 num_features
             )));
         }
@@ -584,7 +608,9 @@ impl Scaler for MinMaxScaler {
         let num_rows = data.len() / num_features;
 
         if num_rows == 0 {
-            return Err(TreeBoostError::Data("No rows to fit".into()));
+            return Err(TreeBoostError::Data(
+                "MinMaxScaler::fit() received empty dataset (0 rows). Provide data with at least 1 row.".into(),
+            ));
         }
 
         self.mins = vec![f32::INFINITY; num_features];
@@ -611,13 +637,14 @@ impl Scaler for MinMaxScaler {
     fn transform(&self, data: &mut [f32], num_features: usize) -> Result<()> {
         if !self.fitted {
             return Err(TreeBoostError::Data(
-                "MinMaxScaler not fitted. Call fit() first.".into(),
+                "MinMaxScaler not fitted. Call fit() first to learn min/max bounds.".into(),
             ));
         }
 
         if num_features != self.mins.len() {
             return Err(TreeBoostError::Data(format!(
-                "num_features mismatch: fit with {}, transform with {}",
+                "MinMaxScaler::transform() feature count mismatch: fitted with {} features, \
+                 but transform() called with {} features. Ensure transform data has same feature count as training data.",
                 self.mins.len(),
                 num_features
             )));
@@ -625,8 +652,11 @@ impl Scaler for MinMaxScaler {
 
         if !data.len().is_multiple_of(num_features) {
             return Err(TreeBoostError::Data(format!(
-                "Data length {} not divisible by num_features {}",
+                "MinMaxScaler::transform() received invalid data layout: {} elements not divisible by {} features. \
+                 Ensure data is row-major: num_rows × num_features = {} × {}",
                 data.len(),
+                num_features,
+                data.len() / num_features.max(1),
                 num_features
             )));
         }
@@ -660,13 +690,18 @@ impl Scaler for MinMaxScaler {
 impl IncrementalScaler for MinMaxScaler {
     fn partial_fit(&mut self, data: &[f32], num_features: usize) -> Result<()> {
         if num_features == 0 {
-            return Err(TreeBoostError::Data("num_features must be > 0".into()));
+            return Err(TreeBoostError::Data(
+                "MinMaxScaler::partial_fit() requires num_features > 0, got 0".into(),
+            ));
         }
 
         if !data.len().is_multiple_of(num_features) {
             return Err(TreeBoostError::Data(format!(
-                "Data length {} not divisible by num_features {}",
+                "MinMaxScaler::partial_fit() received invalid data layout: {} elements not divisible by {} features. \
+                 Ensure data is row-major: num_rows × num_features = {} × {}",
                 data.len(),
+                num_features,
+                data.len() / num_features.max(1),
                 num_features
             )));
         }
@@ -682,7 +717,8 @@ impl IncrementalScaler for MinMaxScaler {
             self.maxs = vec![f32::NEG_INFINITY; num_features];
         } else if self.mins.len() != num_features {
             return Err(TreeBoostError::Data(format!(
-                "num_features mismatch: initialized with {}, partial_fit with {}",
+                "MinMaxScaler::partial_fit() feature count mismatch: previously initialized with {} features, \
+                 but partial_fit() called with {} features. All partial_fit() calls must have consistent feature count.",
                 self.mins.len(),
                 num_features
             )));
@@ -732,7 +768,8 @@ impl IncrementalScaler for MinMaxScaler {
 
         if self.mins.len() != other.mins.len() {
             return Err(TreeBoostError::Data(format!(
-                "Cannot merge scalers with different num_features: {} vs {}",
+                "MinMaxScaler::merge() feature count mismatch: left scaler has {} features, \
+                 right scaler has {} features. Both scalers must be initialized with the same feature count.",
                 self.mins.len(),
                 other.mins.len()
             )));
@@ -807,13 +844,18 @@ impl Default for RobustScaler {
 impl Scaler for RobustScaler {
     fn fit(&mut self, data: &[f32], num_features: usize) -> Result<()> {
         if num_features == 0 {
-            return Err(TreeBoostError::Data("num_features must be > 0".into()));
+            return Err(TreeBoostError::Data(
+                "RobustScaler::fit() requires num_features > 0, got 0".into(),
+            ));
         }
 
         if !data.len().is_multiple_of(num_features) {
             return Err(TreeBoostError::Data(format!(
-                "Data length {} not divisible by num_features {}",
+                "RobustScaler::fit() received invalid data layout: {} elements not divisible by {} features. \
+                 Ensure data is row-major: num_rows × num_features = {} × {}",
                 data.len(),
+                num_features,
+                data.len() / num_features.max(1),
                 num_features
             )));
         }
@@ -821,7 +863,9 @@ impl Scaler for RobustScaler {
         let num_rows = data.len() / num_features;
 
         if num_rows == 0 {
-            return Err(TreeBoostError::Data("No rows to fit".into()));
+            return Err(TreeBoostError::Data(
+                "RobustScaler::fit() received empty dataset (0 rows). Provide data with at least 1 row.".into(),
+            ));
         }
 
         self.medians = vec![0.0; num_features];
@@ -864,13 +908,14 @@ impl Scaler for RobustScaler {
     fn transform(&self, data: &mut [f32], num_features: usize) -> Result<()> {
         if !self.fitted {
             return Err(TreeBoostError::Data(
-                "RobustScaler not fitted. Call fit() first.".into(),
+                "RobustScaler not fitted. Call fit() first to learn median/IQR statistics.".into(),
             ));
         }
 
         if num_features != self.medians.len() {
             return Err(TreeBoostError::Data(format!(
-                "num_features mismatch: fit with {}, transform with {}",
+                "RobustScaler::transform() feature count mismatch: fitted with {} features, \
+                 but transform() called with {} features. Ensure transform data has same feature count as training data.",
                 self.medians.len(),
                 num_features
             )));
@@ -878,8 +923,11 @@ impl Scaler for RobustScaler {
 
         if !data.len().is_multiple_of(num_features) {
             return Err(TreeBoostError::Data(format!(
-                "Data length {} not divisible by num_features {}",
+                "RobustScaler::transform() received invalid data layout: {} elements not divisible by {} features. \
+                 Ensure data is row-major: num_rows × num_features = {} × {}",
                 data.len(),
+                num_features,
+                data.len() / num_features.max(1),
                 num_features
             )));
         }

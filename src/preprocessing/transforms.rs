@@ -103,7 +103,9 @@ impl YeoJohnsonTransform {
     /// Data is in row-major format: `data[row * num_features + col]`
     pub fn fit(&mut self, data: &[f32], num_features: usize) -> Result<()> {
         if data.is_empty() {
-            return Err(TreeBoostError::Data("Cannot fit on empty data".into()));
+            return Err(TreeBoostError::Data(
+                "YeoJohnsonTransform::fit() received empty dataset. Provide data with at least 1 value.".into()
+            ));
         }
 
         let num_rows = data.len() / num_features;

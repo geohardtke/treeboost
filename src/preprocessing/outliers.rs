@@ -187,11 +187,15 @@ impl OutlierDetector {
     /// * `num_features` - Number of features (columns)
     pub fn fit(&mut self, data: &[f32], num_features: usize) -> Result<()> {
         if num_features == 0 {
-            return Err(TreeBoostError::Data("num_features must be > 0".into()));
+            return Err(TreeBoostError::Data(
+                "OutlierDetector::fit() requires num_features > 0, got 0".into()
+            ));
         }
 
         if data.is_empty() {
-            return Err(TreeBoostError::Data("Empty data".into()));
+            return Err(TreeBoostError::Data(
+                "OutlierDetector::fit() received empty dataset. Provide data with at least 1 row.".into()
+            ));
         }
 
         if !data.len().is_multiple_of(num_features) {
