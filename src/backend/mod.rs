@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn test_backend_selector_default() {
         let selector = BackendSelector::new();
-        let backend = selector.select(1000);
+        let backend = selector.select(1000).expect("failed to select backend");
         assert!(backend.name().starts_with("Scalar"));
     }
 
@@ -239,7 +239,7 @@ mod tests {
     fn test_backend_selector_small_dataset() {
         let selector = BackendSelector::new();
         // Small dataset should always use scalar
-        let backend = selector.select(100);
+        let backend = selector.select(100).expect("failed to select backend");
         assert!(backend.name().starts_with("Scalar"));
     }
 
@@ -247,7 +247,7 @@ mod tests {
     fn test_backend_selector_large_dataset() {
         let selector = BackendSelector::new();
         // Large dataset - uses GPU if available, otherwise scalar
-        let backend = selector.select(100_000);
+        let backend = selector.select(100_000).expect("failed to select backend");
         // Accept Hybrid CUDA, Hybrid WGPU, or Scalar depending on GPU availability
         assert!(
             backend.name() == "Hybrid CUDA"
@@ -262,7 +262,7 @@ mod tests {
     fn test_backend_config_scalar() {
         let config = BackendConfig::scalar();
         let selector = BackendSelector::with_config(config);
-        let backend = selector.select(1_000_000);
+        let backend = selector.select(1_000_000).expect("failed to select backend");
         assert!(backend.name().starts_with("Scalar"));
     }
 
@@ -271,7 +271,7 @@ mod tests {
         let config = BackendConfig::prefer_gpu();
         let selector = BackendSelector::with_config(config);
         // Uses GPU if available, otherwise falls back to scalar
-        let backend = selector.select(100_000);
+        let backend = selector.select(100_000).expect("failed to select backend");
         assert!(
             backend.name() == "Hybrid CUDA"
                 || backend.name() == "Hybrid WGPU"

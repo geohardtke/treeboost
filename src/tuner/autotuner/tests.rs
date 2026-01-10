@@ -102,7 +102,7 @@ fn test_search_history_to_json() {
 
     let json = history.to_json();
     assert!(json.contains("\"trial_id\": 0"));
-    assert!(json.contains("\"val_loss\": 0.5"));
+    assert!(json.contains("\"val_metric\": 0.5"));
     assert!(json.contains("\"best_trial_id\": 0"));
 }
 

@@ -167,10 +167,10 @@ mod tests {
 
         // Small batches should use CPU
         assert!(!hybrid.should_use_gpu(100));
-        assert!(!hybrid.should_use_gpu(999));
+        assert!(!hybrid.should_use_gpu(1999));
 
         // Large batches should use GPU
-        assert!(hybrid.should_use_gpu(1000));
+        assert!(hybrid.should_use_gpu(2000));
         assert!(hybrid.should_use_gpu(10000));
     }
 

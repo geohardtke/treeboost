@@ -597,11 +597,12 @@ mod tests {
         // Lags: 4 (1, 3, 7, 14)
         // Rolling: 3 windows × 2 stats = 6
         // EWMA: 2
-        // Total: 4 + 6 + 2 = 12 per column
+        // Momentum: 4 (1, 3, 7, 14)
+        // Total: 4 + 6 + 2 + 4 = 16 per column
         let expected_per_col = gen.config().features_per_column();
-        assert_eq!(expected_per_col, 12);
-        assert_eq!(names.len(), 12);
-        assert_eq!(features.len(), 8 * 12);
+        assert_eq!(expected_per_col, 16);
+        assert_eq!(names.len(), 16);
+        assert_eq!(features.len(), 8 * 16);
 
         // Verify name patterns
         assert!(names.iter().any(|n| n.contains("lag_1")));
@@ -676,8 +677,8 @@ mod tests {
 
         let names = gen.output_feature_names();
 
-        // 12 features per column × 2 columns = 24 names
-        assert_eq!(names.len(), 24);
+        // 16 features per column × 2 columns = 32 names
+        assert_eq!(names.len(), 32);
 
         // Check some expected names
         assert!(names.contains(&"price_lag_1".to_string()));
