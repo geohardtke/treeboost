@@ -1163,7 +1163,84 @@ pub struct TunerConfig {
     pub save_model_formats: Vec<ModelFormat>,
 }
 
-/// Presets for tuner intensity.
+/// Tuning intensity preset for AutoTuner's hyperparameter optimization.
+///
+/// ## When to Use TunerPreset
+///
+/// Use `TunerPreset` when working with **`AutoTuner`** or **`TunerConfig`**.
+/// This enum controls the intensity of manual hyperparameter tuning via the AutoTuner API.
+///
+/// ## Relationship to Other Preset Enums
+///
+/// TreeBoost has several tuning-related preset enums for different contexts:
+///
+/// | Enum | Context | Purpose |
+/// |------|---------|---------|
+/// | **`TuningLevel`** | `AutoBuilder`, `AutoConfig` | High-level: AutoML tuning intensity |
+/// | **`TunerPreset`** | `AutoTuner`, `TunerConfig` | Mid-level: Manual tuning intensity |
+/// | **`TreeTunerPreset`** | `TreeTunerConfig` | Low-level: Tree-only tuning intensity |
+///
+/// **Mapping between presets:**
+/// - `TunerPreset::SmokeTest` → Minimal testing only (CI/debug)
+/// - `TunerPreset::Quick` ≈ `TuningLevel::Quick` ≈ `TreeTunerPreset::Quick`
+/// - `TunerPreset::Balanced` ≈ `TuningLevel::Standard` ≈ `TreeTunerPreset::Standard`
+/// - `TunerPreset::Thorough` ≈ `TuningLevel::Thorough` ≈ `TreeTunerPreset::Thorough`
+///
+/// ## Variants
+///
+/// ### `SmokeTest`
+/// Absolute minimum tuning for testing only.
+/// - **Best for**: CI pipelines, unit tests, sanity checks
+/// - **Iterations**: 1 (no zoom)
+/// - **Time**: Seconds
+/// - **Quality**: Not production-ready, just validates code works
+///
+/// ### `Quick`
+/// Fast exploration with loose convergence thresholds.
+/// - **Best for**: Prototyping, small datasets, time-constrained experiments
+/// - **Iterations**: 2
+/// - **Time**: Minutes
+/// - **Quality**: Decent baseline, may not be fully converged
+///
+/// ### `Balanced` (Default)
+/// Balanced search with moderate iterations.
+/// - **Best for**: Most real-world use cases, production models
+/// - **Iterations**: 5
+/// - **Time**: Tens of minutes
+/// - **Quality**: Well-tuned and production-ready
+///
+/// ### `Thorough`
+/// Deep search with strict convergence thresholds.
+/// - **Best for**: Competitions, research, maximum accuracy
+/// - **Iterations**: 7+
+/// - **Time**: Hours
+/// - **Quality**: Highly optimized, near-optimal hyperparameters
+///
+/// ## Examples
+///
+/// ```ignore
+/// use treeboost::{AutoTuner, TunerConfig, TunerPreset, GBDTConfig};
+///
+/// // Quick tuning
+/// let config = TunerConfig::with_preset(TunerPreset::Quick);
+/// let tuner = AutoTuner::new(GBDTConfig::default()).with_config(config);
+/// let (best_config, history) = tuner.tune(&dataset)?;
+///
+/// // Production tuning (default)
+/// let tuner = AutoTuner::new(GBDTConfig::default()); // Balanced is default
+/// let (best_config, history) = tuner.tune(&dataset)?;
+///
+/// // Thorough tuning
+/// let config = TunerConfig::with_preset(TunerPreset::Thorough);
+/// let tuner = AutoTuner::new(GBDTConfig::default()).with_config(config);
+/// let (best_config, history) = tuner.tune(&dataset)?;
+/// ```
+///
+/// ## See Also
+///
+/// - [`TuningLevel`] - For high-level AutoML tuning with `AutoBuilder`
+/// - [`TreeTunerPreset`] - For tree-specific tuning with `TreeTunerConfig`
+/// - [`TunerConfig::with_preset`] - Apply a preset to tuner configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TunerPreset {
     /// 1 iteration, minimal rounds - CI/Debug only.

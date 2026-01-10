@@ -16,24 +16,165 @@ use crate::tuner::{OptimizationMetric, TaskType as TunerTaskType};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Tuning intensity level
+/// Tuning intensity level for AutoBuilder's hyperparameter optimization.
+///
+/// ## When to Use TuningLevel
+///
+/// Use `TuningLevel` when working with **`AutoBuilder`** or **`AutoConfig`**.
+/// This enum controls AutoBuilder's automatic tuning pipeline intensity.
+///
+/// ## Relationship to Other Preset Enums
+///
+/// TreeBoost has several tuning-related preset enums for different contexts:
+///
+/// | Enum | Context | Purpose |
+/// |------|---------|---------|
+/// | **`TuningLevel`** | `AutoBuilder`, `AutoConfig` | High-level: AutoML tuning intensity |
+/// | **`TunerPreset`** | `AutoTuner`, `TunerConfig` | Mid-level: Manual tuning intensity |
+/// | **`TreeTunerPreset`** | `TreeTunerConfig` | Low-level: Tree-only tuning intensity |
+///
+/// **Mapping between presets:**
+/// - `TuningLevel::Quick` ≈ `TunerPreset::Quick` ≈ `TreeTunerPreset::Quick`
+/// - `TuningLevel::Standard` ≈ `TunerPreset::Balanced` ≈ `TreeTunerPreset::Standard`
+/// - `TuningLevel::Thorough` ≈ `TunerPreset::Thorough` ≈ `TreeTunerPreset::Thorough`
+/// - `TuningLevel::None` = No tuning (use provided hyperparameters)
+///
+/// ## Variants
+///
+/// ### `Quick`
+/// Minimal tuning with sensible defaults.
+/// - **Best for**: Quick experiments, small datasets, CI/debugging
+/// - **Time**: Seconds to minutes
+/// - **Quality**: Good baseline, not optimized
+///
+/// ### `Standard` (Default)
+/// Moderate tuning with balanced speed and quality.
+/// - **Best for**: Most real-world use cases
+/// - **Time**: Minutes to tens of minutes
+/// - **Quality**: Well-tuned, production-ready
+///
+/// ### `Thorough`
+/// Extensive hyperparameter search for maximum accuracy.
+/// - **Best for**: Competitions, research, when accuracy > time
+/// - **Time**: Tens of minutes to hours
+/// - **Quality**: Highly optimized
+///
+/// ### `None`
+/// No tuning - use provided hyperparameters as-is.
+/// - **Best for**: Already-tuned configs, reproducibility
+/// - **Time**: Instant (no tuning overhead)
+/// - **Quality**: Depends on provided hyperparameters
+///
+/// ## Examples
+///
+/// ```ignore
+/// use treeboost::{AutoBuilder, TuningLevel};
+///
+/// // Quick experiments
+/// let model = AutoBuilder::new()
+///     .with_tuning_level(TuningLevel::Quick)
+///     .fit(&df, "target")?;
+///
+/// // Production model (default)
+/// let model = AutoBuilder::new()
+///     .with_tuning_level(TuningLevel::Standard)  // or omit (default)
+///     .fit(&df, "target")?;
+///
+/// // Maximum accuracy
+/// let model = AutoBuilder::new()
+///     .with_tuning_level(TuningLevel::Thorough)
+///     .fit(&df, "target")?;
+///
+/// // No tuning (use specific hyperparameters)
+/// let config = UniversalConfig::new().with_num_rounds(100).with_learning_rate(0.1);
+/// let model = AutoBuilder::new()
+///     .with_tuning_level(TuningLevel::None)
+///     .with_config(config)
+///     .fit(&df, "target")?;
+/// ```
+///
+/// ## See Also
+///
+/// - [`TunerPreset`] - For manual tuning with `AutoTuner`
+/// - [`TreeTunerPreset`] - For tree-specific tuning with `TreeTunerConfig`
+/// - [`AutoBuilder::with_tuning_level`] - Set the tuning level
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TuningLevel {
-    /// Minimal tuning - use sensible defaults
-    /// Best for: Quick experiments, small datasets
+    /// Minimal tuning with sensible defaults
     Quick,
 
-    /// Moderate tuning - good balance of speed and quality
-    /// Best for: Most real world use cases
+    /// Moderate tuning with balanced speed and quality
     #[default]
     Standard,
 
-    /// Extensive tuning - thorough hyperparameter search
-    /// Best for: Maximum accuracy when time is not a constraint
+    /// Extensive tuning for maximum accuracy
     Thorough,
 
-    /// No tuning - use provided hyperparameters
+    /// No tuning - use provided hyperparameters as-is
     None,
+}
+
+impl TuningLevel {
+    /// Convert to the equivalent `TunerPreset` for use with `AutoTuner`.
+    ///
+    /// This provides a sensible mapping between `TuningLevel` (used in `AutoBuilder`)
+    /// and `TunerPreset` (used in `AutoTuner`/`TunerConfig`).
+    ///
+    /// # Mapping
+    ///
+    /// - `Quick` → `TunerPreset::Quick`
+    /// - `Standard` → `TunerPreset::Balanced`
+    /// - `Thorough` → `TunerPreset::Thorough`
+    /// - `None` → `TunerPreset::Quick` (minimal tuning as fallback)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use treeboost::{TuningLevel, TunerPreset};
+    ///
+    /// let level = TuningLevel::Standard;
+    /// let tuner_preset = level.to_tuner_preset();
+    /// assert_eq!(tuner_preset, TunerPreset::Balanced);
+    /// ```
+    pub fn to_tuner_preset(self) -> crate::tuner::TunerPreset {
+        use crate::tuner::TunerPreset;
+        match self {
+            TuningLevel::Quick => TunerPreset::Quick,
+            TuningLevel::Standard => TunerPreset::Balanced,
+            TuningLevel::Thorough => TunerPreset::Thorough,
+            TuningLevel::None => TunerPreset::Quick, // Fallback to minimal tuning
+        }
+    }
+
+    /// Convert to the equivalent `TreeTunerPreset` for use with `TreeTunerConfig`.
+    ///
+    /// This provides a sensible mapping between `TuningLevel` (used in `AutoBuilder`)
+    /// and `TreeTunerPreset` (used in `TreeTunerConfig`).
+    ///
+    /// # Mapping
+    ///
+    /// - `Quick` → `TreeTunerPreset::Quick`
+    /// - `Standard` → `TreeTunerPreset::Standard`
+    /// - `Thorough` → `TreeTunerPreset::Thorough`
+    /// - `None` → `TreeTunerPreset::Quick` (minimal tuning as fallback)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use treeboost::{TuningLevel, TreeTunerPreset};
+    ///
+    /// let level = TuningLevel::Thorough;
+    /// let tree_preset = level.to_tree_tuner_preset();
+    /// assert_eq!(tree_preset, TreeTunerPreset::Thorough);
+    /// ```
+    pub fn to_tree_tuner_preset(self) -> TreeTunerPreset {
+        match self {
+            TuningLevel::Quick => TreeTunerPreset::Quick,
+            TuningLevel::Standard => TreeTunerPreset::Standard,
+            TuningLevel::Thorough => TreeTunerPreset::Thorough,
+            TuningLevel::None => TreeTunerPreset::Quick, // Fallback to minimal tuning
+        }
+    }
 }
 
 /// Ensemble strategy for AutoBuilder (PureTree only)
@@ -443,14 +584,84 @@ pub struct TreeTunerConfig {
     pub task_type: Option<TunerTaskType>,
 }
 
-/// Presets for tree tuner configuration.
+/// Tuning intensity preset for tree-specific hyperparameter optimization.
+///
+/// ## When to Use TreeTunerPreset
+///
+/// Use `TreeTunerPreset` when working with **`TreeTunerConfig`**.
+/// This enum controls tree-specific tuning intensity for PureTree and RandomForest modes.
+///
+/// ## Relationship to Other Preset Enums
+///
+/// TreeBoost has several tuning-related preset enums for different contexts:
+///
+/// | Enum | Context | Purpose |
+/// |------|---------|---------|
+/// | **`TuningLevel`** | `AutoBuilder`, `AutoConfig` | High-level: AutoML tuning intensity |
+/// | **`TunerPreset`** | `AutoTuner`, `TunerConfig` | Mid-level: Manual tuning intensity |
+/// | **`TreeTunerPreset`** | `TreeTunerConfig` | Low-level: Tree-only tuning intensity |
+///
+/// **Mapping between presets:**
+/// - `TreeTunerPreset::Quick` ≈ `TuningLevel::Quick` ≈ `TunerPreset::Quick`
+/// - `TreeTunerPreset::Standard` ≈ `TuningLevel::Standard` ≈ `TunerPreset::Balanced`
+/// - `TreeTunerPreset::Thorough` ≈ `TuningLevel::Thorough` ≈ `TunerPreset::Thorough`
+///
+/// ## Variants
+///
+/// ### `Quick`
+/// Fast tree tuning with shallow depth range.
+/// - **Best for**: Prototyping, debugging, quick experiments
+/// - **Depth range**: [3-6]
+/// - **Samples**: 30 Latin Hypercube samples
+/// - **Iterations**: 1 (no zoom)
+/// - **Time**: Minutes
+/// - **Quality**: Good starting point, not fully optimized
+///
+/// ### `Standard` (Default)
+/// Balanced tree tuning with moderate depth range.
+/// - **Best for**: Most production use cases
+/// - **Depth range**: [3-8]
+/// - **Samples**: 100 Latin Hypercube samples
+/// - **Iterations**: 3 (with zoom refinement)
+/// - **Time**: Tens of minutes
+/// - **Quality**: Well-tuned, production-ready
+///
+/// ### `Thorough`
+/// Extensive tree tuning with deep depth range.
+/// - **Best for**: Maximum accuracy, competitions, research
+/// - **Depth range**: [3-10]
+/// - **Samples**: 150 Latin Hypercube samples
+/// - **Iterations**: 15 (aggressive zoom)
+/// - **Time**: Hours
+/// - **Quality**: Near-optimal hyperparameters
+///
+/// ## Examples
+///
+/// ```ignore
+/// use treeboost::{TreeTunerConfig, TreeTunerPreset};
+///
+/// // Quick tree tuning
+/// let config = TreeTunerConfig::with_preset(TreeTunerPreset::Quick);
+///
+/// // Standard tree tuning (default)
+/// let config = TreeTunerConfig::with_preset(TreeTunerPreset::Standard);
+///
+/// // Thorough tree tuning
+/// let config = TreeTunerConfig::with_preset(TreeTunerPreset::Thorough);
+/// ```
+///
+/// ## See Also
+///
+/// - [`TuningLevel`] - For high-level AutoML tuning with `AutoBuilder`
+/// - [`TunerPreset`] - For manual tuning with `AutoTuner`
+/// - [`TreeTunerConfig::with_preset`] - Apply a preset to tree tuner configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TreeTunerPreset {
-    /// depth [3-6], 30 samples, 1 iteration.
+    /// Fast tree tuning with shallow depth range [3-6]
     Quick,
-    /// depth [3-8], 100 samples, 3 iterations.
+    /// Balanced tree tuning with moderate depth range [3-8]
     Standard,
-    /// depth [3-10], 150 samples, 15 iterations.
+    /// Extensive tree tuning with deep depth range [3-10]
     Thorough,
 }
 
