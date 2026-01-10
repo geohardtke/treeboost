@@ -33,7 +33,7 @@
 use crate::defaults::bundler as bundler_defaults;
 use rkyv::{Archive, Deserialize, Serialize};
 
-use super::{BinnedDataset, FeatureInfo, DEFAULT_BIN};
+use crate::dataset::core::{BinnedDataset, FeatureInfo, DEFAULT_BIN};
 
 /// Maximum allowed conflict ratio (fraction of samples with conflicting non-zero values)
 /// LightGBM uses 0.01% (1/10000). We use a slightly higher threshold for robustness.

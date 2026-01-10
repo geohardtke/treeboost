@@ -4,7 +4,7 @@
 //! contiguously in memory to maximize CPU cache hits. This module provides
 //! utilities to reorder columns based on feature importance or access frequency.
 
-use super::{BinnedDataset, FeatureInfo};
+use crate::dataset::core::{BinnedDataset, FeatureInfo};
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// Column ordering strategy

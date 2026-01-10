@@ -108,3 +108,4 @@ wheels/
 *.egg
 .python-version
 .venvs
+test_imports

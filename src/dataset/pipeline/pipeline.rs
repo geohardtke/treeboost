@@ -8,8 +8,8 @@
 //! This pipeline prevents target leakage and handles high-cardinality categoricals
 //! with typos and rare values gracefully.
 
-use crate::dataset::binner::QuantileBinner;
-use crate::dataset::{BinnedDataset, FeatureInfo, FeatureType};
+use crate::dataset::binning::QuantileBinner;
+use crate::dataset::core::{BinnedDataset, FeatureInfo, FeatureType};
 use crate::defaults::{gbdt as gbdt_defaults, preprocessing as preprocessing_defaults};
 use crate::encoding::{CategoryFilter, CategoryMapping, EncodingMap, OrderedTargetEncoder};
 use crate::{Result, TreeBoostError};

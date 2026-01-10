@@ -1,4 +1,4 @@
-//! Binned dataset with columnar u8 storage
+//! Core binned dataset with columnar u8 storage
 //!
 //! Provides memory-efficient storage for histogram-based GBDT training.
 //! Features are discretized to u8 bins (256 values) for 8x memory reduction.
@@ -16,167 +16,15 @@
 //!
 //! Row-major layout is computed lazily on first GPU use and cached for reuse.
 
-use bytemuck::{Pod, Zeroable};
 use rkyv::{Archive, Deserialize, Serialize};
 use std::sync::OnceLock;
 
-/// Histogram bin entry for gradient/hessian accumulation
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default, Pod, Zeroable, Archive, Serialize, Deserialize)]
-pub struct BinEntry {
-    /// Sum of gradients for samples in this bin
-    pub sum_gradients: f32,
-    /// Sum of hessians for samples in this bin
-    pub sum_hessians: f32,
-    /// Count of samples in this bin
-    pub count: u32,
-}
+use super::feature_info::{FeatureInfo, DEFAULT_BIN};
+use super::sparse::SparseColumn;
 
-impl BinEntry {
-    #[inline]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Add a sample's gradient and hessian to this bin
-    #[inline]
-    pub fn accumulate(&mut self, gradient: f32, hessian: f32) {
-        self.sum_gradients += gradient;
-        self.sum_hessians += hessian;
-        self.count += 1;
-    }
-
-    /// Add multiple samples' gradients and hessians to this bin
-    /// Used by sparse histogram building for default bin accumulation
-    #[inline]
-    pub fn accumulate_with_count(&mut self, gradient: f32, hessian: f32, count: u32) {
-        self.sum_gradients += gradient;
-        self.sum_hessians += hessian;
-        self.count += count;
-    }
-
-    /// Merge another bin entry into this one
-    #[inline]
-    pub fn merge(&mut self, other: &BinEntry) {
-        self.sum_gradients += other.sum_gradients;
-        self.sum_hessians += other.sum_hessians;
-        self.count += other.count;
-    }
-
-    /// Subtract another bin entry from this one (for Histogram Subtraction Trick)
-    #[inline]
-    pub fn subtract(&mut self, other: &BinEntry) {
-        self.sum_gradients -= other.sum_gradients;
-        self.sum_hessians -= other.sum_hessians;
-        self.count -= other.count;
-    }
-}
-
-/// Feature type for determining how to handle the feature
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Archive,
-    Serialize,
-    Deserialize,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum FeatureType {
-    /// Continuous numeric feature (binned via T-Digest quantiles)
-    Numeric,
-    /// Categorical feature (encoded via Ordered Target Encoding)
-    Categorical,
-}
-
-/// Feature metadata
-#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
-pub struct FeatureInfo {
-    /// Feature name
-    pub name: String,
-    /// Feature type
-    pub feature_type: FeatureType,
-    /// Number of bins used (max 256)
-    pub num_bins: u8,
-    /// Bin boundaries for numeric features (len = num_bins - 1)
-    /// For categorical, this is empty (bins are category indices)
-    pub bin_boundaries: Vec<f64>,
-}
-
-/// Threshold for considering a feature sparse (fraction of default bin values)
-/// Set to 0.9 (90% zeros) because sparse path overhead only pays off at high sparsity
-pub const SPARSITY_THRESHOLD: f32 = 0.9;
-
-/// Default bin value (typically 0, representing missing/zero values)
-pub const DEFAULT_BIN: u8 = 0;
-
-/// Sparse column storage (CSR-like format)
-///
-/// Only stores non-default entries for memory efficiency.
-/// For a feature with 95% zeros, this uses only 5% of dense storage.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-pub struct SparseColumn {
-    /// Row indices of non-default entries
-    pub indices: Vec<u32>,
-    /// Bin values at those indices (all non-default)
-    pub values: Vec<u8>,
-    /// Total number of rows (for bounds checking)
-    pub num_rows: usize,
-}
-
-impl SparseColumn {
-    /// Create from dense column, extracting only non-default entries
-    pub fn from_dense(dense: &[u8], default_bin: u8) -> Self {
-        let mut indices = Vec::new();
-        let mut values = Vec::new();
-
-        for (i, &bin) in dense.iter().enumerate() {
-            if bin != default_bin {
-                indices.push(i as u32);
-                values.push(bin);
-            }
-        }
-
-        Self {
-            indices,
-            values,
-            num_rows: dense.len(),
-        }
-    }
-
-    /// Number of non-default entries
-    #[inline]
-    pub fn nnz(&self) -> usize {
-        self.indices.len()
-    }
-
-    /// Sparsity ratio (fraction of default values)
-    #[inline]
-    pub fn sparsity(&self) -> f32 {
-        if self.num_rows == 0 {
-            return 1.0;
-        }
-        1.0 - (self.nnz() as f32 / self.num_rows as f32)
-    }
-
-    /// Check if this column is sparse enough to benefit from sparse processing
-    #[inline]
-    pub fn is_sparse(&self) -> bool {
-        self.sparsity() >= SPARSITY_THRESHOLD
-    }
-
-    /// Iterate over (row_index, bin_value) pairs for non-default entries
-    #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = (usize, u8)> + '_ {
-        self.indices
-            .iter()
-            .zip(self.values.iter())
-            .map(|(&idx, &val)| (idx as usize, val))
-    }
-}
+// =============================================================================
+// BinnedDataset
+// =============================================================================
 
 /// Columnar binned dataset for efficient histogram construction
 ///
@@ -357,6 +205,10 @@ impl BinnedDataset {
         }
     }
 
+    // =========================================================================
+    // Era Methods
+    // =========================================================================
+
     /// Set era indices on an existing dataset
     ///
     /// # Arguments
@@ -396,6 +248,10 @@ impl BinnedDataset {
         self.era_indices.as_deref()
     }
 
+    // =========================================================================
+    // Basic Accessors
+    // =========================================================================
+
     /// Number of samples
     #[inline]
     pub fn num_rows(&self) -> usize {
@@ -433,6 +289,10 @@ impl BinnedDataset {
         &self.features[start..start + self.num_rows]
     }
 
+    // =========================================================================
+    // Sparse Feature Access
+    // =========================================================================
+
     /// Check if a feature has a sparse representation
     #[inline]
     pub fn is_sparse(&self, feature_idx: usize) -> bool {
@@ -454,6 +314,10 @@ impl BinnedDataset {
     pub fn num_sparse_features(&self) -> usize {
         self.sparse_columns.iter().filter(|s| s.is_some()).count()
     }
+
+    // =========================================================================
+    // Target Access
+    // =========================================================================
 
     /// Get target value for a row
     #[inline]
@@ -504,6 +368,10 @@ impl BinnedDataset {
             row_major_4bit_cache: OnceLock::new(),
         }
     }
+
+    // =========================================================================
+    // Bin Value Operations
+    // =========================================================================
 
     /// Get raw bin value for original feature value using binary search
     pub fn bin_value(&self, feature_idx: usize, value: f64) -> u8 {
@@ -575,13 +443,6 @@ impl BinnedDataset {
     /// # Layout
     ///
     /// Returns row-major layout: `features[row * num_features + feature]`
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let raw = dataset.extract_raw_features_from_bins();
-    /// // raw[row * num_features + feature] is the approximate value
-    /// ```
     pub fn extract_raw_features_from_bins(&self) -> Vec<f32> {
         let num_rows = self.num_rows();
         let num_features = self.num_features();
@@ -596,6 +457,10 @@ impl BinnedDataset {
 
         raw
     }
+
+    // =========================================================================
+    // Row-Major Layout (GPU)
+    // =========================================================================
 
     /// Get row-major layout for GPU backends (lazy conversion).
     ///
@@ -700,6 +565,10 @@ impl BinnedDataset {
         self.num_features().div_ceil(2)
     }
 
+    // =========================================================================
+    // Subset Operations
+    // =========================================================================
+
     /// Create a subset of this dataset containing only the specified rows.
     ///
     /// This is used for proper K-fold cross-validation where training must
@@ -782,7 +651,10 @@ impl BinnedDataset {
     }
 }
 
-// Implement BinStorage trait for use with backend abstraction
+// =============================================================================
+// BinStorage Trait Implementation
+// =============================================================================
+
 impl crate::backend::BinStorage for BinnedDataset {
     fn get_bin(&self, row: usize, feature: usize) -> u8 {
         self.features[feature * self.num_rows + row]
@@ -831,39 +703,35 @@ impl crate::backend::BinStorage for BinnedDataset {
     }
 }
 
+// =============================================================================
+// Tests
+// =============================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dataset::FeatureType;
 
-    #[test]
-    fn test_bin_entry_accumulate() {
-        let mut entry = BinEntry::new();
-        entry.accumulate(1.0, 2.0);
-        entry.accumulate(0.5, 1.0);
-
-        assert_eq!(entry.sum_gradients, 1.5);
-        assert_eq!(entry.sum_hessians, 3.0);
-        assert_eq!(entry.count, 2);
+    fn create_test_feature_info(name: &str, num_bins: u8) -> FeatureInfo {
+        FeatureInfo {
+            name: name.to_string(),
+            feature_type: FeatureType::Numeric,
+            num_bins,
+            bin_boundaries: vec![],
+        }
     }
 
-    #[test]
-    fn test_bin_entry_subtract() {
-        let mut parent = BinEntry {
-            sum_gradients: 10.0,
-            sum_hessians: 20.0,
-            count: 100,
-        };
-        let child = BinEntry {
-            sum_gradients: 3.0,
-            sum_hessians: 6.0,
-            count: 30,
-        };
-
-        parent.subtract(&child);
-
-        assert_eq!(parent.sum_gradients, 7.0);
-        assert_eq!(parent.sum_hessians, 14.0);
-        assert_eq!(parent.count, 70);
+    fn create_test_feature_info_with_boundaries(
+        name: &str,
+        num_bins: u8,
+        boundaries: Vec<f64>,
+    ) -> FeatureInfo {
+        FeatureInfo {
+            name: name.to_string(),
+            feature_type: FeatureType::Numeric,
+            num_bins,
+            bin_boundaries: boundaries,
+        }
     }
 
     #[test]
@@ -874,18 +742,8 @@ mod tests {
         let features = vec![0u8, 1, 2, 3, 10, 11, 12, 13];
         let targets = vec![1.0f32, 2.0, 3.0, 4.0];
         let feature_info = vec![
-            FeatureInfo {
-                name: "f0".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 4,
-                bin_boundaries: vec![0.5, 1.5, 2.5],
-            },
-            FeatureInfo {
-                name: "f1".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 4,
-                bin_boundaries: vec![10.5, 11.5, 12.5],
-            },
+            create_test_feature_info_with_boundaries("f0", 4, vec![0.5, 1.5, 2.5]),
+            create_test_feature_info_with_boundaries("f1", 4, vec![10.5, 11.5, 12.5]),
         ];
 
         let dataset = BinnedDataset::new(num_rows, features, targets, feature_info);
@@ -916,18 +774,8 @@ mod tests {
         let features = vec![0u8, 1, 2, 3, 10, 11, 12, 13];
         let targets = vec![1.0f32, 2.0, 3.0, 4.0];
         let feature_info = vec![
-            FeatureInfo {
-                name: "f0".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 4,
-                bin_boundaries: vec![0.5, 1.5, 2.5],
-            },
-            FeatureInfo {
-                name: "f1".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 4,
-                bin_boundaries: vec![10.5, 11.5, 12.5],
-            },
+            create_test_feature_info_with_boundaries("f0", 4, vec![0.5, 1.5, 2.5]),
+            create_test_feature_info_with_boundaries("f1", 4, vec![10.5, 11.5, 12.5]),
         ];
 
         let dataset = BinnedDataset::new(num_rows, features, targets, feature_info);
@@ -957,18 +805,8 @@ mod tests {
         let features = vec![0u8, 1, 2, 3, 10, 11, 12, 13];
         let targets = vec![1.0f32, 2.0, 3.0, 4.0];
         let feature_info = vec![
-            FeatureInfo {
-                name: "f0".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 4,
-                bin_boundaries: vec![],
-            },
-            FeatureInfo {
-                name: "f1".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 4,
-                bin_boundaries: vec![],
-            },
+            create_test_feature_info("f0", 4),
+            create_test_feature_info("f1", 4),
         ];
 
         let dataset = BinnedDataset::new(4, features, targets, feature_info);
@@ -988,31 +826,15 @@ mod tests {
     #[test]
     fn test_4bit_packing() {
         let num_rows = 4;
-        let _num_features = 3; // Odd number to test padding
 
         // Column-major: feature 0 = [1,2,3,4], feature 1 = [5,6,7,8], feature 2 = [9,10,11,12]
         // All values <= 15, so 4-bit packing is supported
         let features = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
         let targets = vec![1.0f32, 2.0, 3.0, 4.0];
         let feature_info = vec![
-            FeatureInfo {
-                name: "f0".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 16, // Max 16 bins for 4-bit
-                bin_boundaries: vec![],
-            },
-            FeatureInfo {
-                name: "f1".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 16,
-                bin_boundaries: vec![],
-            },
-            FeatureInfo {
-                name: "f2".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 16,
-                bin_boundaries: vec![],
-            },
+            create_test_feature_info("f0", 16),
+            create_test_feature_info("f1", 16),
+            create_test_feature_info("f2", 16),
         ];
 
         let dataset = BinnedDataset::new(num_rows, features, targets, feature_info);
@@ -1024,12 +846,6 @@ mod tests {
 
         // Get 4-bit packed data
         let packed = dataset.as_row_major_4bit();
-
-        // Expected layout (2 bytes per row):
-        // Row 0: byte0 = (5 << 4) | 1 = 0x51, byte1 = (0 << 4) | 9 = 0x09
-        // Row 1: byte0 = (6 << 4) | 2 = 0x62, byte1 = (0 << 4) | 10 = 0x0A
-        // Row 2: byte0 = (7 << 4) | 3 = 0x73, byte1 = (0 << 4) | 11 = 0x0B
-        // Row 3: byte0 = (8 << 4) | 4 = 0x84, byte1 = (0 << 4) | 12 = 0x0C
 
         assert_eq!(packed.len(), num_rows * 2);
 
@@ -1062,21 +878,11 @@ mod tests {
 
     #[test]
     fn test_4bit_not_supported_for_large_bins() {
-        let features = vec![0u8, 1, 2, 3, 100, 101, 102, 103]; // Feature 1 has large values
+        let features = vec![0u8, 1, 2, 3, 100, 101, 102, 103];
         let targets = vec![1.0f32, 2.0, 3.0, 4.0];
         let feature_info = vec![
-            FeatureInfo {
-                name: "f0".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 16,
-                bin_boundaries: vec![],
-            },
-            FeatureInfo {
-                name: "f1".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 128, // More than 16 bins
-                bin_boundaries: vec![],
-            },
+            create_test_feature_info("f0", 16),
+            create_test_feature_info("f1", 128), // More than 16 bins
         ];
 
         let dataset = BinnedDataset::new(4, features, targets, feature_info);
@@ -1092,18 +898,8 @@ mod tests {
         let features = vec![1u8, 2, 5, 6];
         let targets = vec![1.0f32, 2.0];
         let feature_info = vec![
-            FeatureInfo {
-                name: "f0".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 8,
-                bin_boundaries: vec![],
-            },
-            FeatureInfo {
-                name: "f1".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 8,
-                bin_boundaries: vec![],
-            },
+            create_test_feature_info("f0", 8),
+            create_test_feature_info("f1", 8),
         ];
 
         let dataset = BinnedDataset::new(2, features, targets, feature_info);
@@ -1117,8 +913,6 @@ mod tests {
 
         let data = packed.unwrap();
         assert_eq!(data.len(), 2); // 2 rows, 1 byte per row (2 features)
-                                   // Row 0: (5 << 4) | 1 = 0x51
-                                   // Row 1: (6 << 4) | 2 = 0x62
         assert_eq!(data[0], 0x51);
         assert_eq!(data[1], 0x62);
     }
@@ -1131,18 +925,8 @@ mod tests {
         let features = vec![0u8, 1, 2, 3, 4, 10, 11, 12, 13, 14];
         let targets = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
         let feature_info = vec![
-            FeatureInfo {
-                name: "f0".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 5,
-                bin_boundaries: vec![0.5, 1.5, 2.5, 3.5],
-            },
-            FeatureInfo {
-                name: "f1".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 5,
-                bin_boundaries: vec![10.5, 11.5, 12.5, 13.5],
-            },
+            create_test_feature_info_with_boundaries("f0", 5, vec![0.5, 1.5, 2.5, 3.5]),
+            create_test_feature_info_with_boundaries("f1", 5, vec![10.5, 11.5, 12.5, 13.5]),
         ];
 
         let dataset = BinnedDataset::new(num_rows, features, targets, feature_info);
@@ -1154,13 +938,13 @@ mod tests {
         assert_eq!(subset.num_features(), 2);
 
         // Check feature values: original rows 1, 3, 4 should become rows 0, 1, 2
-        assert_eq!(subset.get_bin(0, 0), 1); // Original row 1, feature 0
-        assert_eq!(subset.get_bin(1, 0), 3); // Original row 3, feature 0
-        assert_eq!(subset.get_bin(2, 0), 4); // Original row 4, feature 0
+        assert_eq!(subset.get_bin(0, 0), 1);
+        assert_eq!(subset.get_bin(1, 0), 3);
+        assert_eq!(subset.get_bin(2, 0), 4);
 
-        assert_eq!(subset.get_bin(0, 1), 11); // Original row 1, feature 1
-        assert_eq!(subset.get_bin(1, 1), 13); // Original row 3, feature 1
-        assert_eq!(subset.get_bin(2, 1), 14); // Original row 4, feature 1
+        assert_eq!(subset.get_bin(0, 1), 11);
+        assert_eq!(subset.get_bin(1, 1), 13);
+        assert_eq!(subset.get_bin(2, 1), 14);
 
         // Check targets
         assert_eq!(subset.targets(), &[2.0, 4.0, 5.0]);
@@ -1177,18 +961,8 @@ mod tests {
         let features = vec![0u8, 1, 2, 3, 10, 11, 12, 13];
         let targets = vec![1.0f32, 2.0, 3.0, 4.0];
         let feature_info = vec![
-            FeatureInfo {
-                name: "f0".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 4,
-                bin_boundaries: vec![],
-            },
-            FeatureInfo {
-                name: "f1".to_string(),
-                feature_type: FeatureType::Numeric,
-                num_bins: 14,
-                bin_boundaries: vec![],
-            },
+            create_test_feature_info("f0", 4),
+            create_test_feature_info("f1", 14),
         ];
         let era_indices = vec![0u16, 1, 0, 2];
 
@@ -1202,5 +976,52 @@ mod tests {
         assert!(subset.has_eras());
         assert_eq!(subset.era_indices().unwrap(), &[0, 0]);
         assert_eq!(subset.num_eras(), 1);
+    }
+
+    #[test]
+    fn test_with_targets() {
+        let features = vec![0u8, 1, 2, 3];
+        let targets = vec![1.0f32, 2.0, 3.0, 4.0];
+        let feature_info = vec![create_test_feature_info("f0", 4)];
+
+        let dataset = BinnedDataset::new(4, features, targets, feature_info);
+        let new_dataset = dataset.with_targets(vec![10.0, 20.0, 30.0, 40.0]);
+
+        assert_eq!(new_dataset.targets(), &[10.0, 20.0, 30.0, 40.0]);
+        assert_eq!(new_dataset.num_rows(), 4);
+        // Original unchanged
+        assert_eq!(dataset.targets(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_era_methods() {
+        let features = vec![0u8, 1, 2, 3];
+        let targets = vec![1.0f32, 2.0, 3.0, 4.0];
+        let feature_info = vec![create_test_feature_info("f0", 4)];
+        let era_indices = vec![0u16, 1, 2, 1];
+
+        let dataset =
+            BinnedDataset::new_with_eras(4, features, targets, feature_info, era_indices);
+
+        assert!(dataset.has_eras());
+        assert_eq!(dataset.num_eras(), 3);
+        assert_eq!(dataset.era(0), 0);
+        assert_eq!(dataset.era(1), 1);
+        assert_eq!(dataset.era(2), 2);
+        assert_eq!(dataset.era(3), 1);
+    }
+
+    #[test]
+    fn test_set_era_indices() {
+        let features = vec![0u8, 1, 2, 3];
+        let targets = vec![1.0f32, 2.0, 3.0, 4.0];
+        let feature_info = vec![create_test_feature_info("f0", 4)];
+
+        let mut dataset = BinnedDataset::new(4, features, targets, feature_info);
+        assert!(!dataset.has_eras());
+
+        dataset.set_era_indices(vec![0, 1, 0, 2]);
+        assert!(dataset.has_eras());
+        assert_eq!(dataset.num_eras(), 3);
     }
 }

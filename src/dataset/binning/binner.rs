@@ -3,7 +3,7 @@
 //! Discretizes continuous features into u8 bins using robust quantile estimation.
 //! T-Digest provides accurate quantiles even for skewed distributions.
 
-use crate::dataset::{FeatureInfo, FeatureType};
+use crate::dataset::core::{FeatureInfo, FeatureType};
 use crate::Result;
 use tdigest::TDigest;
 

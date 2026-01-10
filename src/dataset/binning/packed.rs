@@ -213,7 +213,7 @@ pub fn optimal_storage(bins: &[u8]) -> StorageMode {
     }
 }
 
-use super::{BinnedDataset, FeatureInfo};
+use crate::dataset::core::{BinnedDataset, FeatureInfo};
 
 /// Feature storage that can be either u8 or packed 4-bit
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]

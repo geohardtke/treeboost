@@ -2,8 +2,8 @@
 //!
 //! Provides integration with Polars for loading and preprocessing tabular data.
 
-use crate::dataset::binner::QuantileBinner;
-use crate::dataset::{BinnedDataset, DatasetBinner, FeatureInfo, FeatureType};
+use crate::dataset::binning::{DatasetBinner, QuantileBinner};
+use crate::dataset::core::{BinnedDataset, FeatureInfo, FeatureType};
 use crate::{Result, TreeBoostError};
 use polars::prelude::*;
 use std::path::Path;
