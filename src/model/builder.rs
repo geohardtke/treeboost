@@ -416,8 +416,9 @@ impl AutoBuilder {
                     }
 
                     // Apply time-series features to the DataFrame
-                    working_df =
-                        crate::utils::apply_timeseries_features(working_df, &ts_plan, info, true)?;
+                    working_df = crate::features::apply_timeseries_features(
+                        working_df, &ts_plan, info, true,
+                    )?;
 
                     if self.config.verbose {
                         println!(
@@ -458,7 +459,7 @@ impl AutoBuilder {
                 (&panel_info, &feature_plan)
             {
                 if let Some(ref ts_plan) = plan.timeseries_features {
-                    crate::utils::apply_timeseries_features(val_df.clone(), ts_plan, info, true)?
+                    crate::features::apply_timeseries_features(val_df.clone(), ts_plan, info, true)?
                 } else {
                     val_df.clone()
                 }

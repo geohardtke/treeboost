@@ -252,7 +252,7 @@ impl UniversalModel {
         };
 
         // Extract selected features if feature selection was used
-        let linear_features = crate::utils::features::extract_selected_features(
+        let linear_features = crate::features::extract_selected_features(
             &raw_features,
             num_rows,
             num_raw_features,

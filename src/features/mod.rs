@@ -30,6 +30,7 @@
 //! ```
 
 pub mod crosssectional;
+pub mod dataframe;
 mod interaction;
 mod polynomial;
 mod ratio;
@@ -40,6 +41,11 @@ pub mod timeseries;
 pub mod timeseries_grouped;
 
 use crate::defaults::feature_generation as feature_generation_defaults;
+pub use dataframe::{
+    apply_crosssectional_features, apply_crosssectional_features_selective,
+    apply_interaction_features, apply_polynomial_features, apply_ratio_features,
+    apply_timeseries_features, extract_selected_features,
+};
 pub use interaction::{InteractionGenerator, InteractionType, PairSelection};
 pub use polynomial::PolynomialGenerator;
 pub use ratio::RatioGenerator;

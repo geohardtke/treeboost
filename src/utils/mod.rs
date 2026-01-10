@@ -1,40 +1,8 @@
 //! Shared utility functions
 //!
-//! This module provides convenient re-exports of common utilities for easier access.
-//! Users can write `use treeboost::utils::apply_*` instead of navigating submodules.
-//!
-//! # Feature Engineering Utilities
-//! - `apply_timeseries_features` - Generate lag, rolling, EWMA features for panel data
-//! - `apply_crosssectional_features` - Generate rank/zscore for panel data (critical for Rank IC)
-//! - `apply_polynomial_features` - Generate x², x³, √x, log(x+1) transformations
-//! - `apply_ratio_features` - Generate ratio features (x_i / x_j)
-//! - `apply_interaction_features` - Generate interaction features (x_i × x_j, etc.)
-//! - `extract_selected_features` - Extract subset of features (used in LinearThenTree mode)
-//!
-//! # Preprocessing Utilities
-//! - `apply_standard_scaler` - Z-score normalization (zero mean, unit variance)
-//! - `apply_minmax_scaler` - Range normalization (scale to [min, max])
-//! - `apply_robust_scaler` - Median/IQR scaling (robust to outliers)
-//! - `apply_frequency_encoder` - Category → frequency mapping (best for trees)
-//! - `apply_label_encoder` - String → integer encoding
-//! - `apply_onehot_encoder` - Category → binary columns (best for linear models)
-//! - `apply_simple_imputer` - Fill missing values (Mean/Median/Mode/Constant)
-
-pub mod features;
-pub mod preprocessing;
-
-// Re-export feature application utilities for convenience
-pub use features::{
-    apply_crosssectional_features, apply_crosssectional_features_selective,
-    apply_interaction_features, apply_polynomial_features, apply_ratio_features,
-    apply_timeseries_features, extract_selected_features,
-};
-
-// Re-export preprocessing application utilities for convenience
-pub use preprocessing::{
-    apply_frequency_encoder, apply_label_encoder, apply_minmax_scaler, apply_onehot_encoder,
-    apply_robust_scaler, apply_simple_imputer, apply_standard_scaler,
-};
+//! This module provides general-purpose utility functions for the TreeBoost library.
+//! For feature engineering utilities, see [`crate::features`].
+//! For preprocessing utilities, see [`crate::preprocessing`].
 
 /// Check if two f32 values are approximately equal.
 ///

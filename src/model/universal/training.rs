@@ -9,10 +9,10 @@
 use crate::analysis::{AnalysisConfig, DatasetAnalysis};
 use crate::booster::GBDTModel;
 use crate::dataset::BinnedDataset;
+use crate::features::extract_selected_features;
 use crate::learner::{LinearBooster, TreeBooster, WeakLearner};
 use crate::loss::LossFunction;
 use crate::tree::Tree;
-use crate::utils::features::extract_selected_features;
 use crate::Result;
 use rand::SeedableRng;
 use rayon::prelude::*;

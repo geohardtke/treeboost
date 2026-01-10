@@ -76,7 +76,7 @@ pub fn extract_selected_features(
 /// # Example
 ///
 /// ```ignore
-/// use treeboost::utils::apply_timeseries_features;
+/// use treeboost::features::apply_timeseries_features;
 ///
 /// let df_with_ts = apply_timeseries_features(
 ///     df,
@@ -237,7 +237,7 @@ pub fn apply_timeseries_features(
 /// # Example
 ///
 /// ```ignore
-/// use treeboost::utils::apply_polynomial_features;
+/// use treeboost::features::apply_polynomial_features;
 /// use treeboost::features::PolynomialGenerator;
 ///
 /// let poly = PolynomialGenerator::new() // x² and √x
@@ -346,7 +346,7 @@ pub fn apply_polynomial_features(
 /// # Example
 ///
 /// ```ignore
-/// use treeboost::utils::apply_ratio_features;
+/// use treeboost::features::apply_ratio_features;
 /// use treeboost::features::RatioGenerator;
 ///
 /// // Option 1: Explicit pairs
@@ -453,7 +453,7 @@ pub fn apply_ratio_features(
 /// # Example
 ///
 /// ```ignore
-/// use treeboost::utils::apply_interaction_features;
+/// use treeboost::features::apply_interaction_features;
 /// use treeboost::features::{InteractionGenerator, InteractionType};
 ///
 /// // Option 1: Explicit pairs with multiple interaction types

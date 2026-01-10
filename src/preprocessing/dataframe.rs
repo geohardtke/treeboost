@@ -28,7 +28,7 @@ use polars::prelude::*;
 /// # Example
 ///
 /// ```ignore
-/// use treeboost::utils::apply_standard_scaler;
+/// use treeboost::preprocessing::apply_standard_scaler;
 ///
 /// // Training: fit and transform
 /// let (train_df, scaler) = apply_standard_scaler(train_df, None, None)?;
@@ -63,7 +63,7 @@ pub fn apply_standard_scaler(
 /// # Example
 ///
 /// ```ignore
-/// use treeboost::utils::apply_minmax_scaler;
+/// use treeboost::preprocessing::apply_minmax_scaler;
 ///
 /// // Scale to [0, 1]
 /// let (train_df, scaler) = apply_minmax_scaler(train_df, None, 0.0, 1.0, None)?;
@@ -100,7 +100,7 @@ pub fn apply_minmax_scaler(
 /// # Example
 ///
 /// ```ignore
-/// use treeboost::utils::apply_robust_scaler;
+/// use treeboost::preprocessing::apply_robust_scaler;
 ///
 /// let (train_df, scaler) = apply_robust_scaler(train_df, None, None)?;
 /// ```
@@ -205,7 +205,7 @@ fn apply_scaler_impl<S: Scaler + Clone>(
 /// # Example
 ///
 /// ```ignore
-/// use treeboost::utils::apply_frequency_encoder;
+/// use treeboost::preprocessing::apply_frequency_encoder;
 ///
 /// // Training
 /// let (train_df, encoder) = apply_frequency_encoder(
@@ -264,7 +264,7 @@ pub fn apply_frequency_encoder(
 /// # Example
 ///
 /// ```ignore
-/// use treeboost::utils::apply_label_encoder;
+/// use treeboost::preprocessing::apply_label_encoder;
 ///
 /// let (train_df, encoder) = apply_label_encoder(
 ///     train_df,
@@ -319,7 +319,7 @@ pub fn apply_label_encoder(
 /// # Example
 ///
 /// ```ignore
-/// use treeboost::utils::apply_onehot_encoder;
+/// use treeboost::preprocessing::apply_onehot_encoder;
 ///
 /// let (train_df, encoder) = apply_onehot_encoder(
 ///     train_df,
@@ -390,7 +390,7 @@ pub fn apply_onehot_encoder(
 /// # Example
 ///
 /// ```ignore
-/// use treeboost::utils::apply_simple_imputer;
+/// use treeboost::preprocessing::apply_simple_imputer;
 /// use treeboost::preprocessing::ImputeStrategy;
 ///
 /// // Fill with mean

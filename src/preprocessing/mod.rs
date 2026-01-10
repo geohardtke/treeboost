@@ -62,6 +62,7 @@
 //! let scaled_df = features_to_df(&data, num_features, &["col1", "col2"])?;
 //! ```
 
+pub mod dataframe;
 pub mod encoding;
 pub mod imputer;
 pub mod incremental;
@@ -72,6 +73,10 @@ pub mod scaler;
 pub mod smart;
 pub mod transforms;
 
+pub use dataframe::{
+    apply_frequency_encoder, apply_label_encoder, apply_minmax_scaler, apply_onehot_encoder,
+    apply_robust_scaler, apply_simple_imputer, apply_standard_scaler,
+};
 pub use encoding::{FrequencyEncoder, LabelEncoder, OneHotEncoder, UnknownStrategy};
 pub use imputer::{ImputeStrategy, IndicatorImputer, SimpleImputer};
 

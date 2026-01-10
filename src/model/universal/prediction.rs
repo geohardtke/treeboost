@@ -9,8 +9,8 @@
 //! - Feature importance
 
 use crate::dataset::BinnedDataset;
+use crate::features::extract_selected_features;
 use crate::learner::WeakLearner;
-use crate::utils::features::extract_selected_features;
 use crate::Result;
 
 use super::{BoostingMode, UniversalModel};
