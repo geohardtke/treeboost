@@ -113,7 +113,11 @@ fn test_autotuner_generate_param_values() {
     let tuner = AutoTuner::<GBDTModel>::new(GBDTConfig::default());
 
     // Test continuous parameter
-    let param = ParamDef::new(TunableParam::Subsample, ParamBounds::continuous(0.0, 1.0), 0.5);
+    let param = ParamDef::new(
+        TunableParam::Subsample,
+        ParamBounds::continuous(0.0, 1.0),
+        0.5,
+    );
     let values = tuner.generate_param_values(&param, 0.5, 3);
     assert_eq!(values.len(), 3);
     assert!(values[0] < values[1]);
@@ -162,7 +166,8 @@ fn test_discrete_grid_dedup() {
     // After dedup, we should have only 1 unique value
     use crate::tuner::config::TunableParam;
 
-    let space = ParameterSpace::new().with_param(TunableParam::MaxDepth, ParamBounds::discrete(2, 10), 6.0);
+    let space =
+        ParameterSpace::new().with_param(TunableParam::MaxDepth, ParamBounds::discrete(2, 10), 6.0);
 
     let tuner = AutoTuner::<GBDTModel>::new(GBDTConfig::default()).with_space(space);
 
@@ -191,7 +196,11 @@ fn test_grid_level_dedup() {
 
     let space = ParameterSpace::new()
         .with_param(TunableParam::MaxDepth, ParamBounds::discrete(2, 10), 6.0)
-        .with_param(TunableParam::MinSamplesLeaf, ParamBounds::discrete(1, 10), 5.0);
+        .with_param(
+            TunableParam::MinSamplesLeaf,
+            ParamBounds::discrete(1, 10),
+            5.0,
+        );
 
     let tuner = AutoTuner::<GBDTModel>::new(GBDTConfig::default()).with_space(space);
 
@@ -212,7 +221,11 @@ fn test_lhs_determinism() {
     use crate::tuner::config::TunableParam;
 
     let space = ParameterSpace::new()
-        .with_param(TunableParam::LearningRate, ParamBounds::log_continuous(0.01, 0.5), 0.1)
+        .with_param(
+            TunableParam::LearningRate,
+            ParamBounds::log_continuous(0.01, 0.5),
+            0.1,
+        )
         .with_param(TunableParam::MaxDepth, ParamBounds::discrete(2, 12), 6.0);
 
     let tuner1 = AutoTuner::<GBDTModel>::new(GBDTConfig::default())
@@ -242,8 +255,16 @@ fn test_lhs_sample_count() {
     use crate::tuner::config::TunableParam;
 
     let space = ParameterSpace::new()
-        .with_param(TunableParam::LearningRate, ParamBounds::continuous(0.01, 0.5), 0.1)
-        .with_param(TunableParam::Subsample, ParamBounds::continuous(0.5, 1.0), 0.8);
+        .with_param(
+            TunableParam::LearningRate,
+            ParamBounds::continuous(0.01, 0.5),
+            0.1,
+        )
+        .with_param(
+            TunableParam::Subsample,
+            ParamBounds::continuous(0.5, 1.0),
+            0.8,
+        );
 
     let tuner = AutoTuner::<GBDTModel>::new(GBDTConfig::default())
         .with_space(space)
@@ -263,7 +284,11 @@ fn test_lhs_bounds_respected() {
     use crate::tuner::config::TunableParam;
 
     let space = ParameterSpace::new()
-        .with_param(TunableParam::LearningRate, ParamBounds::continuous(0.01, 0.5), 0.1)
+        .with_param(
+            TunableParam::LearningRate,
+            ParamBounds::continuous(0.01, 0.5),
+            0.1,
+        )
         .with_param(TunableParam::MaxDepth, ParamBounds::discrete(2, 12), 6.0);
 
     let tuner = AutoTuner::<GBDTModel>::new(GBDTConfig::default())
@@ -295,7 +320,11 @@ fn test_lhs_stratification() {
     // Each stratum should be sampled exactly once
     use crate::tuner::config::TunableParam;
 
-    let space = ParameterSpace::new().with_param(TunableParam::Subsample, ParamBounds::continuous(0.0, 1.0), 0.5);
+    let space = ParameterSpace::new().with_param(
+        TunableParam::Subsample,
+        ParamBounds::continuous(0.0, 1.0),
+        0.5,
+    );
 
     let tuner = AutoTuner::<GBDTModel>::new(GBDTConfig::default())
         .with_space(space)
@@ -330,8 +359,16 @@ fn test_random_determinism() {
     use crate::tuner::config::TunableParam;
 
     let space = ParameterSpace::new()
-        .with_param(TunableParam::LearningRate, ParamBounds::log_continuous(0.01, 0.5), 0.1)
-        .with_param(TunableParam::Lambda, ParamBounds::continuous(0.0, 10.0), 1.0);
+        .with_param(
+            TunableParam::LearningRate,
+            ParamBounds::log_continuous(0.01, 0.5),
+            0.1,
+        )
+        .with_param(
+            TunableParam::Lambda,
+            ParamBounds::continuous(0.0, 10.0),
+            1.0,
+        );
 
     let tuner1 = AutoTuner::<GBDTModel>::new(GBDTConfig::default())
         .with_space(space.clone())
@@ -374,8 +411,16 @@ fn test_random_bounds_respected() {
     use crate::tuner::config::TunableParam;
 
     let space = ParameterSpace::new()
-        .with_param(TunableParam::Subsample, ParamBounds::continuous(0.5, 1.0), 0.8)
-        .with_param(TunableParam::EntropyWeight, ParamBounds::continuous(0.0, 0.5), 0.1);
+        .with_param(
+            TunableParam::Subsample,
+            ParamBounds::continuous(0.5, 1.0),
+            0.8,
+        )
+        .with_param(
+            TunableParam::EntropyWeight,
+            ParamBounds::continuous(0.0, 0.5),
+            0.1,
+        );
 
     let tuner = AutoTuner::<GBDTModel>::new(GBDTConfig::default())
         .with_space(space)
@@ -467,7 +512,11 @@ fn test_log_scale_sampling() {
 fn test_spread_affects_range() {
     use crate::tuner::config::TunableParam;
 
-    let space = ParameterSpace::new().with_param(TunableParam::Colsample, ParamBounds::continuous(0.0, 1.0), 0.5);
+    let space = ParameterSpace::new().with_param(
+        TunableParam::Colsample,
+        ParamBounds::continuous(0.0, 1.0),
+        0.5,
+    );
 
     let tuner = AutoTuner::<GBDTModel>::new(GBDTConfig::default())
         .with_space(space)
@@ -475,13 +524,25 @@ fn test_spread_affects_range() {
 
     // Wide spread
     let wide = tuner.generate_random_grid(1.0, 100);
-    let wide_range: f32 = wide.iter().map(|c| c["colsample"]).fold(0.0_f32, |a, b| a.max(b))
-        - wide.iter().map(|c| c["colsample"]).fold(1.0_f32, |a, b| a.min(b));
+    let wide_range: f32 = wide
+        .iter()
+        .map(|c| c["colsample"])
+        .fold(0.0_f32, |a, b| a.max(b))
+        - wide
+            .iter()
+            .map(|c| c["colsample"])
+            .fold(1.0_f32, |a, b| a.min(b));
 
     // Narrow spread
     let narrow = tuner.generate_random_grid(0.1, 100);
-    let narrow_range: f32 = narrow.iter().map(|c| c["colsample"]).fold(0.0_f32, |a, b| a.max(b))
-        - narrow.iter().map(|c| c["colsample"]).fold(1.0_f32, |a, b| a.min(b));
+    let narrow_range: f32 = narrow
+        .iter()
+        .map(|c| c["colsample"])
+        .fold(0.0_f32, |a, b| a.max(b))
+        - narrow
+            .iter()
+            .map(|c| c["colsample"])
+            .fold(1.0_f32, |a, b| a.min(b));
 
     assert!(
         wide_range > narrow_range,

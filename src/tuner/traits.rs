@@ -348,7 +348,11 @@ mod tests {
 
         // Create a parameter space with both numeric and categorical params
         let space = ParameterSpace::new()
-            .with_param(TunableParam::LearningRate, ParamBounds::continuous(0.01, 0.5), 0.1)
+            .with_param(
+                TunableParam::LearningRate,
+                ParamBounds::continuous(0.01, 0.5),
+                0.1,
+            )
             .with_param(
                 TunableParam::Mode,
                 ParamBounds::categorical(vec![

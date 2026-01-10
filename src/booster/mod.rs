@@ -12,12 +12,12 @@
 //! - `analysis`: Feature importance and model analysis
 //! - `conformal`: Conformal prediction intervals
 
-mod config;
-mod gbdt;
-pub mod training;
-pub mod prediction;
 pub mod analysis;
+mod config;
 pub mod conformal;
+mod gbdt;
+pub mod prediction;
+pub mod training;
 
 pub use config::{GBDTConfig, GbdtPreset, LossType};
 pub use gbdt::GBDTModel;

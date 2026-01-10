@@ -58,9 +58,12 @@
 pub mod config;
 pub mod mode;
 
-// Core implementation (UniversalModel struct and all impls)
-// Kept together to avoid tight coupling between split files
-mod core;
+// Core implementation modules (split for maintainability)
+mod core; // Struct definition, accessors, helpers
+mod incremental; // Incremental updates and TRB format
+mod prediction; // Prediction methods
+mod serialization;
+mod training; // Training methods // TunableModel impl and tests
 
 // Re-export everything from core
 pub use core::{IncrementalUpdateReport, UniversalModel};
@@ -70,9 +73,12 @@ pub use config::{StackingStrategy, UniversalConfig, UniversalPreset};
 pub use mode::{BoostingMode, ModeSelection};
 
 // Implementation Note:
-// UniversalModel struct and impl blocks are kept in core.rs rather than being
-// split into training.rs, prediction.rs, etc. While further splitting would
-// reduce file size, it creates tight coupling between files (methods calling
-// each other) and increases complexity. The current organization (enums + config
-// extracted to separate files) provides clear structure while keeping related
-// functionality together.
+// Phase 2 split: UniversalModel implementation is now organized into logical modules:
+// - core.rs: Struct definition (~640 lines) + basic accessors + helpers
+// - training.rs: All train*() methods (~500 lines)
+// - prediction.rs: All predict*() and analysis methods (~700 lines)
+// - incremental.rs: update() and TRB save/load (~350 lines)
+// - serialization.rs: TunableModel impl + tests (~600 lines)
+//
+// This split maintains clean module boundaries while keeping implementation details
+// within each module. Cross-module calls use pub(super) visibility.

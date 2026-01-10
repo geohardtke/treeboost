@@ -13,7 +13,7 @@ use std::path::Path;
 use crate::booster::GBDTConfig;
 use crate::dataset::{BinnedDataset, ColumnPermutation, FeatureInfo};
 use crate::tree::Tree;
-use crate::tuner::{TunableModel, ParamValue};
+use crate::tuner::{ParamValue, TunableModel};
 use crate::Result;
 use rkyv::{Archive, Deserialize, Serialize};
 

@@ -30,8 +30,7 @@ impl GBDTModel {
 mod tests {
     use super::*;
     use crate::booster::GBDTConfig;
-    use crate::dataset::FeatureInfo;
-    use crate::dataset::FeatureType;
+    use crate::dataset::{BinnedDataset, FeatureInfo, FeatureType};
 
     fn create_regression_dataset(num_rows: usize, noise: f32) -> BinnedDataset {
         let num_features = 3;

@@ -262,7 +262,9 @@ mod tests {
     fn test_backend_config_scalar() {
         let config = BackendConfig::scalar();
         let selector = BackendSelector::with_config(config);
-        let backend = selector.select(1_000_000).expect("failed to select backend");
+        let backend = selector
+            .select(1_000_000)
+            .expect("failed to select backend");
         assert!(backend.name().starts_with("Scalar"));
     }
 

@@ -1848,7 +1848,11 @@ mod tests {
 
     #[test]
     fn test_param_def() {
-        let mut param = ParamDef::new(TunableParam::MaxDepth, ParamBounds::continuous(0.0, 10.0), 5.0);
+        let mut param = ParamDef::new(
+            TunableParam::MaxDepth,
+            ParamBounds::continuous(0.0, 10.0),
+            5.0,
+        );
         assert_eq!(param.name, TunableParam::MaxDepth);
         assert_eq!(param.center, 5.0);
 

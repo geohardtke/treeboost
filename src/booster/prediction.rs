@@ -515,7 +515,11 @@ impl GBDTModel {
     pub fn predict_raw_multiclass_raw(&self, features: &[f64]) -> Vec<Vec<f32>> {
         if self.num_classes == 0 {
             // Not a multi-class model
-            return self.predict_raw(features).into_iter().map(|p| vec![p]).collect();
+            return self
+                .predict_raw(features)
+                .into_iter()
+                .map(|p| vec![p])
+                .collect();
         }
 
         let num_features = self.num_features();
