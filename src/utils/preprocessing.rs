@@ -553,8 +553,7 @@ mod tests {
         }
         .unwrap();
 
-        let (encoded_df, encoder) =
-            apply_label_encoder(df, vec!["cat".to_string()], None).unwrap();
+        let (encoded_df, encoder) = apply_label_encoder(df, vec!["cat".to_string()], None).unwrap();
 
         assert!(encoder.is_fitted());
         assert_eq!(encoded_df.height(), 5);

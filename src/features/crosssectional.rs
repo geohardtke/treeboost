@@ -81,9 +81,7 @@ pub fn apply_crosssectional_features_with_include(
             .iter()
             .filter(|s| {
                 let name = s.name().as_str();
-                s.dtype().is_numeric()
-                    && name != group_col
-                    && !exclude_cols.contains(&name)
+                s.dtype().is_numeric() && name != group_col && !exclude_cols.contains(&name)
             })
             .map(|s| s.name().to_string())
             .collect()
@@ -93,125 +91,96 @@ pub fn apply_crosssectional_features_with_include(
         return Ok(df.clone());
     }
 
-    // Start with original dataframe
+    // OPTIMIZED: Use Polars native groupby operations instead of manual iteration
+    // This is O(n log n) instead of O(features × groups × rows)
     let mut result = df.clone();
 
+    // HYBRID APPROACH: Use Polars window functions where possible
     // For each numeric column, compute transformations
     for col_name_str in &numeric_cols {
         let col_name = col_name_str.as_str();
 
-        // Get group column and feature column
-        let group_series = result.column(group_col)?;
-        let feature_series = result.column(col_name)?;
-        let feature_f64 = feature_series.cast(&DataType::Float64)?;
-        let feature_vals = feature_f64.f64()?;
+        // Use Polars LazyFrame for optimized window functions
+        let lazy = result.clone().lazy();
 
-        let n_rows = result.height();
+        // Compute group-wise statistics using window functions (FAST!)
+        let mean_expr = col(col_name).mean().over([col(group_col)]);
+        let std_expr = col(col_name).std(1).over([col(group_col)]);
+        let median_expr = col(col_name).median().over([col(group_col)]);
 
-        // Initialize output arrays
-        let mut rank_vals = vec![0.0; n_rows];
-        let mut zscore_vals = vec![0.0; n_rows];
-        let mut median_diff_vals = vec![0.0; n_rows];
+        // Z-score: (x - mean) / std
+        let zscore_expr = when(std_expr.clone().gt(lit(0.0)))
+            .then((col(col_name) - mean_expr.clone()) / std_expr)
+            .otherwise(lit(0.0))
+            .alias(&format!("{}_zscore", col_name));
 
-        // Get unique groups
-        let unique_groups = group_series.unique()?;
-        let n_groups = unique_groups.len();
+        // Median difference: x - median
+        let median_diff_expr =
+            (col(col_name) - median_expr).alias(&format!("{}_vs_median", col_name));
 
-        // Process each group
-        for i in 0..n_groups {
-            let group_val = unique_groups.get(i).unwrap();
+        // Apply window functions
+        let result_with_stats = lazy
+            .with_columns([zscore_expr, median_diff_expr])
+            .collect()?;
 
-            // Find rows in this group by comparing values directly
-            let indices: Vec<usize> = (0..n_rows)
-                .filter(|&row_idx| {
-                    if let Ok(val) = group_series.get(row_idx) {
-                        val == group_val
-                    } else {
-                        false
-                    }
-                })
-                .collect();
+        // For ranking, use Polars native rank().over() window function
+        // This provides optimal performance for grouped percentile ranking
+        let rank_col = compute_group_ranks(&result_with_stats, col_name, group_col)?;
 
-            if indices.is_empty() {
-                continue;
-            }
-
-            // Extract group values
-            let group_vals: Vec<f64> = indices
-                .iter()
-                .filter_map(|&idx| feature_vals.get(idx))
-                .collect();
-
-            if group_vals.is_empty() {
-                continue;
-            }
-
-            // Compute statistics
-            let mean: f64 = group_vals.iter().sum::<f64>() / group_vals.len() as f64;
-            let var: f64 = group_vals.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
-                / group_vals.len() as f64;
-            let std = var.sqrt();
-
-            let mut sorted_vals = group_vals.clone();
-            sorted_vals.sort_by(|a, b| {
-                match (a.is_nan(), b.is_nan()) {
-                    (true, true) => std::cmp::Ordering::Equal,
-                    (true, false) => std::cmp::Ordering::Greater, // NaN goes to end
-                    (false, true) => std::cmp::Ordering::Less,
-                    (false, false) => a.partial_cmp(b).unwrap(),
-                }
-            });
-            let median = if sorted_vals.len() % 2 == 0 {
-                let mid = sorted_vals.len() / 2;
-                (sorted_vals[mid - 1] + sorted_vals[mid]) / 2.0
-            } else {
-                sorted_vals[sorted_vals.len() / 2]
-            };
-
-            // Compute ranks for this group
-            let mut indexed_vals: Vec<(usize, f64)> = indices
-                .iter()
-                .filter_map(|&idx| feature_vals.get(idx).map(|val| (idx, val)))
-                .collect();
-            indexed_vals.sort_by(|a, b| {
-                match (a.1.is_nan(), b.1.is_nan()) {
-                    (true, true) => std::cmp::Ordering::Equal,
-                    (true, false) => std::cmp::Ordering::Greater, // NaN goes to end
-                    (false, true) => std::cmp::Ordering::Less,
-                    (false, false) => a.1.partial_cmp(&b.1).unwrap(),
-                }
-            });
-
-            // Assign percentile ranks
-            for (rank, (orig_idx, _)) in indexed_vals.iter().enumerate() {
-                let percentile = if indexed_vals.len() > 1 {
-                    rank as f64 / (indexed_vals.len() - 1) as f64
-                } else {
-                    0.5
-                };
-                rank_vals[*orig_idx] = percentile;
-            }
-
-            // Assign zscore and median diff
-            for &idx in &indices {
-                if let Some(val) = feature_vals.get(idx) {
-                    zscore_vals[idx] = if std > 0.0 { (val - mean) / std } else { 0.0 };
-                    median_diff_vals[idx] = val - median;
-                }
-            }
-        }
-
-        // Add new columns
-        let rank_series = Series::new(format!("{}_rank", col_name_str).as_str().into(), rank_vals);
-        let zscore_series = Series::new(format!("{}_zscore", col_name_str).as_str().into(), zscore_vals);
-        let median_diff_series = Series::new(format!("{}_vs_median", col_name_str).as_str().into(), median_diff_vals);
-
-        result.with_column(rank_series)?;
-        result.with_column(zscore_series)?;
-        result.with_column(median_diff_series)?;
+        result = result_with_stats;
+        result.with_column(rank_col)?;
     }
 
     Ok(result)
+}
+
+/// Compute percentile ranks within groups using Polars window functions
+/// Uses native rank() with .over() for optimal performance
+fn compute_group_ranks(df: &DataFrame, feature_col: &str, group_col: &str) -> PolarsResult<Series> {
+    // RankOptions and RankMethod are re-exported in polars::prelude
+    // (already imported at module level with use polars::prelude::*)
+
+    // Use lazy evaluation with window function for rank
+    let lazy = df.clone().lazy();
+
+    // Compute rank within each group using window functions (FAST!)
+    let result = lazy
+        .with_columns([
+            // Step 1: Compute 1-based rank within each group
+            col(feature_col)
+                .rank(
+                    RankOptions {
+                        method: RankMethod::Average,
+                        descending: false,
+                    },
+                    None,
+                )
+                .over([col(group_col)])
+                .alias("__temp_rank__"),
+            // Step 2: Get group size
+            col(feature_col)
+                .count()
+                .over([col(group_col)])
+                .alias("__group_size__"),
+        ])
+        .with_columns([
+            // Step 3: Convert rank to percentile [0, 1]
+            // rank() gives 1-based ranks, convert to 0-1 scale
+            when(col("__group_size__").gt(lit(1)))
+                .then(
+                    (col("__temp_rank__") - lit(1.0))
+                        / (col("__group_size__").cast(DataType::Float64) - lit(1.0)),
+                )
+                .otherwise(lit(0.5)) // Single-element groups get 0.5
+                .alias(&format!("{}_rank", feature_col)),
+        ])
+        .select([col(&format!("{}_rank", feature_col))])
+        .collect()?;
+
+    Ok(result
+        .column(&format!("{}_rank", feature_col))?
+        .as_materialized_series()
+        .clone())
 }
 
 #[cfg(test)]

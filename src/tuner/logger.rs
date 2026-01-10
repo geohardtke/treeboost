@@ -132,9 +132,11 @@ impl TrialLogger {
         let json = serde_json::json!({
             "trial_id": best.trial_id,
             "iteration": best.iteration,
-            "val_metric": best.val_metric,
+            "val_loss": best.val_loss,
+            "train_loss": best.train_loss,
             "f1_score": best.f1_score,
             "roc_auc": best.roc_auc,
+            "rank_ic": best.rank_ic,
             "num_trees": best.num_trees,
             "params": best.params,
         });
@@ -153,9 +155,11 @@ impl TrialLogger {
             "total_trials": history.len(),
             "duration_secs": duration_secs,
             "best_trial_id": best.map(|b| b.trial_id),
-            "best_val_metric": best.map(|b| b.val_metric),
+            "best_val_loss": best.map(|b| b.val_loss),
+            "best_train_loss": best.map(|b| b.train_loss),
             "best_f1_score": best.and_then(|b| b.f1_score),
             "best_roc_auc": best.and_then(|b| b.roc_auc),
+            "best_rank_ic": best.and_then(|b| b.rank_ic),
             "optimization_metric": format!("{:?}", history.optimization_metric()),
         });
         let file = File::create(&path)

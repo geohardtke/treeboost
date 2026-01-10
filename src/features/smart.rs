@@ -139,7 +139,11 @@ impl FeaturePlan {
             && self.ratio_pairs.is_empty()
             && self.interaction_pairs.is_empty()
             && self.time_features.is_empty()
-            && self.timeseries_features.as_ref().map(|ts| ts.is_empty()).unwrap_or(true)
+            && self
+                .timeseries_features
+                .as_ref()
+                .map(|ts| ts.is_empty())
+                .unwrap_or(true)
     }
 
     /// Total number of features to be generated (estimate)

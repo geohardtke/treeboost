@@ -141,6 +141,109 @@ pub fn split_holdout(
     }
 }
 
+/// Split indices by era for panel data (time-based holdout)
+///
+/// For panel data with era indices (e.g., stock returns by date), this function
+/// performs a TIME-BASED holdout split to prevent temporal leakage:
+///
+/// - Train set: All rows from the first (1 - validation_ratio) eras
+/// - Validation set: All rows from the last validation_ratio eras
+///
+/// This ensures the model has NEVER seen the validation time periods during training.
+///
+/// # Arguments
+/// * `era_indices` - Era index for each row (e.g., date index)
+/// * `validation_ratio` - Fraction of eras to use for validation (e.g., 0.2 = last 20% of eras)
+///
+/// # Era Ordering Assumptions
+/// - Era indices are sorted numerically (not by appearance order in the data)
+/// - Lower era values represent earlier time periods, higher values represent later periods
+/// - Era values do NOT need to be consecutive (gaps are allowed: [0, 1, 5, 9] is valid)
+/// - Era values are remapped to 0..N internally for split calculation
+///
+/// # Era Remapping Behavior
+/// The function creates a mapping of unique era values to ensure proper chronological splitting:
+/// 1. Extracts unique era values from `era_indices`
+/// 2. Sorts them numerically (e.g., [5, 1, 9, 3] → [1, 3, 5, 9])
+/// 3. Uses sorted position (not original value) to determine train/val assignment
+///
+/// Example: era_indices = [5, 1, 9, 3, 5, 1]
+/// - Unique sorted eras: [1, 3, 5, 9]
+/// - With validation_ratio=0.5: Train eras [1, 3], Val eras [5, 9]
+///
+/// # Minimum Era Requirements
+/// - At least 1 unique era required (returns empty splits if 0 eras)
+/// - Minimum 1 validation era guaranteed (even if validation_ratio rounds to 0)
+/// - If only 1 era exists: Train=[], Val=all rows (all data goes to validation)
+///
+/// # Returns
+/// HoldoutSplit with indices grouped by era. Indices within each split are sorted
+/// for cache-friendly sequential access. Calibration split is always empty (not supported).
+///
+/// # Example
+/// ```ignore
+/// // 1000 rows across 10 eras (dates), 20% validation
+/// let era_indices = vec![0; 100, 1; 100, ..., 9; 100];  // 100 rows per era
+/// let split = split_holdout_by_era(&era_indices, 0.2);
+/// // Train: eras 0-7 (800 rows), Val: eras 8-9 (200 rows)
+///
+/// // Non-consecutive eras work correctly
+/// let sparse_eras = vec![0, 0, 5, 5, 10, 10];  // Eras 0, 5, 10
+/// let split = split_holdout_by_era(&sparse_eras, 0.33);
+/// // Train: era 0 (indices 0,1), Val: eras 5,10 (indices 2,3,4,5)
+/// ```
+pub fn split_holdout_by_era(era_indices: &[u16], validation_ratio: f32) -> HoldoutSplit {
+    use std::collections::HashMap;
+
+    // Group row indices by era
+    let mut era_groups: HashMap<u16, Vec<usize>> = HashMap::new();
+    for (idx, &era) in era_indices.iter().enumerate() {
+        era_groups.entry(era).or_default().push(idx);
+    }
+
+    // Get unique eras and sort them (chronological order)
+    let mut unique_eras: Vec<u16> = era_groups.keys().copied().collect();
+    unique_eras.sort_unstable();
+
+    let num_eras = unique_eras.len();
+    if num_eras == 0 {
+        return HoldoutSplit {
+            train: vec![],
+            validation: vec![],
+            calibration: vec![],
+        };
+    }
+
+    // Calculate split point (use LAST N% of eras for validation)
+    let num_val_eras = ((num_eras as f32 * validation_ratio).ceil() as usize).max(1);
+    let split_idx = num_eras.saturating_sub(num_val_eras);
+
+    // Split eras into train and validation
+    let train_eras = &unique_eras[..split_idx];
+    let val_eras = &unique_eras[split_idx..];
+
+    // Collect row indices for each split
+    let mut train: Vec<usize> = train_eras
+        .iter()
+        .flat_map(|era| era_groups[era].iter().copied())
+        .collect();
+
+    let mut validation: Vec<usize> = val_eras
+        .iter()
+        .flat_map(|era| era_groups[era].iter().copied())
+        .collect();
+
+    // Sort for cache-friendly access
+    train.sort_unstable();
+    validation.sort_unstable();
+
+    HoldoutSplit {
+        train,
+        validation,
+        calibration: vec![], // No calibration for era-based splits
+    }
+}
+
 /// Split indices for K-fold cross-validation
 ///
 /// Partitions indices into k disjoint folds of approximately equal size.

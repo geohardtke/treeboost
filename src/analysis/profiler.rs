@@ -40,6 +40,21 @@ use std::collections::HashSet;
 // Use alias to avoid conflict with Polars DataType
 use polars::prelude::DataType as PolarsDataType;
 
+/// Check if a column name suggests it's a date/time column
+fn is_date_column_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == "date"
+        || lower == "time"
+        || lower == "datetime"
+        || lower == "timestamp"
+        || lower == "dt"
+        || lower.ends_with("_date")
+        || lower.ends_with("_time")
+        || lower.ends_with("_dt")
+        || lower.starts_with("date_")
+        || lower.starts_with("time_")
+}
+
 /// Time granularity detected from date/datetime differences
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeGranularity {
@@ -505,17 +520,40 @@ impl TaskType {
     /// Detect task type from target values
     ///
     /// Heuristic:
-    /// - 2 unique values → Binary classification
-    /// - 3-20 unique values → Multi-class classification
-    /// - >20 unique values → Regression
+    /// - 2 unique values that are close to integers → Binary classification
+    /// - 3-20 unique values that are close to integers → Multi-class classification
+    /// - Otherwise → Regression
     pub fn detect(target: &[f32]) -> Self {
-        // Count unique values (quantize to handle float comparison)
-        let unique: HashSet<i64> = target.iter().map(|v| (v * 1000.0) as i64).collect();
+        // Check if values are integer-like (for classification)
+        // A value is "integer-like" if it's very close to an integer (within 0.01)
+        let integer_like_count = target
+            .iter()
+            .filter(|&&v| (v - v.round()).abs() < 0.01)
+            .count();
 
-        match unique.len() {
+        let integer_like_ratio = integer_like_count as f32 / target.len() as f32;
+
+        // If most values are NOT integer-like, it's clearly regression
+        if integer_like_ratio < 0.9 {
+            return TaskType::Regression;
+        }
+
+        // Count unique integer values for classification
+        let unique_ints: HashSet<i32> = target
+            .iter()
+            .filter_map(|&v| {
+                if (v - v.round()).abs() < 0.01 {
+                    Some(v.round() as i32)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        match unique_ints.len() {
             2 => TaskType::BinaryClassification,
             3..=20 => TaskType::MultiClassification {
-                num_classes: unique.len(),
+                num_classes: unique_ints.len(),
             },
             _ => TaskType::Regression,
         }
@@ -579,6 +617,14 @@ impl DataFrameProfile {
     /// Pass 1: Cheap stats to identify drops (~1ms per column)
     /// Pass 2: Expensive stats only for kept columns
     pub fn analyze(df: &DataFrame, target_col: &str) -> Result<Self> {
+        Self::analyze_with_options(df, target_col, false)
+    }
+
+    pub fn analyze_with_options(
+        df: &DataFrame,
+        target_col: &str,
+        skip_correlations: bool,
+    ) -> Result<Self> {
         let num_rows = df.height();
 
         // Get target column and values
@@ -633,9 +679,14 @@ impl DataFrameProfile {
         }
 
         // === Pass 2: Expensive stats for kept columns ===
+        // OPTIMIZATION: Skip O(n*cols) correlation computation when not needed for mode selection
         for profile in &mut columns {
             let column = df.column(&profile.name).unwrap();
-            profile.analyze_pass2(column, Some(&target_values));
+            if skip_correlations {
+                profile.analyze_pass2(column, None); // Skip correlations
+            } else {
+                profile.analyze_pass2(column, Some(&target_values)); // Include correlations
+            }
         }
 
         // Count by type
@@ -734,11 +785,20 @@ impl DataFrameProfile {
     ///
     /// Returns `Some(PanelDataInfo)` if panel structure is detected with sufficient confidence.
     pub fn detect_panel_structure(&self, df: &DataFrame) -> Option<PanelDataInfo> {
-        // Step 1: Find datetime columns
+        // Step 1: Find datetime columns (DateTime dtype OR numeric/categorical columns with date-like names)
         let datetime_cols: Vec<&ColumnProfile> = self
             .columns
             .iter()
-            .filter(|p| p.dtype == ColumnDataType::DateTime)
+            .filter(|p| {
+                if p.dtype == ColumnDataType::DateTime {
+                    true
+                } else if is_date_column_name(&p.name) {
+                    // Accept Numeric (includes i64 dates) or Categorical (string dates) if name suggests date
+                    p.dtype == ColumnDataType::Numeric || p.dtype == ColumnDataType::Categorical
+                } else {
+                    false
+                }
+            })
             .collect();
 
         if datetime_cols.is_empty() {
@@ -746,14 +806,15 @@ impl DataFrameProfile {
         }
 
         // Step 2: Find candidate group columns (categorical with moderate cardinality)
-        // Good candidates: cardinality 2-1000, cardinality_ratio < 0.5
+        // Good candidates: cardinality 2-10000, cardinality_ratio < 0.5
+        // Increased threshold to 10000 to support large stock datasets (thousands of tickers)
         let group_candidates: Vec<&ColumnProfile> = self
             .columns
             .iter()
             .filter(|p| {
                 p.dtype == ColumnDataType::Categorical
                     && p.cardinality >= 2
-                    && p.cardinality <= 1000
+                    && p.cardinality <= 10000  // Increased from 1000 to support stock data
                     && p.cardinality_ratio < 0.5
             })
             .collect();
@@ -779,8 +840,16 @@ impl DataFrameProfile {
             }
         }
 
-        // Only return if confidence > 0.5
-        best_info.filter(|info| info.confidence > 0.5)
+        // Only return if confidence > 0.3 (lowered from 0.5 to support stock data)
+        // Stock/financial panel data often has irregular observations per group,
+        // leading to lower confidence scores (0.4-0.5 range)
+        if let Some(ref info) = best_info {
+            if info.confidence <= 0.3 {
+                return None;
+            }
+        }
+
+        best_info
     }
 
     /// Score a panel data candidate (group_col, date_col pair)
@@ -884,7 +953,11 @@ impl DataFrameProfile {
                 date_series
                     .cast(&PolarsDataType::Int32)
                     .ok()
-                    .and_then(|c| c.i32().ok().map(|ca| ca.into_iter().flatten().map(|v| v as f64).collect()))
+                    .and_then(|c| {
+                        c.i32()
+                            .ok()
+                            .map(|ca| ca.into_iter().flatten().map(|v| v as f64).collect())
+                    })
                     .unwrap_or_default()
             }
             PolarsDataType::Datetime(_, _) => {
@@ -1187,10 +1260,32 @@ mod tests {
         .collect();
 
         let df = DataFrame::new(vec![
-            Series::new("stock_code".into(), vec!["AAPL", "AAPL", "AAPL", "AAPL", "AAPL", "GOOGL", "GOOGL", "GOOGL", "GOOGL", "GOOGL"]).into(),
-            Series::new("date".into(), dates).cast(&PolarsDataType::Date).unwrap().into(),
-            Series::new("price".into(), vec![150.0f64, 151.0, 152.0, 151.5, 153.0, 2800.0, 2810.0, 2805.0, 2820.0, 2830.0]).into(),
-            Series::new("target".into(), vec![0.01f64, 0.02, -0.01, 0.01, 0.02, 0.01, -0.01, 0.02, 0.01, 0.01]).into(),
+            Series::new(
+                "stock_code".into(),
+                vec![
+                    "AAPL", "AAPL", "AAPL", "AAPL", "AAPL", "GOOGL", "GOOGL", "GOOGL", "GOOGL",
+                    "GOOGL",
+                ],
+            )
+            .into(),
+            Series::new("date".into(), dates)
+                .cast(&PolarsDataType::Date)
+                .unwrap()
+                .into(),
+            Series::new(
+                "price".into(),
+                vec![
+                    150.0f64, 151.0, 152.0, 151.5, 153.0, 2800.0, 2810.0, 2805.0, 2820.0, 2830.0,
+                ],
+            )
+            .into(),
+            Series::new(
+                "target".into(),
+                vec![
+                    0.01f64, 0.02, -0.01, 0.01, 0.02, 0.01, -0.01, 0.02, 0.01, 0.01,
+                ],
+            )
+            .into(),
         ])
         .unwrap();
 
@@ -1222,7 +1317,10 @@ mod tests {
         let profile = DataFrameProfile::analyze(&df, "target").unwrap();
         let panel_info = profile.detect_panel_structure(&df);
 
-        assert!(panel_info.is_none(), "Should not detect panel without datetime");
+        assert!(
+            panel_info.is_none(),
+            "Should not detect panel without datetime"
+        );
     }
 
     #[test]
@@ -1231,11 +1329,18 @@ mod tests {
 
         // Data with datetime but no group column
         let dates: Vec<i32> = (0..5)
-            .map(|i| NaiveDate::from_ymd_opt(2024, 1, i + 1).unwrap().num_days_from_ce())
+            .map(|i| {
+                NaiveDate::from_ymd_opt(2024, 1, i + 1)
+                    .unwrap()
+                    .num_days_from_ce()
+            })
             .collect();
 
         let df = DataFrame::new(vec![
-            Series::new("date".into(), dates).cast(&PolarsDataType::Date).unwrap().into(),
+            Series::new("date".into(), dates)
+                .cast(&PolarsDataType::Date)
+                .unwrap()
+                .into(),
             Series::new("value".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
             Series::new("target".into(), vec![0.0f64, 1.0, 0.0, 1.0, 0.0]).into(),
         ])
@@ -1244,6 +1349,9 @@ mod tests {
         let profile = DataFrameProfile::analyze(&df, "target").unwrap();
         let panel_info = profile.detect_panel_structure(&df);
 
-        assert!(panel_info.is_none(), "Should not detect panel without group column");
+        assert!(
+            panel_info.is_none(),
+            "Should not detect panel without group column"
+        );
     }
 }

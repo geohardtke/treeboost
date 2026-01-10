@@ -205,6 +205,174 @@ pub fn compute_roc_auc(predictions: &[f32], targets: &[f32]) -> f64 {
     auc
 }
 
+/// Compute Rank IC (Spearman rank correlation coefficient)
+///
+/// Measures the correlation between prediction ranks and target ranks.
+/// Returns a value in [-1, 1] where:
+/// - 1.0 = perfect positive correlation (predictions perfectly rank targets)
+/// - 0.0 = no correlation
+/// - -1.0 = perfect negative correlation
+///
+/// Common in quantitative finance for measuring prediction quality.
+/// Compute Rank IC (Information Coefficient)
+///
+/// For panel data (e.g., stock returns), IC should be computed per time period:
+/// IC = Σ Corr(rank(pred_t), rank(target_t)) / T
+///
+/// When `era_indices` is provided, computes IC for each era (time period) and averages.
+/// When `era_indices` is None, computes a single Spearman correlation (legacy behavior).
+pub fn compute_rank_ic(predictions: &[f32], targets: &[f32], era_indices: Option<&[u16]>) -> f64 {
+    if predictions.is_empty() || predictions.len() != targets.len() {
+        return 0.0;
+    }
+
+    let n = predictions.len();
+    if n < 2 {
+        return 0.0;
+    }
+
+    // If no era indices, compute single Spearman correlation (legacy)
+    let Some(eras) = era_indices else {
+        return compute_spearman_correlation(predictions, targets);
+    };
+
+    if eras.len() != n {
+        return 0.0;
+    }
+
+    // Group by era and compute IC for each era
+    use std::collections::HashMap;
+    let mut era_groups: HashMap<u16, (Vec<f32>, Vec<f32>)> = HashMap::new();
+
+    for i in 0..n {
+        let era = eras[i];
+        era_groups
+            .entry(era)
+            .or_insert_with(|| (Vec::new(), Vec::new()));
+        let group = era_groups.get_mut(&era).unwrap();
+        group.0.push(predictions[i]);
+        group.1.push(targets[i]);
+    }
+
+    // Compute Spearman correlation for each era
+    let mut ic_sum = 0.0;
+    let mut valid_eras = 0;
+
+    for (_era_id, (era_preds, era_targets)) in era_groups.iter() {
+        if era_preds.len() < 2 {
+            continue; // Skip eras with < 2 samples
+        }
+        let ic = compute_spearman_correlation(era_preds, era_targets);
+        // Only include if correlation is valid (not NaN)
+        if ic.is_finite() {
+            ic_sum += ic;
+            valid_eras += 1;
+        }
+    }
+
+    let avg_ic = if valid_eras == 0 {
+        0.0
+    } else {
+        ic_sum / valid_eras as f64
+    };
+
+    avg_ic
+}
+
+/// Compute Spearman rank correlation between two vectors
+fn compute_spearman_correlation(predictions: &[f32], targets: &[f32]) -> f64 {
+    let n = predictions.len();
+    if n < 2 {
+        return 0.0;
+    }
+
+    // Compute ranks for predictions
+    let pred_ranks = compute_ranks(predictions);
+    // Compute ranks for targets
+    let target_ranks = compute_ranks(targets);
+
+    // Compute Pearson correlation of ranks (which is Spearman correlation)
+    let n_f64 = n as f64;
+
+    // Mean of ranks
+    let mean_pred: f64 = pred_ranks.iter().sum::<f64>() / n_f64;
+    let mean_target: f64 = target_ranks.iter().sum::<f64>() / n_f64;
+
+    // Covariance and standard deviations
+    let mut cov = 0.0;
+    let mut var_pred = 0.0;
+    let mut var_target = 0.0;
+
+    for i in 0..n {
+        let d_pred = pred_ranks[i] - mean_pred;
+        let d_target = target_ranks[i] - mean_target;
+        cov += d_pred * d_target;
+        var_pred += d_pred * d_pred;
+        var_target += d_target * d_target;
+    }
+
+    let std_pred = var_pred.sqrt();
+    let std_target = var_target.sqrt();
+
+    // Use relative threshold based on expected rank standard deviation
+    // For n ranks, expected std dev is roughly sqrt(n²/12), so threshold scales with n
+    let epsilon = 1e-10 * n_f64;
+    if std_pred < epsilon || std_target < epsilon {
+        return 0.0; // No variation in ranks
+    }
+
+    cov / (std_pred * std_target)
+}
+
+/// Compute ranks with average rank for ties
+fn compute_ranks(values: &[f32]) -> Vec<f64> {
+    let n = values.len();
+    let mut indexed: Vec<(usize, f32)> = values.iter().copied().enumerate().collect();
+
+    // Sort by value
+    indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut ranks = vec![0.0; n];
+    let mut i = 0;
+
+    while i < n {
+        let mut j = i;
+        let base_val = indexed[i].1;
+
+        // Find all elements with the same value (ties)
+        // Use relative comparison for robustness across different value magnitudes
+        while j < n {
+            let current_val = indexed[j].1;
+            let abs_diff = (current_val - base_val).abs();
+            let scale = (base_val.abs() + current_val.abs()) / 2.0;
+
+            // Use f32::EPSILON * 4.0 as relative threshold (4x for numerical stability)
+            // Falls back to absolute threshold for values near zero
+            let threshold = if scale > 1e-6 {
+                f32::EPSILON * 4.0 * scale
+            } else {
+                f32::EPSILON * 4.0
+            };
+
+            if abs_diff >= threshold {
+                break;
+            }
+            j += 1;
+        }
+
+        // Assign average rank to all ties
+        // Ranks are 1-based: positions i..j get average of (i+1)..(j+1)
+        let avg_rank = (i + j + 1) as f64 / 2.0; // Average of (i+1) to j
+        for k in i..j {
+            ranks[indexed[k].0] = avg_rank;
+        }
+
+        i = j;
+    }
+
+    ranks
+}
+
 /// Compute Mean Squared Error
 fn compute_mse(predictions: &[f32], targets: &[f32]) -> f32 {
     let n = predictions.len() as f32;
@@ -538,5 +706,111 @@ mod tests {
         assert!((auc - 1.0).abs() < 1e-6, "Expected AUC = 1.0, got {}", auc);
         assert!(!Metric::RocAuc.lower_is_better());
         assert_eq!(Metric::RocAuc.name(), "roc_auc");
+    }
+
+    #[test]
+    fn test_rank_ic_perfect() {
+        // Perfect correlation: predictions and targets have same order
+        let predictions = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let targets = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+        let ic = compute_rank_ic(&predictions, &targets, None);
+        assert!(
+            (ic - 1.0).abs() < 1e-6,
+            "Expected Rank IC = 1.0, got {}",
+            ic
+        );
+    }
+
+    #[test]
+    fn test_rank_ic_perfect_negative() {
+        // Perfect negative correlation: opposite orders
+        let predictions = vec![5.0, 4.0, 3.0, 2.0, 1.0];
+        let targets = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+        let ic = compute_rank_ic(&predictions, &targets, None);
+        assert!(
+            (ic - (-1.0)).abs() < 1e-6,
+            "Expected Rank IC = -1.0, got {}",
+            ic
+        );
+    }
+
+    #[test]
+    fn test_rank_ic_no_correlation() {
+        // Specific case with zero correlation
+        let predictions = vec![1.0, 2.0, 3.0, 4.0];
+        let targets = vec![1.0, 3.0, 2.0, 4.0]; // Swapped middle two
+        let ic = compute_rank_ic(&predictions, &targets, None);
+        // This should give 0.8 (not exactly 0)
+        assert!(ic.abs() < 1.0, "Rank IC should be in [-1, 1], got {}", ic);
+    }
+
+    #[test]
+    fn test_rank_ic_with_ties() {
+        // Predictions with ties
+        let predictions = vec![1.0, 1.0, 3.0, 3.0];
+        let targets = vec![10.0, 20.0, 30.0, 40.0];
+        let ic = compute_rank_ic(&predictions, &targets, None);
+        // Should still give positive correlation
+        assert!(ic > 0.0, "Expected positive Rank IC, got {}", ic);
+    }
+
+    #[test]
+    fn test_rank_ic_empty() {
+        let empty: Vec<f32> = vec![];
+        let ic = compute_rank_ic(&empty, &empty, None);
+        assert!((ic - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rank_ic_single() {
+        // Single element should return 0
+        let predictions = vec![1.0];
+        let targets = vec![1.0];
+        let ic = compute_rank_ic(&predictions, &targets, None);
+        assert!((ic - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rank_ic_constant_values() {
+        // All same values should return 0 (no variation)
+        let predictions = vec![1.0, 1.0, 1.0, 1.0];
+        let targets = vec![10.0, 20.0, 30.0, 40.0];
+        let ic = compute_rank_ic(&predictions, &targets, None);
+        assert!((ic - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rank_ic_with_eras() {
+        // Test proper era-based IC calculation
+        // Era 0: perfect positive correlation (IC = 1.0)
+        // Era 1: perfect negative correlation (IC = -1.0)
+        // Average IC = 0.0
+        let predictions = vec![1.0, 2.0, 3.0, 5.0, 4.0, 3.0];
+        let targets = vec![10.0, 20.0, 30.0, 10.0, 20.0, 30.0];
+        let era_indices = vec![0, 0, 0, 1, 1, 1];
+
+        let ic = compute_rank_ic(&predictions, &targets, Some(&era_indices));
+        assert!(
+            (ic - 0.0).abs() < 1e-6,
+            "Expected average IC = 0.0, got {}",
+            ic
+        );
+    }
+
+    #[test]
+    fn test_rank_ic_with_eras_positive() {
+        // Era 0: IC ~ 1.0
+        // Era 1: IC ~ 1.0
+        // Average IC = 1.0
+        let predictions = vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0];
+        let targets = vec![10.0, 20.0, 30.0, 5.0, 10.0, 15.0];
+        let era_indices = vec![0, 0, 0, 1, 1, 1];
+
+        let ic = compute_rank_ic(&predictions, &targets, Some(&era_indices));
+        assert!(
+            (ic - 1.0).abs() < 1e-6,
+            "Expected average IC = 1.0, got {}",
+            ic
+        );
     }
 }

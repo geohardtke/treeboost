@@ -431,21 +431,18 @@ impl GBDTModel {
         // CRITICAL: Resolve BackendType::Auto to concrete backend ONCE based on full dataset
         // This prevents mixing CPU/GPU during train/val splits (bad for accuracy)
         if matches!(config.backend_type, crate::backend::BackendType::Auto) {
-            let resolved = crate::backend::BackendSelector::with_config(
-                crate::backend::BackendConfig {
+            let resolved =
+                crate::backend::BackendSelector::with_config(crate::backend::BackendConfig {
                     preferred: crate::backend::BackendType::Auto,
                     ..Default::default()
-                },
-            )
-            .select(dataset.num_rows());
+                })
+                .select(dataset.num_rows());
 
             // Update config with resolved backend (CUDA/WGPU/Scalar/etc)
             let resolved_type = match resolved.name() {
                 "CUDA" => crate::backend::BackendType::Cuda,
                 "WGPU" => crate::backend::BackendType::Wgpu,
-                "Scalar (AVX2)" | "Scalar (NEON)" | "Scalar" => {
-                    crate::backend::BackendType::Scalar
-                }
+                "Scalar (AVX2)" | "Scalar (NEON)" | "Scalar" => crate::backend::BackendType::Scalar,
                 _ => crate::backend::BackendType::Scalar, // Fallback
             };
             config.backend_type = resolved_type;
@@ -821,21 +818,18 @@ impl GBDTModel {
         // CRITICAL: Resolve BackendType::Auto to concrete backend ONCE based on full dataset
         // This prevents mixing CPU/GPU during train/val splits (bad for accuracy)
         if matches!(config.backend_type, crate::backend::BackendType::Auto) {
-            let resolved = crate::backend::BackendSelector::with_config(
-                crate::backend::BackendConfig {
+            let resolved =
+                crate::backend::BackendSelector::with_config(crate::backend::BackendConfig {
                     preferred: crate::backend::BackendType::Auto,
                     ..Default::default()
-                },
-            )
-            .select(train_dataset.num_rows());
+                })
+                .select(train_dataset.num_rows());
 
             // Update config with resolved backend (CUDA/WGPU/Scalar/etc)
             let resolved_type = match resolved.name() {
                 "CUDA" => crate::backend::BackendType::Cuda,
                 "WGPU" => crate::backend::BackendType::Wgpu,
-                "Scalar (AVX2)" | "Scalar (NEON)" | "Scalar" => {
-                    crate::backend::BackendType::Scalar
-                }
+                "Scalar (AVX2)" | "Scalar (NEON)" | "Scalar" => crate::backend::BackendType::Scalar,
                 _ => crate::backend::BackendType::Scalar, // Fallback
             };
             config.backend_type = resolved_type;

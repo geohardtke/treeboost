@@ -993,6 +993,10 @@ pub enum OptimizationMetric {
     /// Use ROC-AUC (binary classification only)
     /// Higher is better. Measures ranking quality.
     RocAuc,
+    /// Use Rank IC (regression only)
+    /// Higher is better. Spearman rank correlation between predictions and targets.
+    /// Common in quantitative finance for measuring prediction ranking quality.
+    RankIc,
 }
 
 impl OptimizationMetric {
@@ -1002,6 +1006,7 @@ impl OptimizationMetric {
             Self::ValidationLoss => false,
             Self::F1Score => true,
             Self::RocAuc => true,
+            Self::RankIc => true,
         }
     }
 
@@ -1011,6 +1016,7 @@ impl OptimizationMetric {
             Self::ValidationLoss => "validation_loss",
             Self::F1Score => "f1_score",
             Self::RocAuc => "roc_auc",
+            Self::RankIc => "rank_ic",
         }
     }
 }

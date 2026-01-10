@@ -29,7 +29,7 @@
 //! let mut tuner = AutoTuner::new(base_config)
 //!     .with_config(config)
 //!     .with_callback(|trial, current, total| {
-//!         println!("Trial {}/{}: loss = {:.5}", current, total, trial.val_metric);
+//!         println!("Trial {}/{}: loss = {:.5}", current, total, trial.val_loss);
 //!     });
 //!
 //! let (best_config, history) = tuner.tune(&dataset)?;
@@ -53,7 +53,7 @@ mod config;
 mod history;
 mod logger;
 pub mod ltt;
-mod metrics;
+pub mod metrics; // Public for external use of compute_rank_ic
 mod realistic;
 mod traits;
 mod trial;

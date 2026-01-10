@@ -33,7 +33,7 @@ fn test_data_pipeline_end_to_end() {
 
     // Process for training
     let (dataset, state, _filtered_df) = pipeline
-        .process_for_training(df.clone(), "target", Some(&["neighborhood"]))
+        .process_for_training(df.clone(), "target", Some(&["neighborhood"]), None)
         .expect("Pipeline should succeed");
 
     assert_eq!(dataset.num_rows(), 20);
@@ -119,7 +119,7 @@ fn test_pipeline_rare_category_filtering() {
     );
 
     let (_dataset, state, _filtered_df) = pipeline
-        .process_for_training(df, "target", Some(&["category"]))
+        .process_for_training(df, "target", Some(&["category"]), None)
         .expect("Pipeline should succeed");
 
     // Should have filtered rare categories
@@ -166,7 +166,7 @@ fn test_pipeline_target_encoding_prevents_leakage() {
     );
 
     let (_dataset, state, _filtered_df) = pipeline
-        .process_for_training(df, "target", Some(&["category"]))
+        .process_for_training(df, "target", Some(&["category"]), None)
         .expect("Pipeline should succeed");
 
     // With ordered encoding:
@@ -228,7 +228,7 @@ fn test_raw_prediction_equivalence() {
     // Process with data pipeline to get proper bin boundaries
     let pipeline = DataPipeline::new(PipelineConfig::new().with_num_bins(16));
     let (dataset, _state, _filtered_df) = pipeline
-        .process_for_training(df.clone(), "target", None)
+        .process_for_training(df.clone(), "target", None, None)
         .expect("Pipeline should succeed");
 
     // Train a model

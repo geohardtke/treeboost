@@ -17,7 +17,6 @@ use crate::backend::ScalarBackend;
 use crate::defaults::backend::{CUDA_HYBRID_THRESHOLD, WGPU_HYBRID_THRESHOLD};
 use crate::histogram::Histogram;
 
-
 /// Hybrid GPU backend that routes small batches to CPU for optimal performance.
 ///
 /// # Architecture
@@ -152,13 +151,8 @@ impl HistogramBackend for HybridGpuBackend {
     ) -> Vec<Vec<Histogram>> {
         // Era-based histogram building always uses underlying backend
         // (complex operation, worth GPU overhead)
-        self.gpu_backend.build_era_histograms(
-            bins,
-            grad_hess,
-            row_indices,
-            era_indices,
-            num_eras,
-        )
+        self.gpu_backend
+            .build_era_histograms(bins, grad_hess, row_indices, era_indices, num_eras)
     }
 }
 

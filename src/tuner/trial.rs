@@ -11,10 +11,11 @@ pub struct TrialResult {
     pub iteration: usize,
     /// Hyperparameter values used
     pub params: HashMap<String, f32>,
-    /// Validation metric (lower is better for MSE/LogLoss)
-    pub val_metric: f32,
-    /// Training metric
-    pub train_metric: f32,
+    /// Validation loss (MSE for regression, LogLoss for classification)
+    /// Lower is better. This is NOT the optimization metric - see f1_score, roc_auc, rank_ic.
+    pub val_loss: f32,
+    /// Training loss (MSE for regression, LogLoss for classification)
+    pub train_loss: f32,
     /// Number of trees actually trained (may be < num_rounds if early stopped)
     pub num_trees: usize,
     /// Training time in milliseconds
@@ -29,6 +30,11 @@ pub struct TrialResult {
     ///
     /// Area Under the ROC Curve measures ranking quality.
     pub roc_auc: Option<f64>,
+    /// Rank IC (Spearman correlation) for regression (None for classification)
+    ///
+    /// Measures correlation between prediction ranks and target ranks.
+    /// Common in quantitative finance for measuring prediction quality.
+    pub rank_ic: Option<f64>,
 }
 
 impl TrialResult {
@@ -37,10 +43,11 @@ impl TrialResult {
         &[
             "trial_id",
             "iteration",
-            "val_metric",
-            "train_metric",
+            "val_loss",   // Renamed from val_metric - actual loss value (MSE/LogLoss)
+            "train_loss", // Renamed from train_metric
             "f1_score",
             "roc_auc",
+            "rank_ic",
             "num_trees",
             "train_time_ms",
         ]
@@ -51,13 +58,16 @@ impl TrialResult {
         vec![
             self.trial_id.to_string(),
             self.iteration.to_string(),
-            format!("{:.6}", self.val_metric),
-            format!("{:.6}", self.train_metric),
+            format!("{:.6}", self.val_loss),
+            format!("{:.6}", self.train_loss),
             self.f1_score
                 .map(|f| format!("{:.4}", f))
                 .unwrap_or_default(),
             self.roc_auc
                 .map(|a| format!("{:.6}", a))
+                .unwrap_or_default(),
+            self.rank_ic
+                .map(|r| format!("{:.6}", r))
                 .unwrap_or_default(),
             self.num_trees.to_string(),
             self.train_time_ms.to_string(),

@@ -48,7 +48,10 @@ pub use smart::{
     FeaturePlan, LttFeaturePlan, SmartFeatureConfig, SmartFeatureEngine, SmartFeaturePreset,
     TimeFeatureType, TimeSeriesFeaturePlan,
 };
-pub use timeseries::{EwmaGenerator, LagGenerator, MomentumGenerator, NaNStrategy, RollingGenerator, RollingStat, SeasonalComponent, SeasonalGenerator};
+pub use timeseries::{
+    EwmaGenerator, LagGenerator, MomentumGenerator, NaNStrategy, RollingGenerator, RollingStat,
+    SeasonalComponent, SeasonalGenerator,
+};
 pub use timeseries_grouped::{GroupedTimeSeriesConfig, GroupedTimeSeriesGenerator};
 
 /// Trait for feature generation strategies

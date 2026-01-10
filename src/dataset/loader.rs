@@ -100,6 +100,125 @@ impl DatasetLoader {
         Ok(BinnedDataset::new(num_rows, features, targets, all_info))
     }
 
+    /// Convert a Polars DataFrame to BinnedDataset with era indices (for panel data)
+    ///
+    /// # Arguments
+    /// * `df` - The DataFrame to convert
+    /// * `target_column` - Name of the target column
+    /// * `feature_columns` - Optional list of feature column names (None = all except target and era)
+    /// * `era_column` - Name of the column containing era/time information
+    ///
+    /// Era values will be mapped to sequential u16 indices (0, 1, 2, ...)
+    pub fn from_dataframe_with_eras(
+        &self,
+        df: DataFrame,
+        target_column: &str,
+        feature_columns: Option<&[&str]>,
+        era_column: &str,
+    ) -> Result<BinnedDataset> {
+        let num_rows = df.height();
+
+        // Extract target column
+        let target_col = df.column(target_column).map_err(|e| {
+            TreeBoostError::Data(format!(
+                "Target column '{}' not found: {}",
+                target_column, e
+            ))
+        })?;
+        let target_series = target_col.as_materialized_series();
+        let targets = self.series_to_f32(target_series)?;
+
+        // Extract era column and map to sequential indices
+        let era_col = df.column(era_column).map_err(|e| {
+            TreeBoostError::Data(format!("Era column '{}' not found: {}", era_column, e))
+        })?;
+        let era_series = era_col.as_materialized_series();
+        let era_indices = self.extract_era_indices(era_series)?;
+
+        // Determine feature columns (exclude both target and era)
+        let feature_names: Vec<String> = match feature_columns {
+            Some(cols) => cols.iter().map(|s| s.to_string()).collect(),
+            None => df
+                .get_column_names()
+                .into_iter()
+                .filter(|name| *name != target_column && *name != era_column)
+                .map(|s| s.to_string())
+                .collect(),
+        };
+
+        // Process each feature column
+        let mut all_binned: Vec<Vec<u8>> = Vec::with_capacity(feature_names.len());
+        let mut all_info: Vec<FeatureInfo> = Vec::with_capacity(feature_names.len());
+
+        for name in &feature_names {
+            let col = df.column(name.as_str()).map_err(|e| {
+                TreeBoostError::Data(format!("Feature column '{}' not found: {}", name, e))
+            })?;
+            let series = col.as_materialized_series();
+
+            let (binned, info) = self.process_series(name.clone(), series)?;
+            all_binned.push(binned);
+            all_info.push(info);
+        }
+
+        // Flatten to column-major layout
+        let mut features = Vec::with_capacity(num_rows * all_binned.len());
+        for binned_col in all_binned {
+            features.extend(binned_col);
+        }
+
+        Ok(BinnedDataset::new_with_eras(
+            num_rows,
+            features,
+            targets,
+            all_info,
+            era_indices,
+        ))
+    }
+
+    /// Extract era indices from a series and map to sequential u16 values
+    ///
+    /// Handles both numeric and categorical era columns.
+    /// Returns a vector where era_indices[i] is the era index for row i.
+    fn extract_era_indices(&self, series: &Series) -> Result<Vec<u16>> {
+        use std::collections::HashMap;
+
+        // Convert to string for generic handling
+        let str_series = series.cast(&DataType::String).map_err(|e| {
+            TreeBoostError::Data(format!("Failed to cast era column to string: {}", e))
+        })?;
+
+        let str_ca = str_series.str().map_err(|e| {
+            TreeBoostError::Data(format!(
+                "Failed to get string chunked from era column: {}",
+                e
+            ))
+        })?;
+
+        // Build mapping from unique era values to sequential indices
+        let mut era_map: HashMap<String, u16> = HashMap::new();
+        let mut next_idx = 0u16;
+
+        let indices: Vec<u16> = str_ca
+            .into_iter()
+            .map(|opt| {
+                opt.map_or(0, |s| {
+                    *era_map.entry(s.to_string()).or_insert_with(|| {
+                        let idx = next_idx;
+                        next_idx = next_idx.saturating_add(1);
+                        if next_idx == 0 {
+                            // Overflow - u16 max is 65535
+                            panic!("Era count exceeds u16::MAX (65535). Use fewer eras.");
+                        }
+                        idx
+                    })
+                })
+            })
+            .collect();
+
+        Ok(indices)
+    }
+
     /// Process a single series into binned values
     fn process_series(&self, name: String, series: &Series) -> Result<(Vec<u8>, FeatureInfo)> {
         match series.dtype() {

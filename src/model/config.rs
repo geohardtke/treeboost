@@ -12,6 +12,7 @@ use crate::model::progress::{ProgressCallback, QuietProgress};
 use crate::model::{BoostingMode, UniversalModel};
 use crate::preprocessing::PreprocessingPlan;
 use crate::tuner::ltt::LttTuningResult;
+use crate::tuner::{OptimizationMetric, TaskType as TunerTaskType};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -424,6 +425,19 @@ pub struct TreeTunerConfig {
     pub min_f1_score: f32,
     /// Optional output directory for CSV logging (None = no logging)
     pub output_dir: Option<std::path::PathBuf>,
+    /// Metric to optimize (ValidationLoss, F1Score, RocAuc, RankIc)
+    ///
+    /// - `ValidationLoss`: Use val_metric (lower is better) - default
+    /// - `F1Score`: Use F1 score (higher is better) - classification
+    /// - `RocAuc`: Use ROC-AUC (higher is better) - binary classification
+    /// - `RankIc`: Use Rank IC (higher is better) - regression
+    pub optimization_metric: OptimizationMetric,
+    /// Task type (Regression, BinaryClassification, MultiClassClassification)
+    ///
+    /// When set to Some, overrides the profile-detected task type.
+    /// Use this to explicitly set regression for stock/quant data where
+    /// Rank IC should be computed.
+    pub task_type: Option<TunerTaskType>,
 }
 
 /// Presets for tree tuner configuration.
@@ -450,6 +464,8 @@ impl TreeTunerConfig {
             improvement_threshold: 0.001,
             min_f1_score: 0.80,
             output_dir: None,
+            optimization_metric: OptimizationMetric::ValidationLoss,
+            task_type: None, // Use profile detection
         }
     }
 
@@ -465,6 +481,8 @@ impl TreeTunerConfig {
             improvement_threshold: 0.001,
             min_f1_score: 0.85,
             output_dir: None,
+            optimization_metric: OptimizationMetric::ValidationLoss,
+            task_type: None, // Use profile detection
         }
     }
 
@@ -480,7 +498,21 @@ impl TreeTunerConfig {
             improvement_threshold: 0.001,
             min_f1_score: 0.85,
             output_dir: None,
+            optimization_metric: OptimizationMetric::ValidationLoss,
+            task_type: None, // Use profile detection
         }
+    }
+
+    /// Set the optimization metric
+    pub fn with_optimization_metric(mut self, metric: OptimizationMetric) -> Self {
+        self.optimization_metric = metric;
+        self
+    }
+
+    /// Set the task type explicitly (overrides profile detection)
+    pub fn with_task_type(mut self, task_type: TunerTaskType) -> Self {
+        self.task_type = Some(task_type);
+        self
     }
 
     /// Apply a preset configuration.

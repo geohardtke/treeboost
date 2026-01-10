@@ -183,7 +183,12 @@ pub fn apply_timeseries_features(
     let mut generator = GroupedTimeSeriesGenerator::new(config);
 
     // Fit and transform
-    generator.fit(&group_ids, &timestamps, (0..num_features).collect(), feature_cols)?;
+    generator.fit(
+        &group_ids,
+        &timestamps,
+        (0..num_features).collect(),
+        feature_cols,
+    )?;
     let (new_features, new_names) = generator.transform(&feature_data, num_features)?;
 
     if new_features.is_empty() {
@@ -595,13 +600,17 @@ mod tests {
         .unwrap();
 
         let gen = PolynomialGenerator::new(); // Default: x², sqrt
-        let result = apply_polynomial_features(df.clone(), &gen, Some(vec!["x".to_string()]))
-            .unwrap();
+        let result =
+            apply_polynomial_features(df.clone(), &gen, Some(vec!["x".to_string()])).unwrap();
 
         // Should have original 2 columns + 2 new polynomial features for 'x'
         assert_eq!(result.width(), 4);
         assert_eq!(result.height(), 3);
-        let col_names: Vec<String> = result.get_column_names().iter().map(|s| s.to_string()).collect();
+        let col_names: Vec<String> = result
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert!(col_names.contains(&"x_sq".to_string()));
         assert!(col_names.contains(&"x_sqrt".to_string()));
     }
@@ -620,7 +629,11 @@ mod tests {
         // Should have original 2 columns + 1 ratio column
         assert_eq!(result.width(), 3);
         assert_eq!(result.height(), 3);
-        let col_names: Vec<String> = result.get_column_names().iter().map(|s| s.to_string()).collect();
+        let col_names: Vec<String> = result
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert!(col_names.contains(&"a_div_b".to_string()));
     }
 
@@ -638,7 +651,11 @@ mod tests {
         // Should have original 2 columns + 1 interaction column
         assert_eq!(result.width(), 3);
         assert_eq!(result.height(), 3);
-        let col_names: Vec<String> = result.get_column_names().iter().map(|s| s.to_string()).collect();
+        let col_names: Vec<String> = result
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert!(col_names.contains(&"a_mul_b".to_string()));
     }
 }

@@ -360,14 +360,26 @@ impl DatasetAnalysis {
 
         // --- Sample indices for efficiency ---
         let sample_indices: Option<Vec<usize>> = if num_rows > config.max_sample_rows {
-            use rand::seq::SliceRandom;
+            use rand::Rng;
             use rand::SeedableRng;
 
+            // OPTIMIZED: Reservoir sampling instead of shuffle
             let mut rng = rand::rngs::StdRng::seed_from_u64(config.seed);
-            let mut indices: Vec<usize> = (0..num_rows).collect();
-            indices.shuffle(&mut rng);
-            indices.truncate(config.max_sample_rows);
-            indices.sort();
+            let mut indices: Vec<usize> = Vec::with_capacity(config.max_sample_rows);
+
+            // Reservoir sampling: uniform random sample in single pass
+            for i in 0..config.max_sample_rows.min(num_rows) {
+                indices.push(i);
+            }
+
+            for i in config.max_sample_rows..num_rows {
+                let j = rng.gen_range(0..=i);
+                if j < config.max_sample_rows {
+                    indices[j] = i;
+                }
+            }
+
+            indices.sort(); // Keep sorted for cache efficiency
             Some(indices)
         } else {
             None
@@ -567,13 +579,27 @@ impl DatasetAnalysis {
 
         // --- Sample indices for efficiency ---
         let sample_indices: Option<Vec<usize>> = if num_rows > config.max_sample_rows {
-            use rand::seq::SliceRandom;
+            use rand::Rng;
             use rand::SeedableRng;
 
+            // OPTIMIZED: Direct random sampling instead of shuffle
+            // Old: O(n) create + O(n log n) shuffle for 3.48M elements
+            // New: O(n) reservoir sampling with O(k) memory for k=20k samples
             let mut rng = rand::rngs::StdRng::seed_from_u64(config.seed);
-            let mut indices: Vec<usize> = (0..num_rows).collect();
-            indices.shuffle(&mut rng);
-            indices.truncate(config.max_sample_rows);
+            let mut indices: Vec<usize> = Vec::with_capacity(config.max_sample_rows);
+
+            // Reservoir sampling: uniform random sample in single pass
+            for i in 0..config.max_sample_rows.min(num_rows) {
+                indices.push(i);
+            }
+
+            for i in config.max_sample_rows..num_rows {
+                let j = rng.gen_range(0..=i);
+                if j < config.max_sample_rows {
+                    indices[j] = i;
+                }
+            }
+
             indices.sort(); // Keep sorted for cache efficiency
             Some(indices)
         } else {
@@ -1073,13 +1099,20 @@ fn extract_sample_features(dataset: &BinnedDataset, indices: &[usize]) -> Vec<f3
     let feature_info = dataset.all_feature_info();
     let mut features = vec![0.0f32; indices.len() * num_features];
 
+    // OPTIMIZED: Pre-compute lookup tables (same as extract_features_for_probe)
+    let bin_tables: Vec<Vec<f32>> = feature_info
+        .iter()
+        .map(|info| {
+            (0..256)
+                .map(|bin| bin_to_raw(bin, &info.bin_boundaries))
+                .collect()
+        })
+        .collect();
+
     for (out_idx, &row_idx) in indices.iter().enumerate() {
         for f in 0..num_features {
             let bin = dataset.get_bin(row_idx, f) as usize;
-            let boundaries = &feature_info[f].bin_boundaries;
-
-            let raw_value = bin_to_raw(bin, boundaries);
-            features[out_idx * num_features + f] = raw_value;
+            features[out_idx * num_features + f] = bin_tables[f][bin];
         }
     }
 
@@ -1092,13 +1125,21 @@ fn extract_all_features(dataset: &BinnedDataset) -> Vec<f32> {
     let feature_info = dataset.all_feature_info();
     let mut features = vec![0.0f32; num_rows * num_features];
 
+    // OPTIMIZED: Pre-compute lookup tables
+    let bin_tables: Vec<Vec<f32>> = feature_info
+        .iter()
+        .map(|info| {
+            (0..256)
+                .map(|bin| bin_to_raw(bin, &info.bin_boundaries))
+                .collect()
+        })
+        .collect();
+
+    // Fast lookup: O(1) per cell instead of O(branches)
     for r in 0..num_rows {
         for f in 0..num_features {
             let bin = dataset.get_bin(r, f) as usize;
-            let boundaries = &feature_info[f].bin_boundaries;
-
-            let raw_value = bin_to_raw(bin, boundaries);
-            features[r * num_features + f] = raw_value;
+            features[r * num_features + f] = bin_tables[f][bin];
         }
     }
 

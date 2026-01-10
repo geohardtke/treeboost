@@ -256,26 +256,40 @@ fn extract_features_for_probe(
     let mut features = vec![0.0f32; num_samples * num_features];
     let mut targets = Vec::with_capacity(num_samples);
 
+    // OPTIMIZED: Pre-compute bin-to-value lookup tables (one per feature)
+    let bin_tables: Vec<Vec<f32>> = feature_info
+        .iter()
+        .map(|info| {
+            let boundaries = &info.bin_boundaries;
+            if boundaries.is_empty() {
+                // No boundaries: bin value is the raw value
+                (0..256).map(|b| b as f32).collect()
+            } else {
+                let mut table = Vec::with_capacity(256);
+                for bin in 0..256 {
+                    let raw_value = if bin == 0 {
+                        boundaries.first().copied().unwrap_or(0.0) as f32
+                    } else if bin >= boundaries.len() {
+                        boundaries.last().copied().unwrap_or(0.0) as f32
+                    } else {
+                        // Midpoint
+                        ((boundaries[bin - 1] + boundaries[bin.min(boundaries.len() - 1)]) / 2.0)
+                            as f32
+                    };
+                    table.push(raw_value);
+                }
+                table
+            }
+        })
+        .collect();
+
+    // Fast lookup: O(1) per cell instead of O(branches)
     for (out_idx, &row_idx) in indices.iter().enumerate() {
         targets.push(all_targets[row_idx]);
 
         for f in 0..num_features {
             let bin = dataset.get_bin(row_idx, f) as usize;
-            let boundaries = &feature_info[f].bin_boundaries;
-
-            // Convert bin to approximate raw value
-            let raw_value = if boundaries.is_empty() {
-                bin as f32
-            } else if bin == 0 {
-                boundaries.first().copied().unwrap_or(0.0) as f32
-            } else if bin >= boundaries.len() {
-                boundaries.last().copied().unwrap_or(0.0) as f32
-            } else {
-                // Midpoint
-                ((boundaries[bin - 1] + boundaries[bin.min(boundaries.len() - 1)]) / 2.0) as f32
-            };
-
-            features[out_idx * num_features + f] = raw_value;
+            features[out_idx * num_features + f] = bin_tables[f][bin];
         }
     }
 

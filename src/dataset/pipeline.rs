@@ -139,7 +139,7 @@ impl DataPipeline {
         let df = CsvReadOptions::default()
             .try_into_reader_with_file_path(Some(path.as_ref().to_path_buf()))?
             .finish()?;
-        self.process_for_training(df, target_column, categorical_columns)
+        self.process_for_training(df, target_column, categorical_columns, None)
     }
 
     /// Load and process a Parquet file for training
@@ -151,17 +151,24 @@ impl DataPipeline {
     ) -> Result<(BinnedDataset, PipelineState, DataFrame)> {
         let pl_path = PlPath::new(&path.as_ref().to_string_lossy());
         let df = LazyFrame::scan_parquet(pl_path, Default::default())?.collect()?;
-        self.process_for_training(df, target_column, categorical_columns)
+        self.process_for_training(df, target_column, categorical_columns, None)
     }
 
     /// Process a DataFrame for training
     ///
     /// Returns the binned dataset and the learned pipeline state for inference.
+    ///
+    /// # Arguments
+    /// * `df` - Input DataFrame
+    /// * `target_column` - Name of the target column
+    /// * `categorical_columns` - Optional list of categorical column names (None = auto-detect)
+    /// * `era_column` - Optional era/time column for panel data (used for proper Rank IC)
     pub fn process_for_training(
         &self,
         df: DataFrame,
         target_column: &str,
         categorical_columns: Option<&[&str]>,
+        era_column: Option<&str>,
     ) -> Result<(BinnedDataset, PipelineState, DataFrame)> {
         let _num_rows = df.height();
 
@@ -191,11 +198,24 @@ impl DataPipeline {
 
         let num_rows = targets_f32.len();
 
-        // Determine feature columns (excluding target)
+        // Extract era indices if era_column provided (for panel data with proper Rank IC)
+        let era_indices = if let Some(era_col_name) = era_column {
+            let era_series = df.column(era_col_name).map_err(|e| {
+                TreeBoostError::Data(format!("Era column '{}' not found: {}", era_col_name, e))
+            })?;
+            Some(self.extract_era_indices(era_series.as_materialized_series())?)
+        } else {
+            None
+        };
+
+        // Determine feature columns (excluding target and era)
         let feature_names: Vec<String> = df
             .get_column_names()
             .into_iter()
-            .filter(|name| *name != target_column)
+            .filter(|name| {
+                let name_str = name.as_str();
+                name_str != target_column && !era_column.map_or(false, |era| era == name_str)
+            })
             .map(|s| s.to_string())
             .collect();
 
@@ -256,7 +276,17 @@ impl DataPipeline {
             features.extend(binned_col);
         }
 
-        let dataset = BinnedDataset::new(num_rows, features, targets_f32.clone(), all_info.clone());
+        let dataset = if let Some(indices) = era_indices {
+            BinnedDataset::new_with_eras(
+                num_rows,
+                features,
+                targets_f32.clone(),
+                all_info.clone(),
+                indices,
+            )
+        } else {
+            BinnedDataset::new(num_rows, features, targets_f32.clone(), all_info.clone())
+        };
 
         let state = PipelineState {
             feature_info: all_info,
@@ -653,6 +683,49 @@ impl DataPipeline {
             .map(|opt| opt.unwrap_or("").to_string())
             .collect())
     }
+
+    /// Extract era indices from a series and map to sequential u16 values
+    ///
+    /// Handles both numeric and categorical era columns.
+    /// Returns a vector where era_indices[i] is the era index for row i.
+    fn extract_era_indices(&self, series: &Series) -> Result<Vec<u16>> {
+        use std::collections::HashMap;
+
+        // Convert to string for generic handling
+        let str_series = series.cast(&DataType::String).map_err(|e| {
+            TreeBoostError::Data(format!("Failed to cast era column to string: {}", e))
+        })?;
+
+        let str_ca = str_series.str().map_err(|e| {
+            TreeBoostError::Data(format!(
+                "Failed to get string chunked from era column: {}",
+                e
+            ))
+        })?;
+
+        // Build mapping from unique era values to sequential indices
+        let mut era_map: HashMap<String, u16> = HashMap::new();
+        let mut next_idx = 0u16;
+
+        let indices: Vec<u16> = str_ca
+            .into_iter()
+            .map(|opt| {
+                opt.map_or(0, |s| {
+                    *era_map.entry(s.to_string()).or_insert_with(|| {
+                        let idx = next_idx;
+                        next_idx = next_idx.saturating_add(1);
+                        if next_idx == 0 {
+                            // Overflow - u16 max is 65535
+                            panic!("Era count exceeds u16::MAX (65535). Use fewer eras.");
+                        }
+                        idx
+                    })
+                })
+            })
+            .collect();
+
+        Ok(indices)
+    }
 }
 
 #[cfg(test)]
@@ -669,8 +742,9 @@ mod tests {
         .unwrap();
 
         let pipeline = DataPipeline::new(PipelineConfig::new().with_num_bins(4));
-        let (dataset, state, _filtered_df) =
-            pipeline.process_for_training(df, "target", None).unwrap();
+        let (dataset, state, _filtered_df) = pipeline
+            .process_for_training(df, "target", None, None)
+            .unwrap();
 
         assert_eq!(dataset.num_rows(), 10);
         assert_eq!(dataset.num_features(), 2);
@@ -695,7 +769,7 @@ mod tests {
         );
 
         let (dataset, state, _filtered_df) = pipeline
-            .process_for_training(df, "target", Some(&["category"]))
+            .process_for_training(df, "target", Some(&["category"]), None)
             .unwrap();
 
         assert_eq!(dataset.num_rows(), 10);
@@ -730,7 +804,7 @@ mod tests {
         );
 
         let (_train_dataset, state, _filtered_df) = pipeline
-            .process_for_training(train_df, "target", Some(&["category"]))
+            .process_for_training(train_df, "target", Some(&["category"]), None)
             .unwrap();
 
         // Inference data (different values, including unseen category)
@@ -772,7 +846,7 @@ mod tests {
         );
 
         let (dataset, state, _filtered_df) = pipeline
-            .process_for_training(df, "target", Some(&["category"]))
+            .process_for_training(df, "target", Some(&["category"]), None)
             .unwrap();
 
         assert_eq!(dataset.num_rows(), 6);

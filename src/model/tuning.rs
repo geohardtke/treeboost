@@ -13,8 +13,8 @@ use crate::model::config::{AutoConfig, TreeTunerConfig, TreeTuningResult, Tuning
 use crate::model::{BoostingMode, UniversalConfig};
 use crate::tuner::ltt::{LttTuner, LttTunerConfig, LttTuningResult};
 use crate::tuner::{
-    AutoTuner, EvalStrategy, GridStrategy, ParamBounds, ParameterSpace, SearchHistory, TunerConfig,
-    TuningMode,
+    AutoTuner, EvalStrategy, GridStrategy, ParamBounds, ParameterSpace, SearchHistory,
+    TaskType as TunerTaskType, TunerConfig, TuningMode,
 };
 use crate::{Result, TreeBoostError};
 use polars::prelude::*;
@@ -98,7 +98,9 @@ fn tune_tree_model(
         custom_cfg.clone()
     } else {
         match config.tuning_level {
-            TuningLevel::Quick => TreeTunerConfig::with_preset(crate::model::TreeTunerPreset::Quick),
+            TuningLevel::Quick => {
+                TreeTunerConfig::with_preset(crate::model::TreeTunerPreset::Quick)
+            }
             TuningLevel::Standard => {
                 TreeTunerConfig::with_preset(crate::model::TreeTunerPreset::Standard)
             }
@@ -129,7 +131,7 @@ fn tune_tree_model(
         .with_param("entropy_weight", ParamBounds::continuous(0.0, 0.3), 0.1);
 
     // Resolve backend ONCE before tuning (don't re-resolve per trial)
-    use crate::backend::{BackendSelector, BackendConfig, BackendType};
+    use crate::backend::{BackendConfig, BackendSelector, BackendType};
     let backend_type = if matches!(config.backend_type, BackendType::Auto) {
         let resolved = BackendSelector::with_config(BackendConfig {
             preferred: BackendType::Auto,
@@ -168,18 +170,51 @@ fn tune_tree_model(
             .with_backend(backend_type),
     };
 
+    // Determine task type:
+    // 1. If user explicitly set task_type → use it (manual override, no detection)
+    // 2. Else if optimization_metric is RankIc → force Regression (RankIc is regression-only)
+    // 3. Else → use profile detection
+    let tuner_task_type = if let Some(explicit_type) = tuner_cfg.task_type {
+        explicit_type
+    } else if tuner_cfg.optimization_metric == crate::tuner::OptimizationMetric::RankIc {
+        TunerTaskType::Regression
+    } else {
+        match &profile.task_type {
+            TaskType::Regression => TunerTaskType::Regression,
+            TaskType::BinaryClassification => TunerTaskType::BinaryClassification,
+            TaskType::MultiClassification { .. } => TunerTaskType::MultiClassClassification,
+        }
+    };
+
+    if config.verbose {
+        println!(
+            "  [Tuning] Task type: {:?}, Optimization metric: {:?}",
+            tuner_task_type, tuner_cfg.optimization_metric
+        );
+    }
+
     // Configure tuner using TreeTunerConfig
+    // When custom validation is provided, eval_strategy and early_stopping validation_ratio won't be used
+    // (tune_with_validation() bypasses internal splitting), but we still need valid values to pass config validation
+    let effective_val_ratio = if validation_dataset.is_some() {
+        0.2 // Dummy value (won't be used, but must be non-zero for config validation)
+    } else {
+        tuner_cfg.validation_ratio
+    };
+
     let mut tuner_config = TunerConfig::new()
         .with_iterations(tuner_cfg.n_iterations)
         .with_grid_strategy(GridStrategy::LatinHypercube {
             n_samples: tuner_cfg.n_samples,
         })
-        .with_eval_strategy(EvalStrategy::conformal_90(tuner_cfg.validation_ratio))
+        .with_eval_strategy(EvalStrategy::conformal_90(effective_val_ratio))
         .with_tuning_mode(TuningMode::Optimistic) // Use pre-encoded data
         .with_num_rounds(tuner_cfg.max_rounds)
-        .with_early_stopping(tuner_cfg.early_stopping_rounds, tuner_cfg.validation_ratio)
+        .with_early_stopping(tuner_cfg.early_stopping_rounds, effective_val_ratio)
         .with_improvement_threshold(tuner_cfg.improvement_threshold)
         .with_min_f1_score(tuner_cfg.min_f1_score)
+        .with_optimization_metric(tuner_cfg.optimization_metric)
+        .with_task_type(tuner_task_type)
         .with_verbose(false); // Quiet internal logging
 
     // Enable CSV logging if output_dir is specified
@@ -193,11 +228,12 @@ fn tune_tree_model(
         .with_seed(123);
 
     // Run tuning (use custom validation if provided)
-    let (best_gbdt_config, history): (GBDTConfig, SearchHistory) = if let Some(val_dataset) = validation_dataset {
-        tuner.tune_with_validation(dataset, val_dataset)?
-    } else {
-        tuner.tune(dataset)?
-    };
+    let (best_gbdt_config, history): (GBDTConfig, SearchHistory) =
+        if let Some(val_dataset) = validation_dataset {
+            tuner.tune_with_validation(dataset, val_dataset)?
+        } else {
+            tuner.tune(dataset)?
+        };
 
     // Convert GBDT config to UniversalConfig
     let tree_config = TreeConfig::default()
@@ -214,19 +250,46 @@ fn tune_tree_model(
         .with_backend(best_gbdt_config.backend_type); // Preserve backend type from tuning!
 
     // Extract tuning results
-    let tuning_result = history.best().map(|best| TreeTuningResult {
-        num_trials: history.len(),
-        best_metric: best.val_metric,
-        best_params: best.params.clone(),
+    let tuning_result = history.best().map(|best| {
+        // Use the actual optimization metric value
+        let best_metric = match tuner_cfg.optimization_metric {
+            crate::tuner::OptimizationMetric::ValidationLoss => best.val_loss,
+            crate::tuner::OptimizationMetric::F1Score => best.f1_score.unwrap_or(0.0),
+            crate::tuner::OptimizationMetric::RocAuc => best.roc_auc.unwrap_or(0.0) as f32,
+            crate::tuner::OptimizationMetric::RankIc => best.rank_ic.unwrap_or(0.0) as f32,
+        };
+        TreeTuningResult {
+            num_trials: history.len(),
+            best_metric,
+            best_params: best.params.clone(),
+        }
     });
 
     if config.verbose {
-        if let Some(ref result) = tuning_result {
-            println!(
-                "  [Tuning] Best validation metric: {:.6}",
-                result.best_metric
-            );
-            println!("  [Tuning] Best params: {:?}", result.best_params);
+        if let Some(best) = history.best() {
+            // Show the optimization metric value with clear labeling
+            match tuner_cfg.optimization_metric {
+                crate::tuner::OptimizationMetric::ValidationLoss => {
+                    println!("  [Tuning] Best loss (MSE): {:.6}", best.val_loss);
+                }
+                crate::tuner::OptimizationMetric::F1Score => {
+                    if let Some(f1) = best.f1_score {
+                        println!("  [Tuning] Best F1 score: {:.4}", f1);
+                    }
+                }
+                crate::tuner::OptimizationMetric::RocAuc => {
+                    if let Some(auc) = best.roc_auc {
+                        println!("  [Tuning] Best ROC-AUC: {:.6}", auc);
+                    }
+                }
+                crate::tuner::OptimizationMetric::RankIc => {
+                    if let Some(ic) = best.rank_ic {
+                        println!("  [Tuning] Best Rank IC: {:.6}", ic);
+                    }
+                    println!("  [Tuning] (val_loss for reference: {:.6})", best.val_loss);
+                }
+            }
+            println!("  [Tuning] Best params: {:?}", best.params);
         }
     }
 

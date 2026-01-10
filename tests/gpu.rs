@@ -451,12 +451,16 @@ fn test_cuda_training_end_to_end() {
         .with_backend(BackendType::Scalar);
 
     let start = std::time::Instant::now();
-    let scalar_model = GBDTModel::train_binned(&dataset, scalar_config).expect("Scalar training failed");
+    let scalar_model =
+        GBDTModel::train_binned(&dataset, scalar_config).expect("Scalar training failed");
     let scalar_time = start.elapsed();
 
     eprintln!("  CUDA training time: {:?}", cuda_time);
     eprintln!("  Scalar training time: {:?}", scalar_time);
-    eprintln!("  Speedup: {:.2}x", scalar_time.as_secs_f64() / cuda_time.as_secs_f64());
+    eprintln!(
+        "  Speedup: {:.2}x",
+        scalar_time.as_secs_f64() / cuda_time.as_secs_f64()
+    );
 
     // Both models should produce similar predictions
     let cuda_preds = cuda_model.predict(&dataset);
@@ -477,7 +481,10 @@ fn test_cuda_training_end_to_end() {
         - dataset.targets().iter().cloned().fold(f32::MAX, f32::min);
     let tolerance = target_range * 0.01;
 
-    eprintln!("  CUDA vs Scalar RMSE: {:.6}, tolerance: {:.6}", rmse, tolerance);
+    eprintln!(
+        "  CUDA vs Scalar RMSE: {:.6}, tolerance: {:.6}",
+        rmse, tolerance
+    );
 
     assert!(
         rmse < tolerance,

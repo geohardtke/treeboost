@@ -81,11 +81,8 @@ fn test_autotuner_regression() {
 
     // Best trial should have valid metrics
     let best = history.best().expect("Should have a best trial");
-    assert!(
-        best.val_metric.is_finite(),
-        "Best val_metric should be finite"
-    );
-    assert!(best.val_metric >= 0.0, "MSE should be non-negative");
+    assert!(best.val_loss.is_finite(), "Best val_loss should be finite");
+    assert!(best.val_loss >= 0.0, "MSE should be non-negative");
 
     // Train final model with best config
     let final_model =
@@ -121,7 +118,7 @@ fn test_autotuner_binary_classification() {
 
     assert!(!history.is_empty());
     let best = history.best().expect("Should have a best trial");
-    assert!(best.val_metric.is_finite());
+    assert!(best.val_loss.is_finite());
 
     // Train final model
     let final_model =
@@ -156,7 +153,7 @@ fn test_autotuner_kfold() {
 
     assert!(!history.is_empty());
     let best = history.best().expect("Should have best trial");
-    assert!(best.val_metric.is_finite());
+    assert!(best.val_loss.is_finite());
     assert!(best.num_trees > 0, "Should have trained trees");
 
     // Train final model
@@ -189,7 +186,7 @@ fn test_autotuner_lhs() {
     assert!(history.len() >= 4, "Should have at least 4 trials from LHS");
 
     let best = history.best().expect("Should have best trial");
-    assert!(best.val_metric.is_finite());
+    assert!(best.val_loss.is_finite());
 }
 
 /// Test autotuner with Random sampling
@@ -219,7 +216,7 @@ fn test_autotuner_random() {
     );
 
     let best = history.best().expect("Should have best trial");
-    assert!(best.val_metric.is_finite());
+    assert!(best.val_loss.is_finite());
 }
 
 /// Test autotuner reproducibility with same seed
@@ -266,8 +263,8 @@ fn test_autotuner_reproducibility() {
     let best2 = history2.best().expect("Should have best 2");
 
     assert_eq!(
-        best1.val_metric, best2.val_metric,
-        "Best val_metric should be identical with same seed"
+        best1.val_loss, best2.val_loss,
+        "Best val_loss should be identical with same seed"
     );
 
     // Check that sampled hyperparameters are identical
@@ -391,8 +388,8 @@ fn test_autotuner_history_json() {
         "JSON should have best_trial_id"
     );
     assert!(
-        json.contains("\"val_metric\""),
-        "JSON should have val_metric field"
+        json.contains("\"val_loss\""),
+        "JSON should have val_loss field"
     );
     assert!(json.contains("\"params\""), "JSON should have params field");
 

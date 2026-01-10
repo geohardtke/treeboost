@@ -21,9 +21,7 @@ mod threshold_tests {
             .collect();
 
         // Generate random targets
-        let targets: Vec<f32> = (0..num_rows)
-            .map(|i| (i as f32 * 0.456) % 10.0)
-            .collect();
+        let targets: Vec<f32> = (0..num_rows).map(|i| (i as f32 * 0.456) % 10.0).collect();
 
         // Create feature info (all numeric features)
         let feature_info: Vec<FeatureInfo> = (0..num_features)
@@ -92,8 +90,14 @@ mod threshold_tests {
             100, 200, 500, 750, 1000, 1500, 2000, 3000, 5000, 7500, 10000,
         ];
 
-        println!("Testing with {} features, {} iterations per size\n", num_features, iterations);
-        println!("{:>10} {:>15} {:>15} {:>12}", "Batch Size", "CPU Time (ms)", "GPU Time (ms)", "Speedup");
+        println!(
+            "Testing with {} features, {} iterations per size\n",
+            num_features, iterations
+        );
+        println!(
+            "{:>10} {:>15} {:>15} {:>12}",
+            "Batch Size", "CPU Time (ms)", "GPU Time (ms)", "Speedup"
+        );
         println!("{}", "-".repeat(55));
 
         let mut crossover_point = None;
@@ -112,13 +116,8 @@ mod threshold_tests {
             );
 
             // Measure GPU time
-            let gpu_time = measure_histogram_time(
-                &cuda_backend,
-                &dataset,
-                &grad_hess,
-                batch_size,
-                iterations,
-            );
+            let gpu_time =
+                measure_histogram_time(&cuda_backend, &dataset, &grad_hess, batch_size, iterations);
 
             let speedup = cpu_time / gpu_time;
 
@@ -163,9 +162,7 @@ mod wgpu_threshold_tests {
             .collect();
 
         // Generate random targets
-        let targets: Vec<f32> = (0..num_rows)
-            .map(|i| (i as f32 * 0.456) % 10.0)
-            .collect();
+        let targets: Vec<f32> = (0..num_rows).map(|i| (i as f32 * 0.456) % 10.0).collect();
 
         // Create feature info (all numeric features)
         let feature_info: Vec<FeatureInfo> = (0..num_features)
@@ -230,12 +227,16 @@ mod wgpu_threshold_tests {
         let iterations = 20;
 
         // Test larger batch sizes for WGPU (higher overhead)
-        let batch_sizes = vec![
-            500, 1000, 2000, 3000, 5000, 7500, 10000, 15000, 20000,
-        ];
+        let batch_sizes = vec![500, 1000, 2000, 3000, 5000, 7500, 10000, 15000, 20000];
 
-        println!("Testing with {} features, {} iterations per size\n", num_features, iterations);
-        println!("{:>10} {:>15} {:>15} {:>12}", "Batch Size", "CPU Time (ms)", "GPU Time (ms)", "Speedup");
+        println!(
+            "Testing with {} features, {} iterations per size\n",
+            num_features, iterations
+        );
+        println!(
+            "{:>10} {:>15} {:>15} {:>12}",
+            "Batch Size", "CPU Time (ms)", "GPU Time (ms)", "Speedup"
+        );
         println!("{}", "-".repeat(55));
 
         let mut crossover_point = None;
@@ -251,13 +252,8 @@ mod wgpu_threshold_tests {
                 iterations,
             );
 
-            let gpu_time = measure_histogram_time(
-                &wgpu_backend,
-                &dataset,
-                &grad_hess,
-                batch_size,
-                iterations,
-            );
+            let gpu_time =
+                measure_histogram_time(&wgpu_backend, &dataset, &grad_hess, batch_size, iterations);
 
             let speedup = cpu_time / gpu_time;
 

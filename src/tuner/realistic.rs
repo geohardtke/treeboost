@@ -104,6 +104,7 @@ pub(crate) fn encode_train_val_split(
         train_df,
         &realistic_cfg.target_column,
         cat_cols.as_deref(),
+        None,
     )?;
 
     // Apply encoder to validation data (using train's encoding)
@@ -127,8 +128,12 @@ pub(crate) fn encode_full_dataset(
         .as_ref()
         .map(|cols| cols.iter().map(|s| s.as_str()).collect());
 
-    let (dataset, _pipeline_state, _) =
-        pipeline.process_for_training(df, &realistic_cfg.target_column, cat_cols.as_deref())?;
+    let (dataset, _pipeline_state, _) = pipeline.process_for_training(
+        df,
+        &realistic_cfg.target_column,
+        cat_cols.as_deref(),
+        None,
+    )?;
 
     Ok(dataset)
 }

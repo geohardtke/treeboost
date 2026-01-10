@@ -22,7 +22,8 @@ use crate::{Result, TreeBoostError};
 use super::traits::{ParamMapExt, TunableModel};
 
 use super::config::{
-    EvalStrategy, GridStrategy, ParamBounds, ParamDef, ParameterSpace, TunerConfig, TuningMode,
+    EvalStrategy, GridStrategy, OptimizationMetric, ParamBounds, ParamDef, ParameterSpace,
+    TunerConfig, TuningMode,
 };
 use super::history::{ProgressCallback, SearchHistory};
 use super::logger::{
@@ -81,8 +82,25 @@ enum EvalInput<'a> {
     },
 }
 
-/// Evaluation metrics tuple: (val_metric, train_metric, num_trees, f1_score, roc_auc)
-type EvalMetrics = (f32, f32, usize, Option<f32>, Option<f64>);
+/// Evaluation metrics for model performance assessment
+///
+/// Captures comprehensive evaluation metrics including primary validation/train metrics,
+/// model complexity (num_trees), and task-specific metrics (F1, ROC-AUC, Rank IC).
+#[derive(Debug, Clone)]
+struct EvalMetrics {
+    /// Primary metric computed on validation set (e.g., MSE, LogLoss)
+    val_metric: f32,
+    /// Primary metric computed on training set (for overfitting detection)
+    train_metric: f32,
+    /// Number of trees/rounds in the trained model (complexity indicator)
+    num_trees: usize,
+    /// F1 score for classification tasks (None for regression)
+    f1_score: Option<f32>,
+    /// ROC-AUC for binary classification tasks (None for multi-class or regression)
+    roc_auc: Option<f64>,
+    /// Rank Information Coefficient for regression with panel data (None otherwise)
+    rank_ic: Option<f64>,
+}
 
 /// Result of model evaluation
 type EvalResult = Result<EvalMetrics>;
@@ -99,26 +117,25 @@ fn compute_eval_metrics<M: TunableModel>(
     val_targets: &[f32],
     metric: &Metric,
     tuner: &AutoTuner<M>,
-) -> (f32, f32, Option<f32>, Option<f64>) {
+) -> EvalMetrics {
     let train_preds = model.predict(train_dataset);
     let val_preds = model.predict(val_dataset);
 
     let train_metric = metric.compute(&train_preds, train_dataset.targets());
     let val_metric = metric.compute(&val_preds, val_targets);
-    let f1_score = if tuner.config.task_type.is_classification() {
-        tuner.compute_f1_score(&val_preds, val_targets)
-    } else {
-        None
-    };
 
-    // Compute ROC-AUC for binary classification
-    let roc_auc = if tuner.config.task_type.is_binary() {
-        Some(super::metrics::compute_roc_auc(&val_preds, val_targets))
-    } else {
-        None
-    };
+    // Compute additional metrics (F1, ROC-AUC, Rank IC) using centralized helper
+    let (f1_score, roc_auc, rank_ic) =
+        tuner.compute_additional_metrics(&val_preds, val_targets, val_dataset.era_indices());
 
-    (val_metric, train_metric, f1_score, roc_auc)
+    EvalMetrics {
+        val_metric,
+        train_metric,
+        num_trees: model.num_trees(),
+        f1_score,
+        roc_auc,
+        rank_ic,
+    }
 }
 
 /// AutoTuner for hyperparameter optimization
@@ -292,7 +309,10 @@ impl<M: TunableModel> AutoTuner<M> {
         val_dataset: &BinnedDataset,
     ) -> Result<(M::Config, SearchHistory)> {
         // Store raw pointers for custom validation (valid only during this call)
-        self.custom_validation = Some((SendPtr::new(train_dataset as *const _), SendPtr::new(val_dataset as *const _)));
+        self.custom_validation = Some((
+            SendPtr::new(train_dataset as *const _),
+            SendPtr::new(val_dataset as *const _),
+        ));
         let result = self.run_tune_with_dataset(train_dataset);
         self.custom_validation = None;
         result
@@ -395,13 +415,13 @@ impl<M: TunableModel> AutoTuner<M> {
                             matches!(self.config.eval_strategy, EvalStrategy::Conformal { .. });
                         let metric_str = if is_conformal {
                             // Conformal: val_metric is interval width (quantile q)
-                            format!("q={:.5} (interval width)", result.val_metric)
+                            format!("q={:.5} (interval width)", result.val_loss)
                         } else if self.config.task_type.is_regression() {
                             // Regression: show MSE and RMSE
                             format!(
                                 "MSE={:.5} RMSE={:.4}",
-                                result.val_metric,
-                                result.val_metric.sqrt()
+                                result.val_loss,
+                                result.val_loss.sqrt()
                             )
                         } else {
                             // Classification: show LogLoss, AUC, F1
@@ -413,7 +433,7 @@ impl<M: TunableModel> AutoTuner<M> {
                                 .f1_score
                                 .map(|f1| format!(" F1={:.2}%", f1 * 100.0))
                                 .unwrap_or_default();
-                            format!("LogLoss={:.5}{}{}", result.val_metric, auc_str, f1_str)
+                            format!("LogLoss={:.5}{}{}", result.val_loss, auc_str, f1_str)
                         };
                         // Show learning_rate from params if tuned, otherwise from base_config
                         let lr = result
@@ -527,15 +547,15 @@ impl<M: TunableModel> AutoTuner<M> {
             // Show metrics based on eval strategy and task type
             let is_conformal = matches!(self.config.eval_strategy, EvalStrategy::Conformal { .. });
             if is_conformal {
-                println!("  Best interval width (q): {:.6}", best.val_metric);
+                println!("  Best interval width (q): {:.6}", best.val_loss);
             } else if self.config.task_type.is_regression() {
                 println!(
                     "  Best MSE: {:.6} (RMSE: {:.4})",
-                    best.val_metric,
-                    best.val_metric.sqrt()
+                    best.val_loss,
+                    best.val_loss.sqrt()
                 );
             } else {
-                println!("  Best LogLoss: {:.6}", best.val_metric);
+                println!("  Best LogLoss: {:.6}", best.val_loss);
                 if let Some(auc) = best.roc_auc {
                     println!("  ROC-AUC: {:.4}", auc);
                 }
@@ -723,13 +743,13 @@ impl<M: TunableModel> AutoTuner<M> {
                             matches!(self.config.eval_strategy, EvalStrategy::Conformal { .. });
                         let metric_str = if is_conformal {
                             // Conformal: val_metric is interval width (quantile q)
-                            format!("q={:.5} (interval width)", result.val_metric)
+                            format!("q={:.5} (interval width)", result.val_loss)
                         } else if self.config.task_type.is_regression() {
                             // Regression: show MSE and RMSE
                             format!(
                                 "MSE={:.5} RMSE={:.4}",
-                                result.val_metric,
-                                result.val_metric.sqrt()
+                                result.val_loss,
+                                result.val_loss.sqrt()
                             )
                         } else {
                             // Classification: show LogLoss, AUC, F1
@@ -741,7 +761,7 @@ impl<M: TunableModel> AutoTuner<M> {
                                 .f1_score
                                 .map(|f1| format!(" F1={:.2}%", f1 * 100.0))
                                 .unwrap_or_default();
-                            format!("LogLoss={:.5}{}{}", result.val_metric, auc_str, f1_str)
+                            format!("LogLoss={:.5}{}{}", result.val_loss, auc_str, f1_str)
                         };
                         // Show learning_rate from params if tuned, otherwise from base_config
                         let lr = result
@@ -855,15 +875,15 @@ impl<M: TunableModel> AutoTuner<M> {
             // Show metrics based on eval strategy and task type
             let is_conformal = matches!(self.config.eval_strategy, EvalStrategy::Conformal { .. });
             if is_conformal {
-                println!("  Best interval width (q): {:.6}", best.val_metric);
+                println!("  Best interval width (q): {:.6}", best.val_loss);
             } else if self.config.task_type.is_regression() {
                 println!(
                     "  Best MSE: {:.6} (RMSE: {:.4})",
-                    best.val_metric,
-                    best.val_metric.sqrt()
+                    best.val_loss,
+                    best.val_loss.sqrt()
                 );
             } else {
-                println!("  Best LogLoss: {:.6}", best.val_metric);
+                println!("  Best LogLoss: {:.6}", best.val_loss);
                 if let Some(auc) = best.roc_auc {
                     println!("  ROC-AUC: {:.4}", auc);
                 }
@@ -1239,7 +1259,7 @@ impl<M: TunableModel> AutoTuner<M> {
         let start = Instant::now();
 
         // Dispatch to appropriate strategy based on input mode
-        let (val_metric, train_metric, num_trees, f1_score, roc_auc) = match input {
+        let eval_metrics = match input {
             EvalInput::Optimistic(dataset) => match self.config.eval_strategy {
                 EvalStrategy::Holdout {
                     validation_ratio,
@@ -1299,12 +1319,13 @@ impl<M: TunableModel> AutoTuner<M> {
             trial_id,
             iteration,
             params: full_params, // Store full params (tuned + fixed)
-            val_metric,
-            train_metric,
-            num_trees,
+            val_loss: eval_metrics.val_metric,
+            train_loss: eval_metrics.train_metric,
+            num_trees: eval_metrics.num_trees,
             train_time_ms,
-            f1_score,
-            roc_auc,
+            f1_score: eval_metrics.f1_score,
+            roc_auc: eval_metrics.roc_auc,
+            rank_ic: eval_metrics.rank_ic,
         })
     }
 
@@ -1357,17 +1378,21 @@ impl<M: TunableModel> AutoTuner<M> {
             let train_metric = metric.compute(&train_predictions, train_dataset.targets());
             let val_metric = metric.compute(&val_predictions, val_dataset.targets());
 
-            // F1/ROC-AUC computation skipped for custom validation (can be added later if needed)
-            let f1_score = None;
-            let roc_auc = None;
+            // Compute additional metrics using centralized helper
+            let (f1_score, roc_auc, rank_ic) = self.compute_additional_metrics(
+                &val_predictions,
+                val_dataset.targets(),
+                val_dataset.era_indices(),
+            );
 
-            return Ok((
+            return Ok(EvalMetrics {
                 val_metric,
                 train_metric,
-                model.num_trees(),
+                num_trees: model.num_trees(),
                 f1_score,
                 roc_auc,
-            ));
+                rank_ic,
+            });
         }
 
         // Standard holdout: split the dataset internally
@@ -1384,26 +1409,39 @@ impl<M: TunableModel> AutoTuner<M> {
         let predictions = model.predict(dataset);
         let targets = dataset.targets();
 
-        // Create split for evaluation (using same seed as training for consistency)
-        let split = split_holdout(dataset.num_rows(), validation_ratio, 0.0, self.config.seed);
+        // Create split for evaluation
+        // Use era-based split ONLY when optimizing RankIC on panel data
+        // BUT: only split internally if custom validation wasn't already provided
+        let should_use_era_split = self.config.optimization_metric == OptimizationMetric::RankIc
+            && dataset.has_eras()
+            && self.custom_validation.is_none(); // Don't double-split!
+
+        let split = if should_use_era_split {
+            crate::dataset::split_holdout_by_era(dataset.era_indices().unwrap(), validation_ratio)
+        } else {
+            split_holdout(dataset.num_rows(), validation_ratio, 0.0, self.config.seed)
+        };
         let metric = self.select_metric();
 
         // Compute metrics using shared helper
-        let (val_metric, train_metric, f1_score, roc_auc) = self.compute_metrics_by_indices(
-            &predictions,
-            targets,
-            &split.train,
-            &split.validation,
-            &metric,
-        );
+        let (val_metric, train_metric, f1_score, roc_auc, rank_ic) = self
+            .compute_metrics_by_indices(
+                &predictions,
+                targets,
+                &split.train,
+                &split.validation,
+                &metric,
+                dataset.era_indices(),
+            );
 
-        Ok((
+        Ok(EvalMetrics {
             val_metric,
             train_metric,
-            model.num_trees(),
+            num_trees: model.num_trees(),
             f1_score,
             roc_auc,
-        ))
+            rank_ic,
+        })
     }
 
     /// Evaluate using K-fold cross-validation
@@ -1411,7 +1449,7 @@ impl<M: TunableModel> AutoTuner<M> {
     /// Each fold trains on (k-1)/k of the data and validates on 1/k.
     /// Returns the average metrics across all folds.
     ///
-    /// Returns: (val_metric, train_metric, num_trees, f1_score, roc_auc)
+    /// Returns: (val_metric, train_metric, num_trees, f1_score, roc_auc, rank_ic)
     fn evaluate_kfold(
         &self,
         dataset: &BinnedDataset,
@@ -1448,28 +1486,21 @@ impl<M: TunableModel> AutoTuner<M> {
             // Compute validation metric
             let val_metric = metric.compute(&val_predictions, val_targets);
 
-            // Compute F1 and ROC-AUC on validation set
-            let f1_score = if self.config.task_type.is_classification() {
-                self.compute_f1_score(&val_predictions, val_targets)
-            } else {
-                None
-            };
-            let roc_auc = if self.config.task_type.is_binary() {
-                Some(super::metrics::compute_roc_auc(
-                    &val_predictions,
-                    val_targets,
-                ))
-            } else {
-                None
-            };
+            // Compute additional metrics using centralized helper
+            let (f1_score, roc_auc, rank_ic) = self.compute_additional_metrics(
+                &val_predictions,
+                val_targets,
+                val_dataset.era_indices(),
+            );
 
-            fold_results.push((
+            fold_results.push(EvalMetrics {
                 val_metric,
                 train_metric,
-                model.num_trees(),
+                num_trees: model.num_trees(),
                 f1_score,
                 roc_auc,
-            ));
+                rank_ic,
+            });
         }
 
         Ok(Self::aggregate_fold_results(&fold_results))
@@ -1510,7 +1541,7 @@ impl<M: TunableModel> AutoTuner<M> {
                 let model = M::train(&train_dataset, &config)?;
 
                 // Extract conformal metrics
-                fold_results.push(Self::extract_conformal_result(
+                fold_results.push(self.extract_conformal_result(
                     &model,
                     &val_dataset,
                     val_dataset.targets(),
@@ -1550,17 +1581,94 @@ impl<M: TunableModel> AutoTuner<M> {
     ) -> EvalResult {
         Self::check_conformal_support()?;
 
+        // Check if custom validation is provided (for time-series/grouped data)
+        // If so, use the same logic as evaluate_holdout (train on train_dataset, validate on val_dataset)
+        if let Some((train_ptr, val_ptr)) = &self.custom_validation {
+            // SAFETY: Pointers are valid for the duration of tune_with_validation() call
+            let train_dataset = unsafe { train_ptr.as_ref() };
+            let val_dataset = unsafe { val_ptr.as_ref() };
+
+            // Build config - NO internal validation split (already pre-split!)
+            let mut config = self.build_config(params);
+            M::configure_validation(&mut config, 0.0, 0); // Disable internal split!
+
+            // Train on custom train dataset
+            let model = M::train(train_dataset, &config)?;
+
+            // Predict on both datasets for metrics
+            let train_predictions = model.predict(train_dataset);
+            let val_predictions = model.predict(val_dataset);
+
+            let metric = self.select_metric();
+
+            // Compute metrics on the respective datasets
+            let train_metric = metric.compute(&train_predictions, train_dataset.targets());
+            let val_metric = metric.compute(&val_predictions, val_dataset.targets());
+
+            // Compute additional metrics using centralized helper
+            let (f1_score, roc_auc, rank_ic) = self.compute_additional_metrics(
+                &val_predictions,
+                val_dataset.targets(),
+                val_dataset.era_indices(),
+            );
+
+            return Ok(EvalMetrics {
+                val_metric,
+                train_metric,
+                num_trees: model.num_trees(),
+                f1_score,
+                roc_auc,
+                rank_ic,
+            });
+        }
+
         // Build config with conformal settings and train
         let mut config = self.build_config(params);
         M::configure_conformal(&mut config, calibration_ratio, quantile);
         let model = M::train(dataset, &config)?;
 
         // Extract conformal metrics (evaluate on training set)
-        Ok(Self::extract_conformal_result(
-            &model,
-            dataset,
-            dataset.targets(),
-        ))
+        // For RankIC optimization with panel data, we need a proper validation split
+        // BUT: only split internally if custom validation wasn't already provided
+        let should_use_validation_split = self.config.optimization_metric
+            == OptimizationMetric::RankIc
+            && dataset.has_eras()
+            && self.custom_validation.is_none(); // Don't double-split!
+
+        if should_use_validation_split {
+            // Use validation split for RankIC to avoid inflated training IC
+            let validation_ratio = 0.2;
+
+            let split = crate::dataset::split_holdout_by_era(
+                dataset.era_indices().unwrap(),
+                validation_ratio,
+            );
+
+            let predictions = model.predict(dataset);
+            let metric = self.select_metric();
+
+            let (val_metric, train_metric, f1_score, roc_auc, rank_ic) = self
+                .compute_metrics_by_indices(
+                    &predictions,
+                    dataset.targets(),
+                    &split.train,
+                    &split.validation,
+                    &metric,
+                    dataset.era_indices(),
+                );
+
+            Ok(EvalMetrics {
+                val_metric,
+                train_metric,
+                num_trees: model.num_trees(),
+                f1_score,
+                roc_auc,
+                rank_ic,
+            })
+        } else {
+            // Standard conformal evaluation (on full training set)
+            Ok(self.extract_conformal_result(&model, dataset, dataset.targets()))
+        }
     }
 
     /// Select appropriate metric based on task type
@@ -1651,6 +1759,59 @@ impl<M: TunableModel> AutoTuner<M> {
         Some(f1)
     }
 
+    /// Compute additional evaluation metrics (F1, ROC-AUC, Rank IC) for model validation
+    ///
+    /// This helper consolidates metric computation logic that was previously duplicated
+    /// across multiple evaluation paths (holdout, conformal, custom validation).
+    ///
+    /// # Arguments
+    /// * `predictions` - Model predictions on validation data
+    /// * `targets` - Ground truth labels/values
+    /// * `era_indices` - Optional era/time group indices for panel data (used for Rank IC)
+    ///
+    /// # Returns
+    /// Tuple of (F1 score, ROC-AUC, Rank IC), each Optional based on task type:
+    /// - F1: Classification tasks only
+    /// - ROC-AUC: Binary classification only
+    /// - Rank IC: Regression tasks only (cross-sectional correlation within eras)
+    ///
+    /// # Industry Standard Practice
+    /// Metric computation should be centralized to ensure:
+    /// - Consistency across all evaluation strategies
+    /// - Single source of truth for metric definitions
+    /// - Easy maintenance and bug fixes
+    /// - Prevention of metric divergence across code paths
+    fn compute_additional_metrics(
+        &self,
+        predictions: &[f32],
+        targets: &[f32],
+        era_indices: Option<&[u16]>,
+    ) -> (Option<f32>, Option<f64>, Option<f64>) {
+        // F1 score for classification
+        let f1_score = if self.config.task_type.is_classification() {
+            self.compute_f1_score(predictions, targets)
+        } else {
+            None
+        };
+
+        // ROC-AUC for binary classification
+        let roc_auc = if self.config.task_type.is_binary() {
+            Some(super::metrics::compute_roc_auc(predictions, targets))
+        } else {
+            None
+        };
+
+        // Rank IC for regression (cross-sectional correlation within eras)
+        let rank_ic = if self.config.task_type.is_regression() {
+            let ic = super::metrics::compute_rank_ic(predictions, targets, era_indices);
+            Some(ic)
+        } else {
+            None
+        };
+
+        (f1_score, roc_auc, rank_ic)
+    }
+
     // =========================================================================
     // Evaluation Helpers (shared by holdout/kfold/conformal strategies)
     // =========================================================================
@@ -1669,8 +1830,9 @@ impl<M: TunableModel> AutoTuner<M> {
 
     /// Extract conformal metrics from a trained model.
     ///
-    /// Returns (conformal_quantile, mse_on_eval_set, num_trees, None, None)
+    /// Returns (conformal_quantile, mse_on_eval_set, num_trees, f1_score, roc_auc, rank_ic)
     fn extract_conformal_result(
+        &self,
         model: &M,
         eval_dataset: &BinnedDataset,
         eval_targets: &[f32],
@@ -1678,7 +1840,19 @@ impl<M: TunableModel> AutoTuner<M> {
         let conformal_q = model.conformal_quantile().unwrap_or(f32::MAX);
         let predictions = model.predict(eval_dataset);
         let mse = Metric::Mse.compute(&predictions, eval_targets);
-        (conformal_q, mse, model.num_trees(), None, None)
+
+        // Compute additional metrics based on task type
+        let (f1_score, roc_auc, rank_ic) =
+            self.compute_additional_metrics(&predictions, eval_targets, eval_dataset.era_indices());
+
+        EvalMetrics {
+            val_metric: conformal_q,
+            train_metric: mse,
+            num_trees: model.num_trees(),
+            f1_score,
+            roc_auc,
+            rank_ic,
+        }
     }
 
     /// Train model with external validation and compute metrics
@@ -1700,7 +1874,7 @@ impl<M: TunableModel> AutoTuner<M> {
         let model = M::train_with_validation(train_dataset, val_dataset, val_targets, &config)?;
 
         let metric = self.select_metric();
-        let (val_metric, train_metric, f1_score, roc_auc) = compute_eval_metrics(
+        let eval_metrics = compute_eval_metrics(
             &model,
             train_dataset,
             val_dataset,
@@ -1709,13 +1883,7 @@ impl<M: TunableModel> AutoTuner<M> {
             self,
         );
 
-        Ok((
-            val_metric,
-            train_metric,
-            model.num_trees(),
-            f1_score,
-            roc_auc,
-        ))
+        Ok(eval_metrics)
     }
 
     /// Train model with conformal config and return quantile metric
@@ -1723,7 +1891,7 @@ impl<M: TunableModel> AutoTuner<M> {
     /// Specialized version for conformal prediction evaluation.
     /// Uses conformal quantile as the optimization metric instead of MSE/logloss.
     ///
-    /// Returns: (conformal_quantile, val_mse, num_trees, None, None)
+    /// Returns: (conformal_quantile, val_mse, num_trees, None, None, None)
     fn train_and_evaluate_conformal(
         &self,
         train_dataset: &BinnedDataset,
@@ -1740,11 +1908,7 @@ impl<M: TunableModel> AutoTuner<M> {
         let model = M::train(train_dataset, &config)?;
 
         // Extract conformal metrics (evaluate on validation set)
-        Ok(Self::extract_conformal_result(
-            &model,
-            val_dataset,
-            val_targets,
-        ))
+        Ok(self.extract_conformal_result(&model, val_dataset, val_targets))
     }
 
     /// Aggregate results from multiple folds
@@ -1753,34 +1917,55 @@ impl<M: TunableModel> AutoTuner<M> {
     fn aggregate_fold_results(results: &[EvalMetrics]) -> EvalMetrics {
         let k = results.len();
         if k == 0 {
-            return (f32::MAX, f32::MAX, 0, None, None);
+            return EvalMetrics {
+                val_metric: f32::MAX,
+                train_metric: f32::MAX,
+                num_trees: 0,
+                f1_score: None,
+                roc_auc: None,
+                rank_ic: None,
+            };
         }
 
-        let avg_val = results.iter().map(|r| r.0).sum::<f32>() / k as f32;
-        let avg_train = results.iter().map(|r| r.1).sum::<f32>() / k as f32;
-        let avg_trees = results.iter().map(|r| r.2).sum::<usize>() / k;
+        let avg_val = results.iter().map(|r| r.val_metric).sum::<f32>() / k as f32;
+        let avg_train = results.iter().map(|r| r.train_metric).sum::<f32>() / k as f32;
+        let avg_trees = results.iter().map(|r| r.num_trees).sum::<usize>() / k;
 
-        let f1_scores: Vec<f32> = results.iter().filter_map(|r| r.3).collect();
+        let f1_scores: Vec<f32> = results.iter().filter_map(|r| r.f1_score).collect();
         let avg_f1 = if f1_scores.is_empty() {
             None
         } else {
             Some(f1_scores.iter().sum::<f32>() / f1_scores.len() as f32)
         };
 
-        let roc_aucs: Vec<f64> = results.iter().filter_map(|r| r.4).collect();
+        let roc_aucs: Vec<f64> = results.iter().filter_map(|r| r.roc_auc).collect();
         let avg_roc_auc = if roc_aucs.is_empty() {
             None
         } else {
             Some(roc_aucs.iter().sum::<f64>() / roc_aucs.len() as f64)
         };
 
-        (avg_val, avg_train, avg_trees, avg_f1, avg_roc_auc)
+        let rank_ics: Vec<f64> = results.iter().filter_map(|r| r.rank_ic).collect();
+        let avg_rank_ic = if rank_ics.is_empty() {
+            None
+        } else {
+            Some(rank_ics.iter().sum::<f64>() / rank_ics.len() as f64)
+        };
+
+        EvalMetrics {
+            val_metric: avg_val,
+            train_metric: avg_train,
+            num_trees: avg_trees,
+            f1_score: avg_f1,
+            roc_auc: avg_roc_auc,
+            rank_ic: avg_rank_ic,
+        }
     }
 
     /// Compute metrics by splitting predictions according to indices (optimistic mode)
     ///
     /// Used when training on full dataset and splitting predictions for evaluation.
-    /// Returns: (val_metric, train_metric, f1_score, roc_auc)
+    /// Returns: (val_metric, train_metric, f1_score, roc_auc, rank_ic)
     fn compute_metrics_by_indices(
         &self,
         predictions: &[f32],
@@ -1788,7 +1973,8 @@ impl<M: TunableModel> AutoTuner<M> {
         train_idx: &[usize],
         val_idx: &[usize],
         metric: &Metric,
-    ) -> (f32, f32, Option<f32>, Option<f64>) {
+        era_indices: Option<&[u16]>,
+    ) -> (f32, f32, Option<f32>, Option<f64>, Option<f64>) {
         let train_preds: Vec<f32> = train_idx.iter().map(|&i| predictions[i]).collect();
         let train_targets: Vec<f32> = train_idx.iter().map(|&i| targets[i]).collect();
         let train_metric = metric.compute(&train_preds, &train_targets);
@@ -1797,20 +1983,15 @@ impl<M: TunableModel> AutoTuner<M> {
         let val_targets: Vec<f32> = val_idx.iter().map(|&i| targets[i]).collect();
         let val_metric = metric.compute(&val_preds, &val_targets);
 
-        let f1_score = if self.config.task_type.is_classification() {
-            self.compute_f1_score(&val_preds, &val_targets)
-        } else {
-            None
-        };
+        // Extract validation era indices if available (for Rank IC computation)
+        let val_era_indices =
+            era_indices.map(|eras| val_idx.iter().map(|&i| eras[i]).collect::<Vec<u16>>());
 
-        // Compute ROC-AUC for binary classification
-        let roc_auc = if self.config.task_type.is_binary() {
-            Some(super::metrics::compute_roc_auc(&val_preds, &val_targets))
-        } else {
-            None
-        };
+        // Compute additional metrics (F1, ROC-AUC, Rank IC)
+        let (f1_score, roc_auc, rank_ic) =
+            self.compute_additional_metrics(&val_preds, &val_targets, val_era_indices.as_deref());
 
-        (val_metric, train_metric, f1_score, roc_auc)
+        (val_metric, train_metric, f1_score, roc_auc, rank_ic)
     }
 
     /// Randomize parameter centers to explore a different region

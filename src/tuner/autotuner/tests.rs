@@ -22,16 +22,17 @@ fn test_trial_result() {
         trial_id: 0,
         iteration: 0,
         params,
-        val_metric: 0.5,
-        train_metric: 0.4,
+        val_loss: 0.5,
+        train_loss: 0.4,
         num_trees: 100,
         train_time_ms: 1000,
         f1_score: None,
         roc_auc: None,
+        rank_ic: None,
     };
 
     assert_eq!(result.trial_id, 0);
-    assert_eq!(result.val_metric, 0.5);
+    assert_eq!(result.val_loss, 0.5);
 }
 
 #[test]
@@ -47,12 +48,13 @@ fn test_search_history() {
         trial_id: 0,
         iteration: 0,
         params: params1,
-        val_metric: 0.5,
-        train_metric: 0.4,
+        val_loss: 0.5,
+        train_loss: 0.4,
         num_trees: 100,
         train_time_ms: 1000,
         f1_score: None,
         roc_auc: None,
+        rank_ic: None,
     });
 
     assert_eq!(history.len(), 1);
@@ -66,12 +68,13 @@ fn test_search_history() {
         trial_id: 1,
         iteration: 0,
         params: params2,
-        val_metric: 0.3, // Better
-        train_metric: 0.25,
+        val_loss: 0.3, // Better
+        train_loss: 0.25,
         num_trees: 100,
         train_time_ms: 1000,
         f1_score: None,
         roc_auc: None,
+        rank_ic: None,
     });
 
     assert_eq!(history.len(), 2);
@@ -88,17 +91,18 @@ fn test_search_history_to_json() {
         trial_id: 0,
         iteration: 0,
         params,
-        val_metric: 0.5,
-        train_metric: 0.4,
+        val_loss: 0.5,
+        train_loss: 0.4,
         num_trees: 100,
         train_time_ms: 1000,
         f1_score: None,
         roc_auc: None,
+        rank_ic: None,
     });
 
     let json = history.to_json();
     assert!(json.contains("\"trial_id\": 0"));
-    assert!(json.contains("\"val_metric\": 0.5"));
+    assert!(json.contains("\"val_loss\": 0.5"));
     assert!(json.contains("\"best_trial_id\": 0"));
 }
 

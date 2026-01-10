@@ -44,6 +44,7 @@ impl SearchHistory {
     /// - `ValidationLoss`: Lower is better
     /// - `F1Score`: Higher is better
     /// - `RocAuc`: Higher is better
+    /// - `RankIc`: Higher is better
     pub fn add(&mut self, result: TrialResult) {
         let new_idx = self.trials.len();
 
@@ -67,7 +68,7 @@ impl SearchHistory {
         match self.optimization_metric {
             OptimizationMetric::ValidationLoss => {
                 // Lower is better
-                new.val_metric < best.val_metric
+                new.val_loss < best.val_loss
             }
             OptimizationMetric::F1Score => {
                 // Higher is better, handle NaN
@@ -84,6 +85,14 @@ impl SearchHistory {
                 // Higher is better, handle missing
                 match (new.roc_auc, best.roc_auc) {
                     (Some(new_auc), Some(best_auc)) => new_auc > best_auc,
+                    (Some(_), None) => true,
+                    _ => false,
+                }
+            }
+            OptimizationMetric::RankIc => {
+                // Higher is better, handle missing
+                match (new.rank_ic, best.rank_ic) {
+                    (Some(new_ic), Some(best_ic)) => new_ic > best_ic,
                     (Some(_), None) => true,
                     _ => false,
                 }
@@ -131,11 +140,8 @@ impl SearchHistory {
             json.push_str("    {\n");
             json.push_str(&format!("      \"trial_id\": {},\n", trial.trial_id));
             json.push_str(&format!("      \"iteration\": {},\n", trial.iteration));
-            json.push_str(&format!("      \"val_metric\": {},\n", trial.val_metric));
-            json.push_str(&format!(
-                "      \"train_metric\": {},\n",
-                trial.train_metric
-            ));
+            json.push_str(&format!("      \"val_metric\": {},\n", trial.val_loss));
+            json.push_str(&format!("      \"train_metric\": {},\n", trial.train_loss));
             json.push_str(&format!("      \"num_trees\": {},\n", trial.num_trees));
             json.push_str(&format!(
                 "      \"train_time_ms\": {},\n",

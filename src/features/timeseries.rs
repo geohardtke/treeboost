@@ -789,7 +789,10 @@ impl MomentumGenerator {
                         let lagged = data[(row - lag) * num_features + feat];
 
                         // Compute percentage change: (current - lagged) / lagged
-                        if !current.is_nan() && !lagged.is_nan() && lagged.abs() > MIN_DENOMINATOR_VALUE {
+                        if !current.is_nan()
+                            && !lagged.is_nan()
+                            && lagged.abs() > MIN_DENOMINATOR_VALUE
+                        {
                             result[dst_idx] = (current - lagged) / lagged;
                         } else {
                             result[dst_idx] = f32::NAN;
@@ -824,7 +827,8 @@ impl MomentumGenerator {
                     let current = column[row];
                     let lagged = column[row - lag];
 
-                    if !current.is_nan() && !lagged.is_nan() && lagged.abs() > MIN_DENOMINATOR_VALUE {
+                    if !current.is_nan() && !lagged.is_nan() && lagged.abs() > MIN_DENOMINATOR_VALUE
+                    {
                         result[offset + row] = (current - lagged) / lagged;
                     } else {
                         result[offset + row] = f32::NAN;

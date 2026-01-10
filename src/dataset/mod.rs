@@ -33,4 +33,4 @@ pub use pipeline::{CategoricalEncodingState, DataPipeline, PipelineConfig, Pipel
 pub use reorder::{
     reorder_dataset, AccessTracker, ColumnPermutation, OrderingStrategy, ReorderBuilder,
 };
-pub use split::{split_holdout, split_kfold, HoldoutSplit, KFoldSplit};
+pub use split::{split_holdout, split_holdout_by_era, split_kfold, HoldoutSplit, KFoldSplit};

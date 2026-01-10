@@ -301,11 +301,7 @@ impl GroupedTimeSeriesGenerator {
     ///
     /// # Returns
     /// (new_features, feature_names) - Only the generated features (not original data)
-    pub fn transform(
-        &self,
-        data: &[f32],
-        num_features: usize,
-    ) -> Result<(Vec<f32>, Vec<String>)> {
+    pub fn transform(&self, data: &[f32], num_features: usize) -> Result<(Vec<f32>, Vec<String>)> {
         let group_indices = self.group_indices.as_ref().ok_or_else(|| {
             TreeBoostError::Config("Generator not fitted - call fit() first".into())
         })?;
@@ -350,7 +346,8 @@ impl GroupedTimeSeriesGenerator {
             .map(|&alpha| EwmaGenerator::new(alpha))
             .collect();
 
-        let momentum_gen = crate::features::MomentumGenerator::new(self.config.momentum_periods.clone());
+        let momentum_gen =
+            crate::features::MomentumGenerator::new(self.config.momentum_periods.clone());
 
         // Process each group independently
         for group_rows in group_indices {
@@ -398,8 +395,10 @@ impl GroupedTimeSeriesGenerator {
                     for (local_idx, &global_row) in group_rows.iter().enumerate() {
                         for stat_idx in 0..n_stats {
                             let src_idx = stat_idx * column.len() + local_idx;
-                            let dst_idx =
-                                global_row * total_new_features + base_offset + roll_offset + stat_idx;
+                            let dst_idx = global_row * total_new_features
+                                + base_offset
+                                + roll_offset
+                                + stat_idx;
                             if src_idx < rolled.len() && dst_idx < new_data.len() {
                                 new_data[dst_idx] = rolled[src_idx];
                             }
@@ -430,8 +429,10 @@ impl GroupedTimeSeriesGenerator {
                 for (local_idx, &global_row) in group_rows.iter().enumerate() {
                     for mom_idx in 0..n_momentum {
                         let src_idx = mom_idx * column.len() + local_idx;
-                        let dst_idx =
-                            global_row * total_new_features + base_offset + momentum_offset + mom_idx;
+                        let dst_idx = global_row * total_new_features
+                            + base_offset
+                            + momentum_offset
+                            + mom_idx;
                         if src_idx < momentum.len() && dst_idx < new_data.len() {
                             new_data[dst_idx] = momentum[src_idx];
                         }

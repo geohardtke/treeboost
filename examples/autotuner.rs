@@ -102,7 +102,7 @@ fn main() {
 
     if let Some(best) = history.best() {
         println!("\nBest trial:");
-        println!("  val_metric (MSE): {:.6}", best.val_metric);
+        println!("  val_metric (MSE): {:.6}", best.val_loss);
         println!("  num_trees: {}", best.num_trees);
         println!("  Parameters:");
         for (name, value) in &best.params {
@@ -163,7 +163,7 @@ fn main() {
 
     if let Some(best) = history.best() {
         println!("\nBest trial:");
-        println!("  val_metric (MSE): {:.6}", best.val_metric);
+        println!("  val_metric (MSE): {:.6}", best.val_loss);
         println!("  Parameters:");
         for (name, value) in &best.params {
             println!("    {}: {:.4}", name, value);
@@ -195,15 +195,15 @@ fn main() {
         .with_seed(777)
         .with_callback(move |trial, current, total| {
             let current_best = f32::from_bits(best_seen_clone.load(Ordering::SeqCst));
-            let is_new_best = trial.val_metric < current_best;
+            let is_new_best = trial.val_loss < current_best;
             if is_new_best {
-                best_seen_clone.store(trial.val_metric.to_bits(), Ordering::SeqCst);
+                best_seen_clone.store(trial.val_loss.to_bits(), Ordering::SeqCst);
             }
             print!(
                 "\r  Trial {}/{}: MSE={:.6} {}",
                 current,
                 total,
-                trial.val_metric,
+                trial.val_loss,
                 if is_new_best { "*NEW BEST*" } else { "" }
             );
             // Flush to ensure output appears immediately
@@ -223,7 +223,7 @@ fn main() {
 
     if let Some(best) = history.best() {
         println!("\nBest trial (3-fold CV):");
-        println!("  mean val_metric (MSE): {:.6}", best.val_metric);
+        println!("  mean val_metric (MSE): {:.6}", best.val_loss);
     }
 
     // =========================================================================
@@ -261,7 +261,7 @@ fn main() {
 
     if let Some(best) = history.best() {
         println!("\nBest trial:");
-        println!("  val_metric (MSE): {:.6}", best.val_metric);
+        println!("  val_metric (MSE): {:.6}", best.val_loss);
         println!(
             "  num_trees: {} (early stopped from max 200)",
             best.num_trees
@@ -312,7 +312,7 @@ fn main() {
 
     if let Some(best) = history.best() {
         println!("\nBest trial:");
-        println!("  val_metric (MSE): {:.6}", best.val_metric);
+        println!("  val_metric (MSE): {:.6}", best.val_loss);
         println!("  num_trees: {}", best.num_trees);
     }
 

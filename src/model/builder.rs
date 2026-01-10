@@ -337,13 +337,9 @@ impl AutoBuilder {
         }
 
         // === Phase 3b: Time-Series Feature Engineering ===
-        // Detect panel data structure and apply time-series features if found
+        // ALWAYS detect panel data structure (needed for era indices, even if not generating features)
         let mut working_df = df.clone();
-        let panel_info = if !skip_features {
-            self.detect_panel_structure(&profile, df)
-        } else {
-            None
-        };
+        let panel_info = self.detect_panel_structure(&profile, df);
 
         if let Some(ref info) = panel_info {
             if self.config.verbose {
@@ -353,35 +349,39 @@ impl AutoBuilder {
                 );
             }
 
-            // Plan time-series features
-            let ts_plan = SmartFeatureEngine::plan_timeseries_features(
-                &profile,
-                info,
-                &crate::features::SmartFeatureConfig::default(),
-            );
+            // Only generate time-series features if auto_features is enabled
+            if !skip_features {
+                // Plan time-series features
+                let ts_plan = SmartFeatureEngine::plan_timeseries_features(
+                    &profile,
+                    info,
+                    &crate::features::SmartFeatureConfig::default(),
+                );
 
-            if !ts_plan.is_empty() {
-                if self.config.verbose {
-                    println!(
-                        "  [TimeSeries] Generating {} features (lag, rolling, EWMA)",
-                        ts_plan.estimated_features
-                    );
-                }
+                if !ts_plan.is_empty() {
+                    if self.config.verbose {
+                        println!(
+                            "  [TimeSeries] Generating {} features (lag, rolling, EWMA)",
+                            ts_plan.estimated_features
+                        );
+                    }
 
-                // Apply time-series features to the DataFrame
-                working_df = crate::utils::apply_timeseries_features(working_df, &ts_plan, info, false)?;
+                    // Apply time-series features to the DataFrame
+                    working_df =
+                        crate::utils::apply_timeseries_features(working_df, &ts_plan, info, true)?;
 
-                if self.config.verbose {
-                    println!(
-                        "  [TimeSeries] New shape: {} rows × {} columns",
-                        working_df.height(),
-                        working_df.width()
-                    );
-                }
+                    if self.config.verbose {
+                        println!(
+                            "  [TimeSeries] New shape: {} rows × {} columns",
+                            working_df.height(),
+                            working_df.width()
+                        );
+                    }
 
-                // Update feature plan with time-series info
-                if let Some(ref mut plan) = feature_plan {
-                    plan.timeseries_features = Some(ts_plan);
+                    // Update feature plan with time-series info
+                    if let Some(ref mut plan) = feature_plan {
+                        plan.timeseries_features = Some(ts_plan);
+                    }
                 }
             }
         }
@@ -392,11 +392,15 @@ impl AutoBuilder {
             phase: TrainingPhase::DatasetPreparation,
             progress_pct: TrainingPhase::DatasetPreparation.progress_pct(),
             elapsed: start.elapsed(),
-            message: Some(format!("{} rows × {} cols", working_df.height(), working_df.width())),
+            message: Some(format!(
+                "{} rows × {} cols",
+                working_df.height(),
+                working_df.width()
+            )),
         });
 
         let (dataset, pipeline_state, filtered_df) =
-            self.prepare_dataset_and_state(&working_df, target_col)?;
+            self.prepare_dataset_and_state(&working_df, target_col, panel_info.as_ref())?;
 
         // Prepare validation dataset if custom validation data provided
         let validation_dataset = if let Some(ref val_df) = self.validation_df {
@@ -405,14 +409,19 @@ impl AutoBuilder {
                 (&panel_info, &feature_plan)
             {
                 if let Some(ref ts_plan) = plan.timeseries_features {
-                    crate::utils::apply_timeseries_features(val_df.clone(), ts_plan, info, false)?
+                    crate::utils::apply_timeseries_features(val_df.clone(), ts_plan, info, true)?
                 } else {
                     val_df.clone()
                 }
             } else {
                 val_df.clone()
             };
-            let (val_dataset, _, _) = self.prepare_dataset_and_state(&val_working_df, target_col)?;
+
+            // CRITICAL: Reuse era_column from training data's panel_info!
+            // Don't re-detect panel structure on validation set (may fail due to different cardinality ratio)
+            let era_column = panel_info.as_ref().map(|info| info.date_column.as_str());
+            let (val_dataset, _, _) =
+                self.prepare_dataset_with_era_column(&val_working_df, target_col, era_column)?;
             Some(val_dataset)
         } else {
             None
@@ -679,7 +688,9 @@ impl AutoBuilder {
 
     /// Profile a DataFrame to understand column types
     fn profile_dataframe(&self, df: &DataFrame, target_col: &str) -> Result<DataFrameProfile> {
-        DataFrameProfile::analyze(df, target_col)
+        // Skip correlations when mode is forced and auto features disabled
+        let skip_correlations = self.config.force_mode.is_some() && !self.config.auto_features;
+        DataFrameProfile::analyze_with_options(df, target_col, skip_correlations)
     }
 
     /// Plan preprocessing based on profile and model type
@@ -717,14 +728,40 @@ impl AutoBuilder {
         &self,
         df: &DataFrame,
         target_col: &str,
+        panel_info: Option<&crate::analysis::PanelDataInfo>,
     ) -> Result<(BinnedDataset, crate::dataset::PipelineState, DataFrame)> {
         // Use DataPipeline to create BinnedDataset
         let pipeline = DataPipeline::with_defaults();
 
         // Pass None for categorical_columns to enable auto-detection
         // (String/Categorical dtypes will be treated as categorical)
+        // Pass date_column as era_column if panel data detected
+        let era_column = panel_info.map(|info| info.date_column.as_str());
+
         let (dataset, pipeline_state, filtered_df) =
-            pipeline.process_for_training(df.clone(), target_col, None)?;
+            pipeline.process_for_training(df.clone(), target_col, None, era_column)?;
+
+        Ok((dataset, pipeline_state, filtered_df))
+    }
+
+    /// Prepare dataset with explicit era column (for validation sets)
+    ///
+    /// This method accepts an explicit era_column parameter instead of re-detecting panel structure.
+    /// Use this when preparing validation data to reuse the era column from training data,
+    /// avoiding panel detection failures due to different cardinality ratios.
+    fn prepare_dataset_with_era_column(
+        &self,
+        df: &DataFrame,
+        target_col: &str,
+        era_column: Option<&str>,
+    ) -> Result<(BinnedDataset, crate::dataset::PipelineState, DataFrame)> {
+        // Use DataPipeline to create BinnedDataset
+        let pipeline = DataPipeline::with_defaults();
+
+        // Pass None for categorical_columns to enable auto-detection
+        // Use provided era_column directly (no panel detection)
+        let (dataset, pipeline_state, filtered_df) =
+            pipeline.process_for_training(df.clone(), target_col, None, era_column)?;
 
         Ok((dataset, pipeline_state, filtered_df))
     }
@@ -845,7 +882,6 @@ impl AutoBuilder {
             time_granularity: crate::analysis::TimeGranularity::Daily, // Default assumption
         })
     }
-
 }
 
 impl Default for AutoBuilder {

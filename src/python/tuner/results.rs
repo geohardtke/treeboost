@@ -44,13 +44,13 @@ impl PyTrialResult {
     /// Validation metric (lower is better for MSE/LogLoss)
     #[getter]
     fn val_metric(&self) -> f32 {
-        self.inner.val_metric
+        self.inner.val_loss
     }
 
     /// Training metric
     #[getter]
     fn train_metric(&self) -> f32 {
-        self.inner.train_metric
+        self.inner.train_loss
     }
 
     /// Number of trees actually trained
@@ -86,7 +86,7 @@ impl PyTrialResult {
         let mut parts = vec![
             format!("trial_id={}", self.inner.trial_id),
             format!("iteration={}", self.inner.iteration),
-            format!("val_metric={:.6}", self.inner.val_metric),
+            format!("val_metric={:.6}", self.inner.val_loss),
             format!("num_trees={}", self.inner.num_trees),
         ];
         if let Some(f1) = self.inner.f1_score {
@@ -214,7 +214,7 @@ impl PySearchHistory {
         let best_info = if let Some(best) = self.inner.best() {
             format!(
                 ", best_trial_id={}, best_val={:.6}",
-                best.trial_id, best.val_metric
+                best.trial_id, best.val_loss
             )
         } else {
             String::new()
@@ -226,7 +226,7 @@ impl PySearchHistory {
 /// Helper to extract metric value for sorting
 fn get_metric_value(trial: &TrialResult, metric: OptimizationMetric) -> f32 {
     match metric {
-        OptimizationMetric::ValidationLoss => trial.val_metric,
+        OptimizationMetric::ValidationLoss => trial.val_loss,
         OptimizationMetric::F1Score => trial.f1_score.unwrap_or(0.0),
         OptimizationMetric::RocAuc => trial.roc_auc.unwrap_or(0.0) as f32,
     }
