@@ -1848,48 +1848,52 @@ mod tests {
 
     #[test]
     fn test_param_def() {
-        let mut param = ParamDef::new("test", ParamBounds::continuous(0.0, 1.0), 0.5);
-        assert_eq!(param.name, "test");
-        assert_eq!(param.center, 0.5);
+        let mut param = ParamDef::new(TunableParam::MaxDepth, ParamBounds::continuous(0.0, 10.0), 5.0);
+        assert_eq!(param.name, TunableParam::MaxDepth);
+        assert_eq!(param.center, 5.0);
 
-        param.set_center(2.0); // Out of bounds
-        assert_eq!(param.center, 1.0); // Clamped
+        param.set_center(15.0); // Out of bounds
+        assert_eq!(param.center, 10.0); // Clamped
     }
 
     #[test]
     fn test_parameter_space_default() {
+        use TunableParam::*;
         let space = ParameterSpace::with_preset(SpacePreset::Regression);
         assert_eq!(space.len(), 5);
-        assert!(space.get("max_depth").is_some());
-        assert!(space.get("learning_rate").is_some());
-        assert!(space.get("subsample").is_some());
-        assert!(space.get("lambda").is_some());
-        assert!(space.get("entropy_weight").is_some());
+        assert!(space.get(MaxDepth).is_some());
+        assert!(space.get(LearningRate).is_some());
+        assert!(space.get(Subsample).is_some());
+        assert!(space.get(Lambda).is_some());
+        assert!(space.get(EntropyWeight).is_some());
     }
 
     #[test]
     fn test_parameter_space_with_param() {
+        use TunableParam::*;
         let space = ParameterSpace::with_preset(SpacePreset::Minimal).with_param(
-            "colsample",
+            Colsample,
             ParamBounds::continuous(0.5, 1.0),
             0.8,
         );
 
         assert_eq!(space.len(), 3);
-        assert!(space.get("colsample").is_some());
+        assert!(space.get(Colsample).is_some());
     }
 
     #[test]
     fn test_parameter_space_without_param() {
+        use TunableParam::*;
         let space =
-            ParameterSpace::with_preset(SpacePreset::Regression).without_param("entropy_weight");
+            ParameterSpace::with_preset(SpacePreset::Regression).without_param(EntropyWeight);
 
         assert_eq!(space.len(), 4);
-        assert!(space.get("entropy_weight").is_none());
+        assert!(space.get(EntropyWeight).is_none());
     }
 
     #[test]
     fn test_parameter_space_centers() {
+        use TunableParam::*;
         let mut space = ParameterSpace::with_preset(SpacePreset::Minimal);
         let centers = space.centers();
         assert_eq!(centers.get("max_depth"), Some(&6.0));
@@ -1898,20 +1902,23 @@ mod tests {
         let mut new_centers = HashMap::new();
         new_centers.insert("max_depth".into(), 8.0);
         space.set_centers(&new_centers);
-        assert_eq!(space.get("max_depth").unwrap().center, 8.0);
+        assert_eq!(space.get(MaxDepth).unwrap().center, 8.0);
     }
 
     #[test]
-    fn test_parameter_space_validate() {
-        let valid = ParameterSpace::with_preset(SpacePreset::Regression);
-        assert!(valid.validate().is_ok());
+    fn test_parameter_space_add_and_remove() {
+        use TunableParam::*;
+        // Test that adding a parameter increases space size
+        let space = ParameterSpace::new()
+            .with_param(MaxDepth, ParamBounds::discrete(2, 10), 6.0)
+            .with_param(LearningRate, ParamBounds::log_continuous(0.01, 0.3), 0.1);
+        assert_eq!(space.len(), 2);
 
-        let invalid = ParameterSpace::new().with_param(
-            "invalid_param",
-            ParamBounds::continuous(0.0, 1.0),
-            0.5,
-        );
-        assert!(invalid.validate().is_err());
+        // Test that removing a parameter decreases space size
+        let space = space.without_param(LearningRate);
+        assert_eq!(space.len(), 1);
+        assert!(space.get(MaxDepth).is_some());
+        assert!(space.get(LearningRate).is_none());
     }
 
     #[test]

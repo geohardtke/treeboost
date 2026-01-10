@@ -344,13 +344,13 @@ mod tests {
 
     #[test]
     fn test_param_map_ext_with_space() {
-        use crate::tuner::config::{ParamBounds, ParameterSpace};
+        use crate::tuner::config::{ParamBounds, ParameterSpace, TunableParam};
 
         // Create a parameter space with both numeric and categorical params
         let space = ParameterSpace::new()
-            .with_param("learning_rate", ParamBounds::continuous(0.01, 0.5), 0.1)
+            .with_param(TunableParam::LearningRate, ParamBounds::continuous(0.01, 0.5), 0.1)
             .with_param(
-                "mode",
+                TunableParam::Mode,
                 ParamBounds::categorical(vec![
                     "PureTree".to_string(),
                     "LinearThenTree".to_string(),
@@ -380,11 +380,11 @@ mod tests {
 
     #[test]
     fn test_param_map_ext_with_space_unknown_param() {
-        use crate::tuner::config::{ParamBounds, ParameterSpace};
+        use crate::tuner::config::{ParamBounds, ParameterSpace, TunableParam};
 
         // Create a minimal parameter space
         let space = ParameterSpace::new().with_param(
-            "learning_rate",
+            TunableParam::LearningRate,
             ParamBounds::continuous(0.01, 0.5),
             0.1,
         );
