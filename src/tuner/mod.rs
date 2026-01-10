@@ -61,7 +61,7 @@ mod trial;
 // Re-exports from config
 pub use config::{
     EvalStrategy, GridStrategy, ModelFormat, OptimizationMetric, ParamBounds, ParamDef,
-    ParameterSpace, SpacePreset, TaskType, TunerConfig, TunerPreset, TuningMode,
+    ParameterSpace, SpacePreset, TaskType, TunableParam, TunerConfig, TunerPreset, TuningMode,
 };
 
 // Re-exports from metrics

@@ -451,7 +451,12 @@ impl<M: TunableModel> AutoTuner<M> {
         // Initialize trial logger if output_dir is configured
         let logger = init_logger(
             &self.config.output_dir,
-            self.config.space.param_names(),
+            self.config
+                .space
+                .param_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             self.config.verbose,
         )?;
 
@@ -779,7 +784,12 @@ impl<M: TunableModel> AutoTuner<M> {
         // Initialize trial logger if output_dir is configured
         let logger = init_logger(
             &self.config.output_dir,
-            self.config.space.param_names(),
+            self.config
+                .space
+                .param_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             self.config.verbose,
         )?;
 
@@ -1079,7 +1089,7 @@ impl<M: TunableModel> AutoTuner<M> {
             // Build candidate from current indices
             let mut candidate = HashMap::new();
             for (i, param) in params.iter().enumerate() {
-                candidate.insert(param.name.clone(), param_values[i][indices[i]]);
+                candidate.insert(param.name.to_string().into(), param_values[i][indices[i]]);
             }
             candidates.push(candidate);
 
@@ -1105,8 +1115,9 @@ impl<M: TunableModel> AutoTuner<M> {
         // This can happen when discrete parameters with small spread all round to the same value
         candidates.sort_by(|a, b| {
             for param in params {
-                let va = a.get(&param.name).unwrap_or(&0.0);
-                let vb = b.get(&param.name).unwrap_or(&0.0);
+                let name_str = param.name.to_string();
+                let va = a.get(name_str).unwrap_or(&0.0);
+                let vb = b.get(name_str).unwrap_or(&0.0);
                 match va.partial_cmp(vb) {
                     Some(std::cmp::Ordering::Equal) => continue,
                     Some(ord) => return ord,
@@ -1278,7 +1289,7 @@ impl<M: TunableModel> AutoTuner<M> {
                     low + u * (high - low)
                 };
 
-                candidate.insert(param.name.clone(), param.bounds.clamp(value));
+                candidate.insert(param.name.to_string().into(), param.bounds.clamp(value));
             }
 
             candidates.push(candidate);
@@ -1330,7 +1341,7 @@ impl<M: TunableModel> AutoTuner<M> {
                     low + u * (high - low)
                 };
 
-                candidate.insert(param.name.clone(), param.bounds.clamp(value));
+                candidate.insert(param.name.to_string().into(), param.bounds.clamp(value));
             }
 
             candidates.push(candidate);

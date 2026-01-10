@@ -276,12 +276,17 @@ impl ParamMapExt for HashMap<String, f32> {
         &self,
         space: &super::config::ParameterSpace,
     ) -> HashMap<String, ParamValue> {
+        use super::config::TunableParam;
+
         self.iter()
             .map(|(k, v)| {
                 // Check if this parameter is categorical
-                if let Some(param_def) = space.get(k) {
-                    if let Some(cat_value) = param_def.bounds.get_categorical_value(*v as usize) {
-                        return (k.clone(), ParamValue::Categorical(cat_value.to_string()));
+                if let Ok(param_name) = TunableParam::parse(k) {
+                    if let Some(param_def) = space.get(param_name) {
+                        if let Some(cat_value) = param_def.bounds.get_categorical_value(*v as usize)
+                        {
+                            return (k.clone(), ParamValue::Categorical(cat_value.to_string()));
+                        }
                     }
                 }
                 // Default to numeric

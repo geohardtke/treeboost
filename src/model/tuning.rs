@@ -112,20 +112,29 @@ fn tune_tree_model(
     };
 
     // Define parameter space from config
+    use crate::tuner::TunableParam;
     let param_space = ParameterSpace::new()
         .with_param(
-            "max_depth",
+            TunableParam::MaxDepth,
             ParamBounds::discrete(tuner_cfg.depth.min, tuner_cfg.depth.max),
             6.0,
         )
         .with_param(
-            "learning_rate",
+            TunableParam::LearningRate,
             ParamBounds::log_continuous(tuner_cfg.learning_rate.min, tuner_cfg.learning_rate.max),
             0.1,
         )
-        .with_param("subsample", ParamBounds::continuous(0.6, 1.0), 0.8)
-        .with_param("lambda", ParamBounds::continuous(0.1, 5.0), 1.0)
-        .with_param("entropy_weight", ParamBounds::continuous(0.0, 0.3), 0.1);
+        .with_param(
+            TunableParam::Subsample,
+            ParamBounds::continuous(0.6, 1.0),
+            0.8,
+        )
+        .with_param(TunableParam::Lambda, ParamBounds::continuous(0.1, 5.0), 1.0)
+        .with_param(
+            TunableParam::EntropyWeight,
+            ParamBounds::continuous(0.0, 0.3),
+            0.1,
+        );
 
     // Resolve backend ONCE before tuning (don't re-resolve per trial)
     use crate::backend::{BackendConfig, BackendSelector, BackendType};

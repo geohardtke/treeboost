@@ -16,6 +16,250 @@ use std::path::PathBuf;
 use crate::defaults::{seeds as seeds_defaults, tuner as tuner_defaults};
 use crate::TreeBoostError;
 
+/// Type-safe tunable parameter names
+///
+/// This enum provides compile-time type safety for hyperparameter names,
+/// eliminating string typos and runtime validation errors.
+///
+/// # Parameter Categories
+///
+/// ## GBDTModel Parameters
+/// - **Tree structure**: `MaxDepth`
+/// - **Learning**: `LearningRate`, `NumRounds`
+/// - **Sampling**: `Subsample`, `Colsample`, `GossTopRate`, `GossOtherRate`
+/// - **Regularization**: `Lambda`, `EntropyWeight`, `MinSamplesLeaf`, `MinHessianLeaf`, `MinGain`
+///
+/// ## UniversalModel Parameters
+/// - **Mode selection**: `Mode` (categorical: PureTree, LinearThenTree, RandomForest)
+/// - **Common**: `NumRounds`, `LearningRate`, `Subsample`, `ValidationRatio`, `EarlyStoppingRounds`
+/// - **Linear**: `LinearRounds`, `LinearLambda`, `LinearMaxIter`
+/// - **Tree**: `TreeMaxDepth`, `TreeMaxLeaves`, `TreeLambda`
+///
+/// # Example
+///
+/// ```
+/// use treeboost::tuner::config::{TunableParam, ParamBounds, ParamDef};
+///
+/// // Type-safe parameter definition
+/// let param = ParamDef::new(
+///     TunableParam::MaxDepth,
+///     ParamBounds::discrete(2, 12),
+///     6.0,
+/// );
+///
+/// // Parsing from string
+/// let parsed = TunableParam::parse("learning_rate")?;
+/// assert_eq!(parsed, TunableParam::LearningRate);
+///
+/// // Converting to string
+/// assert_eq!(TunableParam::Lambda.to_string(), "lambda");
+/// # Ok::<(), String>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TunableParam {
+    // === GBDTModel Parameters ===
+    /// Tree maximum depth (discrete: 2-12)
+    MaxDepth,
+    /// Learning rate / shrinkage (continuous log: 0.01-0.5)
+    LearningRate,
+    /// Row subsampling ratio (continuous: 0.5-1.0)
+    Subsample,
+    /// Feature subsampling ratio (continuous: 0.5-1.0)
+    Colsample,
+    /// L2 regularization strength (continuous: 0.0-10.0)
+    Lambda,
+    /// Shannon entropy regularization weight (continuous: 0.0-0.5)
+    EntropyWeight,
+    /// Minimum samples per leaf (discrete: 1-100)
+    MinSamplesLeaf,
+    /// Minimum hessian sum per leaf (continuous: 0.0-10.0)
+    MinHessianLeaf,
+    /// Minimum split gain threshold (continuous: 0.0-1.0)
+    MinGain,
+    /// Number of boosting rounds (discrete: 50-500)
+    NumRounds,
+    /// GOSS top gradient sample ratio (continuous: 0.1-0.4)
+    GossTopRate,
+    /// GOSS other gradient sample ratio (continuous: 0.05-0.2)
+    GossOtherRate,
+
+    // === UniversalModel Parameters ===
+    /// Boosting mode (categorical: PureTree, LinearThenTree, RandomForest)
+    Mode,
+    /// Validation set ratio for early stopping (continuous: 0.0-0.5)
+    ValidationRatio,
+    /// Early stopping patience rounds (discrete: 5-50)
+    EarlyStoppingRounds,
+    /// Number of linear boosting rounds (discrete: 1-30)
+    LinearRounds,
+    /// Tree max depth in UniversalModel (discrete: 2-12)
+    TreeMaxDepth,
+    /// Tree max leaves in UniversalModel (discrete: 8-256)
+    TreeMaxLeaves,
+    /// Tree L2 regularization in UniversalModel (continuous: 0.0-10.0)
+    TreeLambda,
+    /// Linear L2 regularization (continuous log: 0.01-10.0)
+    LinearLambda,
+    /// Linear coordinate descent max iterations (discrete: 10-1000)
+    LinearMaxIter,
+}
+
+impl TunableParam {
+    /// Parse parameter name from string
+    ///
+    /// # Errors
+    ///
+    /// Returns error if the parameter name is not recognized.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use treeboost::tuner::config::TunableParam;
+    ///
+    /// let param = TunableParam::parse("max_depth")?;
+    /// assert_eq!(param, TunableParam::MaxDepth);
+    ///
+    /// let err = TunableParam::parse("invalid_param");
+    /// assert!(err.is_err());
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            // GBDTModel parameters
+            "max_depth" => Ok(Self::MaxDepth),
+            "learning_rate" => Ok(Self::LearningRate),
+            "subsample" => Ok(Self::Subsample),
+            "colsample" => Ok(Self::Colsample),
+            "lambda" => Ok(Self::Lambda),
+            "entropy_weight" => Ok(Self::EntropyWeight),
+            "min_samples_leaf" => Ok(Self::MinSamplesLeaf),
+            "min_hessian_leaf" => Ok(Self::MinHessianLeaf),
+            "min_gain" => Ok(Self::MinGain),
+            "num_rounds" => Ok(Self::NumRounds),
+            "goss_top_rate" => Ok(Self::GossTopRate),
+            "goss_other_rate" => Ok(Self::GossOtherRate),
+            // UniversalModel parameters
+            "mode" => Ok(Self::Mode),
+            "validation_ratio" => Ok(Self::ValidationRatio),
+            "early_stopping_rounds" => Ok(Self::EarlyStoppingRounds),
+            "linear_rounds" => Ok(Self::LinearRounds),
+            "tree_max_depth" => Ok(Self::TreeMaxDepth),
+            "tree_max_leaves" => Ok(Self::TreeMaxLeaves),
+            "tree_lambda" => Ok(Self::TreeLambda),
+            "linear_lambda" => Ok(Self::LinearLambda),
+            "linear_max_iter" => Ok(Self::LinearMaxIter),
+            _ => Err(format!(
+                "Unknown parameter '{}'. Valid parameters: {:?}",
+                s,
+                Self::all_names()
+            )),
+        }
+    }
+
+    /// Convert parameter to its string representation
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use treeboost::tuner::config::TunableParam;
+    ///
+    /// assert_eq!(TunableParam::MaxDepth.to_string(), "max_depth");
+    /// assert_eq!(TunableParam::LearningRate.to_string(), "learning_rate");
+    /// ```
+    pub fn to_string(&self) -> &'static str {
+        match self {
+            // GBDTModel parameters
+            Self::MaxDepth => "max_depth",
+            Self::LearningRate => "learning_rate",
+            Self::Subsample => "subsample",
+            Self::Colsample => "colsample",
+            Self::Lambda => "lambda",
+            Self::EntropyWeight => "entropy_weight",
+            Self::MinSamplesLeaf => "min_samples_leaf",
+            Self::MinHessianLeaf => "min_hessian_leaf",
+            Self::MinGain => "min_gain",
+            Self::NumRounds => "num_rounds",
+            Self::GossTopRate => "goss_top_rate",
+            Self::GossOtherRate => "goss_other_rate",
+            // UniversalModel parameters
+            Self::Mode => "mode",
+            Self::ValidationRatio => "validation_ratio",
+            Self::EarlyStoppingRounds => "early_stopping_rounds",
+            Self::LinearRounds => "linear_rounds",
+            Self::TreeMaxDepth => "tree_max_depth",
+            Self::TreeMaxLeaves => "tree_max_leaves",
+            Self::TreeLambda => "tree_lambda",
+            Self::LinearLambda => "linear_lambda",
+            Self::LinearMaxIter => "linear_max_iter",
+        }
+    }
+
+    /// Get all valid parameter names
+    pub fn all_names() -> &'static [&'static str] {
+        &[
+            // GBDTModel
+            "max_depth",
+            "learning_rate",
+            "subsample",
+            "colsample",
+            "lambda",
+            "entropy_weight",
+            "min_samples_leaf",
+            "min_hessian_leaf",
+            "min_gain",
+            "num_rounds",
+            "goss_top_rate",
+            "goss_other_rate",
+            // UniversalModel
+            "mode",
+            "validation_ratio",
+            "early_stopping_rounds",
+            "linear_rounds",
+            "tree_max_depth",
+            "tree_max_leaves",
+            "tree_lambda",
+            "linear_lambda",
+            "linear_max_iter",
+        ]
+    }
+
+    /// Get GBDTModel-specific parameter names
+    pub fn gbdt_params() -> &'static [Self] {
+        &[
+            Self::MaxDepth,
+            Self::LearningRate,
+            Self::Subsample,
+            Self::Colsample,
+            Self::Lambda,
+            Self::EntropyWeight,
+            Self::MinSamplesLeaf,
+            Self::MinHessianLeaf,
+            Self::MinGain,
+            Self::NumRounds,
+            Self::GossTopRate,
+            Self::GossOtherRate,
+        ]
+    }
+
+    /// Get UniversalModel-specific parameter names
+    pub fn universal_params() -> &'static [Self] {
+        &[
+            Self::Mode,
+            Self::NumRounds,
+            Self::LearningRate,
+            Self::Subsample,
+            Self::ValidationRatio,
+            Self::EarlyStoppingRounds,
+            Self::LinearRounds,
+            Self::TreeMaxDepth,
+            Self::TreeMaxLeaves,
+            Self::TreeLambda,
+            Self::LinearLambda,
+            Self::LinearMaxIter,
+        ]
+    }
+}
+
 /// Model serialization format
 ///
 /// Determines how the best model is saved after tuning.
@@ -213,8 +457,8 @@ impl ParamBounds {
 /// Definition of a single tunable parameter
 #[derive(Debug, Clone)]
 pub struct ParamDef {
-    /// Parameter name (must match GBDTConfig field name)
-    pub name: String,
+    /// Parameter name (type-safe enum)
+    pub name: TunableParam,
     /// Bounds and scaling
     pub bounds: ParamBounds,
     /// Current center point for grid generation
@@ -223,14 +467,28 @@ pub struct ParamDef {
 
 impl ParamDef {
     /// Create a new parameter definition
-    pub fn new(name: impl Into<String>, bounds: ParamBounds, center: f32) -> Self {
-        let name = name.into();
+    pub fn new(name: TunableParam, bounds: ParamBounds, center: f32) -> Self {
         let center = bounds.clamp(center);
         Self {
             name,
             bounds,
             center,
         }
+    }
+
+    /// Create a parameter definition from string name (for backward compatibility)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if the parameter name is not recognized.
+    pub fn from_str(name: &str, bounds: ParamBounds, center: f32) -> Result<Self, String> {
+        let param = TunableParam::parse(name)?;
+        Ok(Self::new(param, bounds, center))
+    }
+
+    /// Get the parameter name as a string
+    pub fn name_str(&self) -> &'static str {
+        self.name.to_string()
     }
 
     /// Update the center point (clamped to bounds)
@@ -285,16 +543,17 @@ impl ParameterSpace {
 
     /// Create an exhaustive search space (adds GOSS and colsample).
     pub fn exhaustive() -> Self {
+        use TunableParam::*;
         Self {
             params: vec![
-                ParamDef::new("max_depth", ParamBounds::discrete(2, 12), 6.0),
-                ParamDef::new("learning_rate", ParamBounds::log_continuous(0.01, 0.5), 0.1),
-                ParamDef::new("subsample", ParamBounds::continuous(0.5, 1.0), 0.8),
-                ParamDef::new("colsample", ParamBounds::continuous(0.5, 1.0), 1.0),
-                ParamDef::new("lambda", ParamBounds::continuous(0.0, 10.0), 1.0),
-                ParamDef::new("entropy_weight", ParamBounds::continuous(0.0, 0.5), 0.0),
-                ParamDef::new("goss_top_rate", ParamBounds::continuous(0.1, 0.4), 0.2),
-                ParamDef::new("goss_other_rate", ParamBounds::continuous(0.05, 0.2), 0.1),
+                ParamDef::new(MaxDepth, ParamBounds::discrete(2, 12), 6.0),
+                ParamDef::new(LearningRate, ParamBounds::log_continuous(0.01, 0.5), 0.1),
+                ParamDef::new(Subsample, ParamBounds::continuous(0.5, 1.0), 0.8),
+                ParamDef::new(Colsample, ParamBounds::continuous(0.5, 1.0), 1.0),
+                ParamDef::new(Lambda, ParamBounds::continuous(0.0, 10.0), 1.0),
+                ParamDef::new(EntropyWeight, ParamBounds::continuous(0.0, 0.5), 0.0),
+                ParamDef::new(GossTopRate, ParamBounds::continuous(0.1, 0.4), 0.2),
+                ParamDef::new(GossOtherRate, ParamBounds::continuous(0.05, 0.2), 0.1),
             ],
         }
     }
@@ -305,7 +564,7 @@ impl ParameterSpace {
     pub fn universal_mode_only() -> Self {
         Self {
             params: vec![ParamDef::new(
-                "mode",
+                TunableParam::Mode,
                 ParamBounds::categorical_from_strs(&["PureTree", "LinearThenTree", "RandomForest"]),
                 0.0,
             )],
@@ -313,44 +572,48 @@ impl ParameterSpace {
     }
 
     fn regression_space() -> Self {
+        use TunableParam::*;
         Self {
             params: vec![
-                ParamDef::new("max_depth", ParamBounds::discrete(2, 12), 6.0),
-                ParamDef::new("learning_rate", ParamBounds::log_continuous(0.01, 0.5), 0.1),
-                ParamDef::new("subsample", ParamBounds::continuous(0.5, 1.0), 0.8),
-                ParamDef::new("lambda", ParamBounds::continuous(0.0, 10.0), 1.0),
-                ParamDef::new("entropy_weight", ParamBounds::continuous(0.0, 0.5), 0.0),
+                ParamDef::new(MaxDepth, ParamBounds::discrete(2, 12), 6.0),
+                ParamDef::new(LearningRate, ParamBounds::log_continuous(0.01, 0.5), 0.1),
+                ParamDef::new(Subsample, ParamBounds::continuous(0.5, 1.0), 0.8),
+                ParamDef::new(Lambda, ParamBounds::continuous(0.0, 10.0), 1.0),
+                ParamDef::new(EntropyWeight, ParamBounds::continuous(0.0, 0.5), 0.0),
             ],
         }
     }
 
     fn classification_space() -> Self {
+        use TunableParam::*;
         Self {
             params: vec![
-                ParamDef::new("max_depth", ParamBounds::discrete(2, 10), 5.0),
-                ParamDef::new("learning_rate", ParamBounds::log_continuous(0.01, 0.3), 0.1),
-                ParamDef::new("subsample", ParamBounds::continuous(0.6, 1.0), 0.8),
-                ParamDef::new("lambda", ParamBounds::continuous(0.0, 5.0), 1.0),
-                ParamDef::new("entropy_weight", ParamBounds::continuous(0.0, 0.3), 0.0),
+                ParamDef::new(MaxDepth, ParamBounds::discrete(2, 10), 5.0),
+                ParamDef::new(LearningRate, ParamBounds::log_continuous(0.01, 0.3), 0.1),
+                ParamDef::new(Subsample, ParamBounds::continuous(0.6, 1.0), 0.8),
+                ParamDef::new(Lambda, ParamBounds::continuous(0.0, 5.0), 1.0),
+                ParamDef::new(EntropyWeight, ParamBounds::continuous(0.0, 0.3), 0.0),
             ],
         }
     }
 
     fn minimal_space() -> Self {
+        use TunableParam::*;
         Self {
             params: vec![
-                ParamDef::new("max_depth", ParamBounds::discrete(3, 10), 6.0),
-                ParamDef::new("learning_rate", ParamBounds::log_continuous(0.01, 0.3), 0.1),
+                ParamDef::new(MaxDepth, ParamBounds::discrete(3, 10), 6.0),
+                ParamDef::new(LearningRate, ParamBounds::log_continuous(0.01, 0.3), 0.1),
             ],
         }
     }
 
     fn universal_space() -> Self {
+        use TunableParam::*;
         Self {
             params: vec![
                 // Mode selection (categorical)
                 ParamDef::new(
-                    "mode",
+                    Mode,
                     ParamBounds::categorical_from_strs(&[
                         "PureTree",
                         "LinearThenTree",
@@ -359,12 +622,12 @@ impl ParameterSpace {
                     0.0, // PureTree is default (index 0)
                 ),
                 // Common parameters
-                ParamDef::new("num_rounds", ParamBounds::discrete(50, 200), 100.0),
-                ParamDef::new("learning_rate", ParamBounds::log_continuous(0.01, 0.3), 0.1),
-                ParamDef::new("subsample", ParamBounds::continuous(0.6, 1.0), 0.8),
+                ParamDef::new(NumRounds, ParamBounds::discrete(50, 200), 100.0),
+                ParamDef::new(LearningRate, ParamBounds::log_continuous(0.01, 0.3), 0.1),
+                ParamDef::new(Subsample, ParamBounds::continuous(0.6, 1.0), 0.8),
                 // Tree parameters
-                ParamDef::new("tree_max_depth", ParamBounds::discrete(3, 10), 6.0),
-                ParamDef::new("tree_lambda", ParamBounds::continuous(0.0, 10.0), 1.0),
+                ParamDef::new(TreeMaxDepth, ParamBounds::discrete(3, 10), 6.0),
+                ParamDef::new(TreeLambda, ParamBounds::continuous(0.0, 10.0), 1.0),
             ],
         }
     }
@@ -373,21 +636,18 @@ impl ParameterSpace {
     ///
     /// Includes parameters relevant to LinearThenTree mode.
     pub fn universal_linear_then_tree() -> Self {
+        use TunableParam::*;
         Self {
             params: vec![
                 ParamDef::new(
-                    "num_rounds",
+                    NumRounds,
                     ParamBounds::discrete(30, 150),
                     50.0, // Fewer rounds needed with linear component
                 ),
-                ParamDef::new("learning_rate", ParamBounds::log_continuous(0.01, 0.3), 0.1),
-                ParamDef::new("linear_rounds", ParamBounds::discrete(5, 30), 10.0),
-                ParamDef::new(
-                    "linear_lambda",
-                    ParamBounds::log_continuous(0.01, 10.0),
-                    1.0,
-                ),
-                ParamDef::new("tree_max_depth", ParamBounds::discrete(3, 8), 5.0),
+                ParamDef::new(LearningRate, ParamBounds::log_continuous(0.01, 0.3), 0.1),
+                ParamDef::new(LinearRounds, ParamBounds::discrete(5, 30), 10.0),
+                ParamDef::new(LinearLambda, ParamBounds::log_continuous(0.01, 10.0), 1.0),
+                ParamDef::new(TreeMaxDepth, ParamBounds::discrete(3, 8), 5.0),
             ],
         }
     }
@@ -395,7 +655,7 @@ impl ParameterSpace {
     /// Add or update a parameter in the search space
     ///
     /// If a parameter with the same name exists, it will be replaced.
-    pub fn with_param(mut self, name: &str, bounds: ParamBounds, center: f32) -> Self {
+    pub fn with_param(mut self, name: TunableParam, bounds: ParamBounds, center: f32) -> Self {
         // Remove existing param with same name
         self.params.retain(|p| p.name != name);
         self.params.push(ParamDef::new(name, bounds, center));
@@ -405,18 +665,18 @@ impl ParameterSpace {
     /// Remove a parameter from tuning
     ///
     /// The parameter will use its default value from the base config.
-    pub fn without_param(mut self, name: &str) -> Self {
+    pub fn without_param(mut self, name: TunableParam) -> Self {
         self.params.retain(|p| p.name != name);
         self
     }
 
     /// Get a parameter by name
-    pub fn get(&self, name: &str) -> Option<&ParamDef> {
+    pub fn get(&self, name: TunableParam) -> Option<&ParamDef> {
         self.params.iter().find(|p| p.name == name)
     }
 
     /// Get a mutable parameter by name
-    pub fn get_mut(&mut self, name: &str) -> Option<&mut ParamDef> {
+    pub fn get_mut(&mut self, name: TunableParam) -> Option<&mut ParamDef> {
         self.params.iter_mut().find(|p| p.name == name)
     }
 
@@ -441,53 +701,26 @@ impl ParameterSpace {
     }
 
     /// Get parameter names in consistent order
-    pub fn param_names(&self) -> Vec<String> {
-        self.params.iter().map(|p| p.name.clone()).collect()
+    pub fn param_names(&self) -> Vec<&'static str> {
+        self.params.iter().map(|p| p.name.to_string()).collect()
     }
 
     /// Get current centers as a HashMap
-    pub fn centers(&self) -> HashMap<String, f32> {
+    pub fn centers(&self) -> HashMap<&'static str, f32> {
         self.params
             .iter()
-            .map(|p| (p.name.clone(), p.center))
+            .map(|p| (p.name.to_string(), p.center))
             .collect()
     }
 
-    /// Update centers from a HashMap
+    /// Update centers from a HashMap (accepts string keys for backward compatibility)
     pub fn set_centers(&mut self, centers: &HashMap<String, f32>) {
         for param in &mut self.params {
-            if let Some(&center) = centers.get(&param.name) {
+            let name_str = param.name.to_string();
+            if let Some(&center) = centers.get(name_str) {
                 param.set_center(center);
             }
         }
-    }
-
-    /// Validate that all parameter names are recognized GBDTConfig fields
-    pub fn validate(&self) -> Result<(), String> {
-        const VALID_PARAMS: &[&str] = &[
-            "max_depth",
-            "learning_rate",
-            "subsample",
-            "colsample",
-            "lambda",
-            "entropy_weight",
-            "min_samples_leaf",
-            "min_hessian_leaf",
-            "min_gain",
-            "num_rounds",
-            "goss_top_rate",
-            "goss_other_rate",
-        ];
-
-        for param in &self.params {
-            if !VALID_PARAMS.contains(&param.name.as_str()) {
-                return Err(format!(
-                    "Unknown parameter '{}'. Valid parameters: {:?}",
-                    param.name, VALID_PARAMS
-                ));
-            }
-        }
-        Ok(())
     }
 
     /// Constrain parameter bounds based on historical results
@@ -612,9 +845,10 @@ impl ParameterSpace {
 
         // For each parameter, find min/max in top trials and constrain bounds
         for param in &mut self.params {
+            let param_name_str = param.name.to_string();
             let values: Vec<f32> = top_trials
                 .iter()
-                .filter_map(|t| t.get(&param.name).copied())
+                .filter_map(|t| t.get(param_name_str).copied())
                 .filter(|v| !v.is_nan())
                 .collect();
 
@@ -1553,7 +1787,7 @@ impl TunerConfig {
             return Err("num_rounds must be > 0".into());
         }
 
-        self.space.validate()?;
+        // Note: No need to validate parameter names anymore - TunableParam enum ensures type safety
         self.grid_strategy.validate()?;
         self.eval_strategy.validate()?;
 
