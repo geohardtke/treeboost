@@ -388,9 +388,6 @@ pub mod tree;
 pub mod tuner;
 pub mod utils;
 
-// Kernel re-exported from scalar backend (canonical location for CPU kernels)
-pub use backend::scalar::kernel;
-
 #[cfg(feature = "python")]
 mod python;
 

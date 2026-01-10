@@ -17,7 +17,7 @@ use crate::histogram::{
     average_era_gain, has_directional_agreement, EraHistograms, EraSplitStats, Histogram,
     NodeHistograms, NUM_BINS,
 };
-use crate::kernel::find_best_split as kernel_find_best_split;
+use crate::backend::scalar::kernel::find_best_split as kernel_find_best_split;
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// Split statistics for a node partition (used in gain computation)

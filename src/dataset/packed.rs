@@ -112,7 +112,7 @@ impl PackedColumn {
 
         if full_bytes > 0 {
             // Unpack full bytes using SIMD kernel
-            crate::kernel::unpack_4bit(&self.data[..full_bytes], &mut buffer[..full_bytes * 2]);
+            crate::backend::scalar::kernel::unpack_4bit(&self.data[..full_bytes], &mut buffer[..full_bytes * 2]);
         }
 
         // Handle odd row count manually (last row if num_rows is odd)
@@ -138,7 +138,7 @@ impl PackedColumn {
         if start_row.is_multiple_of(2) && count.is_multiple_of(2) {
             let start_byte = start_row / 2;
             let byte_count = count / 2;
-            crate::kernel::unpack_4bit(
+            crate::backend::scalar::kernel::unpack_4bit(
                 &self.data[start_byte..start_byte + byte_count],
                 &mut buffer[..count],
             );

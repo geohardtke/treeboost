@@ -26,7 +26,7 @@
 
 use crate::dataset::{BinnedDataset, SparseColumn, DEFAULT_BIN};
 use crate::histogram::{Histogram, NodeHistograms};
-use crate::kernel;
+use crate::backend::scalar::kernel;
 use rayon::prelude::*;
 
 /// Block size for cache-blocked histogram building
