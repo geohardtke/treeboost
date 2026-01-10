@@ -499,10 +499,10 @@ impl LinearBooster {
     /// Coordinate Descent with Elastic Net regularization
     ///
     /// This is the core algorithm. Updates weights to minimize:
-    /// L = Σ_i hessian[i] * (pred[i] - target[i])² + λ₂ * ||w||² + λ₁ * ||w||₁
+    /// L = Σ_i `hessian[i]` * `(pred[i] - target[i])²` + λ₂ * ||w||² + λ₁ * ||w||₁
     ///
     /// Where:
-    /// - target[i] = -gradient[i] / hessian[i] (Newton step target)
+    /// - `target[i] = -gradient[i] / hessian[i]` (Newton step target)
     /// - λ₂ = lambda * (1 - l1_ratio)  (L2/Ridge penalty)
     /// - λ₁ = lambda * l1_ratio         (L1/LASSO penalty)
     ///

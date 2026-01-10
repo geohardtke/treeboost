@@ -75,9 +75,9 @@ impl SplitCandidate {
 /// This is the baseline implementation that works on all architectures.
 ///
 /// # Arguments
-/// * `hist_grads` - Sum of gradients per bin [256]
-/// * `hist_hess` - Sum of hessians per bin [256]
-/// * `hist_counts` - Count per bin [256]
+/// * `hist_grads` - Sum of gradients per bin `[256]`
+/// * `hist_hess` - Sum of hessians per bin `[256]`
+/// * `hist_counts` - Count per bin `[256]`
 /// * `total_gradient` - Total gradient sum across all bins
 /// * `total_hessian` - Total hessian sum across all bins
 /// * `total_count` - Total sample count across all bins

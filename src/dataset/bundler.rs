@@ -53,7 +53,7 @@ pub struct FeatureBundle {
     /// Original feature indices in this bundle
     pub feature_indices: Vec<usize>,
     /// Bin offset for each feature (cumulative bins)
-    /// feature i's bins start at bin_offsets[i] and end at bin_offsets[i+1]-1
+    /// feature `i`'s bins start at `bin_offsets[i]` and end at `bin_offsets[i+1]-1`
     pub bin_offsets: Vec<u8>,
     /// Total number of bins in this bundle
     pub total_bins: u8,
@@ -523,7 +523,7 @@ impl BundleBuilder {
 pub struct BundledDataset {
     /// Number of rows
     num_rows: usize,
-    /// Bundled feature data (column-major): bundles[bundle_idx][row_idx]
+    /// Bundled feature data (column-major): `bundles[bundle_idx][row_idx]`
     bundle_data: Vec<Vec<u8>>,
     /// Target values
     targets: Vec<f32>,

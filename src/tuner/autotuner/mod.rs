@@ -293,11 +293,11 @@ impl<M: TunableModel> AutoTuner<M> {
     /// - **Cross-validation with custom folds**: Control exact train/val composition
     ///
     /// For standard cross-sectional (i.i.d.) data where rows are independent,
-    /// use [`tune()`] instead, which performs random splits internally.
+    /// use [`AutoTuner::tune()`] instead, which performs random splits internally.
     ///
     /// **Key difference from `tune()`:**
     ///
-    /// - [`tune()`]: Accepts single dataset, performs random internal splits
+    /// - [`AutoTuner::tune()`]: Accepts single dataset, performs random internal splits
     /// - `tune_with_validation()`: Accepts pre-split train/val datasets, no further splitting
     ///
     /// # Arguments
@@ -376,7 +376,7 @@ impl<M: TunableModel> AutoTuner<M> {
     ///
     /// # Integration with AutoBuilder
     ///
-    /// For high-level AutoML workflows, use [`AutoBuilder::with_presplit_validation()`]
+    /// For high-level AutoML workflows, use [`crate::model::AutoBuilder::with_presplit_validation`]
     /// which handles preprocessing and feature engineering automatically:
     ///
     /// ```ignore
@@ -394,9 +394,9 @@ impl<M: TunableModel> AutoTuner<M> {
     ///
     /// # See Also
     ///
-    /// * [`tune()`] - For cross-sectional (i.i.d.) data with random splits
-    /// * [`AutoBuilder::with_presplit_validation()`] - High-level API for AutoML workflows
-    /// * [`AutoBuilder::with_random_validation_split()`] - For cross-sectional data
+    /// * [`AutoTuner::tune`] - For cross-sectional (i.i.d.) data with random splits
+    /// * [`crate::model::AutoBuilder::with_presplit_validation`] - High-level API for AutoML workflows
+    /// * [`crate::model::AutoBuilder::with_random_validation_split`] - For cross-sectional data
     pub fn tune_with_validation(
         &mut self,
         train_dataset: &BinnedDataset,

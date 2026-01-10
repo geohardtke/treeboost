@@ -425,7 +425,7 @@ fn compute_binary_log_loss(predictions: &[f32], targets: &[f32]) -> f32 {
 
 /// Compute multi-class log loss
 ///
-/// Predictions should be arranged as: [class0_sample0, class1_sample0, ..., class0_sample1, ...]
+/// Predictions should be arranged as: `[class0_sample0, class1_sample0, ..., class0_sample1, ...]`
 fn compute_multi_class_log_loss(predictions: &[f32], targets: &[f32], n_classes: usize) -> f32 {
     if n_classes < 2 {
         return f32::INFINITY;

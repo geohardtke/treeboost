@@ -649,7 +649,7 @@ impl BinnedDataset {
     /// Only valid when all features have ≤16 bins.
     ///
     /// Layout: For each row, features are packed in pairs:
-    /// - byte[i] = (feature[2i+1] << 4) | feature[2i]
+    /// - `byte[i] = (feature[2i+1] << 4) | feature[2i]`
     /// - If odd number of features, last nibble is padded with 0
     ///
     /// # Panics

@@ -188,7 +188,7 @@ impl GBDTModel {
     /// Only meaningful when trained with `with_multiclass_logloss()`.
     ///
     /// # Returns
-    /// Vector of probability vectors: result[sample][class]
+    /// Vector of probability vectors: `result[sample][class]`
     pub fn predict_proba_multiclass(&self, dataset: &BinnedDataset) -> Vec<Vec<f32>> {
         if self.num_classes == 0 {
             // Not a multi-class model, fall back to binary
@@ -257,7 +257,7 @@ impl GBDTModel {
     /// Predict raw scores for multi-class classification (before softmax)
     ///
     /// Returns raw predictions for each class (not probabilities).
-    /// Shape: result[sample][class]
+    /// Shape: `result[sample][class]`
     pub fn predict_raw_multiclass(&self, dataset: &BinnedDataset) -> Vec<Vec<f32>> {
         if self.num_classes == 0 {
             // Not a multi-class model
@@ -425,10 +425,10 @@ impl GBDTModel {
     /// Only meaningful when trained with `with_multiclass_logloss()`.
     ///
     /// # Arguments
-    /// * `features` - Row-major feature matrix: features[row * num_features + feature]
+    /// * `features` - Row-major feature matrix: `features[row * num_features + feature]`
     ///
     /// # Returns
-    /// Vector of probability vectors: result[sample][class]
+    /// Vector of probability vectors: `result[sample][class]`
     pub fn predict_proba_multiclass_raw(&self, features: &[f64]) -> Vec<Vec<f32>> {
         if self.num_classes == 0 {
             // Not a multi-class model, fall back to binary
@@ -508,10 +508,10 @@ impl GBDTModel {
     /// Returns raw predictions for each class (not probabilities).
     ///
     /// # Arguments
-    /// * `features` - Row-major feature matrix: features[row * num_features + feature]
+    /// * `features` - Row-major feature matrix: `features[row * num_features + feature]`
     ///
     /// # Returns
-    /// Vector of raw score vectors: result[sample][class]
+    /// Vector of raw score vectors: `result[sample][class]`
     pub fn predict_raw_multiclass_raw(&self, features: &[f64]) -> Vec<Vec<f32>> {
         if self.num_classes == 0 {
             // Not a multi-class model

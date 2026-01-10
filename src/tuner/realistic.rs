@@ -37,7 +37,7 @@ impl RealisticModeConfig {
 // Helper Functions for Realistic Mode
 // =============================================================================
 
-/// Extract target column from DataFrame as Vec<f32>
+/// Extract target column from DataFrame as `Vec<f32>`
 ///
 /// Handles casting from various numeric types to f32.
 /// Returns an error if any NULL values are found in the target column.

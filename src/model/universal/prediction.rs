@@ -355,7 +355,7 @@ impl UniversalModel {
 
     /// Multi-class classification: predict probabilities for each class
     ///
-    /// Returns Vec<Vec<f32>> where each inner vec contains probabilities for all classes.
+    /// Returns `Vec<Vec<f32>>` where each inner vec contains probabilities for all classes.
     pub fn predict_proba_multiclass(&self, dataset: &BinnedDataset) -> Result<Vec<Vec<f32>>> {
         match self.config.mode {
             BoostingMode::PureTree => self

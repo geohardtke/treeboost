@@ -179,7 +179,7 @@ impl DatasetLoader {
     /// Extract era indices from a series and map to sequential u16 values
     ///
     /// Handles both numeric and categorical era columns.
-    /// Returns a vector where era_indices[i] is the era index for row i.
+    /// Returns a vector where `era_indices[i]` is the era index for row `i`.
     fn extract_era_indices(&self, series: &Series) -> Result<Vec<u16>> {
         use std::collections::HashMap;
 

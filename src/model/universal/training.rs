@@ -32,7 +32,7 @@ impl UniversalModel {
     /// - The **loss function is NOT persisted** in the saved model. It is used only
     ///   during training to compute gradients. The trained model is loss-function-agnostic
     ///   and will work correctly with any data processed with the same preprocessing.
-    /// - The **config is fully persisted** and can be exported via [`config()`] or
+    /// - The **config is fully persisted** and can be exported via [`UniversalModel::config()`] or
     ///   saved to JSON for inspection and reuse.
     /// - For reproducibility, store your loss function choice separately if needed.
     ///

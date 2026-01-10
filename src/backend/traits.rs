@@ -61,7 +61,7 @@ pub trait BinStorage: Sync {
     /// Get 4-bit packed row-major layout (for tensor-tile backends with small bins).
     ///
     /// Packs two 4-bit bin values per byte:
-    /// - byte[i] = (feature[2i+1] << 4) | feature[2i]
+    /// - `byte[i] = (feature[2i+1] << 4) | feature[2i]`
     ///
     /// Returns None if not supported or storage is column-major.
     fn as_row_major_4bit(&self) -> Option<&[u8]> {

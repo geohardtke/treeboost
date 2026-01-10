@@ -438,7 +438,7 @@ impl FeatureExtractor {
 
     /// Extract raw numeric features from DataFrame for linear models
     ///
-    /// Returns row-major Vec<f32> where:
+    /// Returns row-major `Vec<f32>` where:
     /// - features[row * num_features + col] = value of feature col for row
     ///
     /// Excludes:
@@ -563,7 +563,7 @@ impl FeatureExtractor {
         })
     }
 
-    /// Extract features and return raw Vec<f32> (simplified API)
+    /// Extract features and return raw `Vec<f32>` (simplified API)
     pub fn extract(&self, df: &DataFrame, target_col: &str) -> Result<(Vec<f32>, usize)> {
         let result = self.extract_numeric_features(df, target_col)?;
         Ok((result.features, result.num_features))

@@ -95,7 +95,7 @@ impl AutoBuilder {
     /// Set validation split ratio for **random** train/validation split.
     ///
     /// **WARNING**: Only use this for cross-sectional (i.i.d.) data where rows are independent.
-    /// For time-series or panel data, use [`with_presplit_validation`] instead to avoid data leakage.
+    /// For time-series or panel data, use `Self::with_presplit_validation` instead to avoid data leakage.
     ///
     /// The library will randomly split your data into:
     /// - Training set: (1 - ratio) * num_rows
@@ -116,7 +116,7 @@ impl AutoBuilder {
     ///
     /// # See Also
     ///
-    /// * [`with_presplit_validation`] - For time-series or panel data
+    /// * `Self::with_presplit_validation` - For time-series or panel data
     pub fn with_random_validation_split(mut self, ratio: f32) -> Self {
         self.config.val_ratio = ratio;
         self
@@ -171,7 +171,7 @@ impl AutoBuilder {
     ///
     /// # See Also
     ///
-    /// * [`with_random_validation_split`] - For cross-sectional (i.i.d.) data
+    /// * `Self::with_random_validation_split` - For cross-sectional (i.i.d.) data
     pub fn with_presplit_validation(mut self, validation_df: DataFrame) -> Self {
         // Disable internal validation split when custom data is provided
         self.config.val_ratio = 0.0;

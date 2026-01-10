@@ -154,7 +154,7 @@ impl Tree {
     /// Uses parallel execution for large datasets (>= 10K rows).
     ///
     /// # Arguments
-    /// * `features` - Row-major feature matrix: features[row * num_features + feature]
+    /// * `features` - Row-major feature matrix: `features[row * num_features + feature]`
     /// * `num_features` - Number of features per row
     /// * `predictions` - Mutable slice to accumulate predictions into
     #[inline]

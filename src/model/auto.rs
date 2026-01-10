@@ -159,7 +159,7 @@ impl AutoModel {
 
     /// Predict on a DataFrame
     ///
-    /// Returns predictions as a Vec<f32>.
+    /// Returns predictions as a `Vec<f32>`.
     pub fn predict(&self, df: &DataFrame) -> Result<Vec<f32>> {
         // Convert DataFrame to BinnedDataset for prediction
         // Also get preprocessed DataFrame with encoded categoricals

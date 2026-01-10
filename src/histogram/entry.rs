@@ -34,9 +34,9 @@ impl Histogram {
     /// Create histogram from raw arrays (used by SIMD kernels)
     ///
     /// # Arguments
-    /// * `grads` - Sum of gradients per bin [256]
-    /// * `hess` - Sum of hessians per bin [256]
-    /// * `counts` - Count per bin [256]
+    /// * `grads` - Sum of gradients per bin `[256]`
+    /// * `hess` - Sum of hessians per bin `[256]`
+    /// * `counts` - Count per bin `[256]`
     pub fn from_raw_arrays(grads: &[f32; 256], hess: &[f32; 256], counts: &[u32; 256]) -> Self {
         let mut bins = [BinEntry::default(); NUM_BINS];
         for i in 0..NUM_BINS {

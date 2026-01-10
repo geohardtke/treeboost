@@ -249,13 +249,13 @@ pub trait TunableModel: Clone + Send + Sync + Sized {
 
 /// Helper trait to convert legacy f32 param maps to ParamValue maps
 pub trait ParamMapExt {
-    /// Convert a HashMap<String, f32> to HashMap<String, ParamValue>
+    /// Convert a `HashMap<String, f32>` to `HashMap<String, ParamValue>`
     ///
     /// Note: This simple conversion treats all values as numeric.
     /// For proper categorical handling, use `to_param_values_with_space`.
     fn to_param_values(&self) -> HashMap<String, ParamValue>;
 
-    /// Convert a HashMap<String, f32> to HashMap<String, ParamValue> with space context
+    /// Convert a `HashMap<String, f32>` to `HashMap<String, ParamValue>` with space context
     ///
     /// This method properly converts categorical parameter indices to their string values
     /// by looking up the index in the ParameterSpace.

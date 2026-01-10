@@ -7,7 +7,7 @@
 //!
 //! # Feature Flags
 //!
-//! - **`mmap`**: Enables [`MmapTrbReader`] for true zero-copy I/O. When enabled,
+//! - **`mmap`**: Enables `MmapTrbReader` for true zero-copy I/O. When enabled,
 //!   TRB files can be memory-mapped for instant model loading with lazy page faults.
 //!
 //! # TRB Reader Comparison
@@ -15,7 +15,7 @@
 //! | Reader | Feature | I/O Model | Load Time | Memory |
 //! |--------|---------|-----------|-----------|--------|
 //! | [`TrbReader`] | default | read() to heap | O(model_size) | O(model_size) |
-//! | [`MmapTrbReader`] | `mmap` | mmap (lazy) | O(1) | O(1) initial |
+//! | `MmapTrbReader` | `mmap` | mmap (lazy) | O(1) | O(1) initial |
 //!
 //! # Example (with mmap feature)
 //!

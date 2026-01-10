@@ -109,7 +109,7 @@ impl RidgeStacker {
     ///
     /// # Ensemble Prediction Formula
     ///
-    /// When using this intercept with weights from [`weights()`], the prediction is:
+    /// When using this intercept with weights from `weights()`, the prediction is:
     /// ```text
     /// prediction = sum(weights[i] * member_predictions[i]) + intercept()
     /// ```

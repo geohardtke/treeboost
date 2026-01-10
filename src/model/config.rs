@@ -95,9 +95,9 @@ use std::time::Duration;
 ///
 /// ## See Also
 ///
-/// - [`TunerPreset`] - For manual tuning with `AutoTuner`
+/// - [`crate::tuner::TunerPreset`] - For manual tuning with `AutoTuner`
 /// - [`TreeTunerPreset`] - For tree-specific tuning with `TreeTunerConfig`
-/// - [`AutoBuilder::with_tuning_level`] - Set the tuning level
+/// - [`crate::model::AutoBuilder::with_tuning`] - Set the tuning level
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TuningLevel {
     /// Minimal tuning with sensible defaults
@@ -783,7 +783,7 @@ pub struct TreeTunerConfig {
 /// ## See Also
 ///
 /// - [`TuningLevel`] - For high-level AutoML tuning with `AutoBuilder`
-/// - [`TunerPreset`] - For manual tuning with `AutoTuner`
+/// - [`crate::tuner::TunerPreset`] - For manual tuning with `AutoTuner`
 /// - [`TreeTunerConfig::with_preset`] - Apply a preset to tree tuner configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TreeTunerPreset {

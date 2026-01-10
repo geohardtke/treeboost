@@ -14,7 +14,7 @@ pub trait EnsembleMember: Send + Sync {
     /// was trained without K-fold cross-validation).
     ///
     /// # Returns
-    /// - `Some((predictions, indices))` where predictions[i] corresponds to row indices[i]
+    /// - `Some((predictions, indices))` where `predictions[i]` corresponds to `row indices[i]`
     /// - `None` if OOF predictions are unavailable
     fn oof_predictions(&self) -> Option<(&[f32], &[usize])>;
 

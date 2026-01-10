@@ -20,7 +20,7 @@ use std::collections::HashMap;
 ///
 /// # Arguments
 ///
-/// * `raw_features` - Flat array of features in row-major order [row0_feat0, row0_feat1, ..., row1_feat0, ...]
+/// * `raw_features` - Flat array of features in row-major order `[row0_feat0, row0_feat1, ..., row1_feat0, ...]`
 /// * `num_rows` - Number of rows in the dataset
 /// * `num_raw_features` - Total number of features per row in raw_features
 /// * `indices` - Optional feature indices to select. If None, returns all features.

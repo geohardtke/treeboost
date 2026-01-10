@@ -1,7 +1,7 @@
 //! Tree growing with Best-First (Leaf-wise) strategy
 //!
 //! Uses a sorted row array with position tracking for zero-allocation partitioning.
-//! This is the LightGBM approach: a single Vec<usize> contains all row indices,
+//! This is the LightGBM approach: a single `Vec<usize>` contains all row indices,
 //! partitioned in-place by node. Each node tracks its range (start, end) into this array.
 //!
 //! # Backend Support

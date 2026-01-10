@@ -117,9 +117,9 @@ pub fn has_neon() -> bool {
 /// - Scalar fallback otherwise
 ///
 /// # Arguments
-/// * `hist_grads` - Sum of gradients per bin [256]
-/// * `hist_hess` - Sum of hessians per bin [256]
-/// * `hist_counts` - Count per bin [256]
+/// * `hist_grads` - Sum of gradients per bin `[256]`
+/// * `hist_hess` - Sum of hessians per bin `[256]`
+/// * `hist_counts` - Count per bin `[256]`
 /// * `total_gradient` - Total gradient sum across all bins
 /// * `total_hessian` - Total hessian sum across all bins
 /// * `total_count` - Total sample count across all bins
@@ -172,18 +172,18 @@ pub fn find_best_split(
 ///
 /// This is the core hot loop for GBDT training. For each row:
 /// - Look up the bin index from feature_bins
-/// - Add gradient[row] to histogram[bin].sum_gradients
-/// - Add hessian[row] to histogram[bin].sum_hessians
-/// - Increment histogram[bin].count
+/// - Add `gradient[row]` to `histogram[bin].sum_gradients`
+/// - Add `hessian[row]` to `histogram[bin].sum_hessians`
+/// - Increment `histogram[bin].count`
 ///
 /// # Arguments
 /// * `feature_bins` - Bin indices for each row (u8, 0-255)
 /// * `row_indices` - Which rows to process
 /// * `gradients` - Gradient values (full dataset)
 /// * `hessians` - Hessian values (full dataset)
-/// * `hist_grads` - Output: sum of gradients per bin [256]
-/// * `hist_hess` - Output: sum of hessians per bin [256]
-/// * `hist_counts` - Output: count per bin [256]
+/// * `hist_grads` - Output: sum of gradients per bin `[256]`
+/// * `hist_hess` - Output: sum of hessians per bin `[256]`
+/// * `hist_counts` - Output: count per bin `[256]`
 ///
 /// # Safety
 /// All pointers must be valid and properly sized.

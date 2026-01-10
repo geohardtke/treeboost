@@ -1472,8 +1472,8 @@ pub struct TunerConfig {
 ///
 /// ## See Also
 ///
-/// - [`TuningLevel`] - For high-level AutoML tuning with `AutoBuilder`
-/// - [`TreeTunerPreset`] - For tree-specific tuning with `TreeTunerConfig`
+/// - [`crate::model::TuningLevel`] - For high-level AutoML tuning with `AutoBuilder`
+/// - [`crate::model::TreeTunerPreset`] - For tree-specific tuning with `TreeTunerConfig`
 /// - [`TunerConfig::with_preset`] - Apply a preset to tuner configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TunerPreset {

@@ -26,7 +26,7 @@
 use crate::TreeBoostError;
 use polars::prelude::*;
 
-/// Convert a Polars Column to Vec<f32>
+/// Convert a Polars Column to `Vec<f32>`
 ///
 /// Handles numeric types by casting to f64 then f32.
 /// NaN values are preserved.
@@ -35,7 +35,7 @@ use polars::prelude::*;
 /// * `column` - The Polars Column to convert
 ///
 /// # Returns
-/// Vec<f32> with the column values
+/// `Vec<f32>` with the column values
 ///
 /// # Errors
 /// Returns error if column cannot be cast to numeric type
@@ -54,7 +54,7 @@ pub fn column_to_f32(column: &Column) -> Result<Vec<f32>, TreeBoostError> {
         .collect())
 }
 
-/// Convert a Polars Column to Vec<String>
+/// Convert a Polars Column to `Vec<String>`
 ///
 /// Handles string types. Null values become empty strings.
 ///
@@ -62,7 +62,7 @@ pub fn column_to_f32(column: &Column) -> Result<Vec<f32>, TreeBoostError> {
 /// * `column` - The Polars Column to convert
 ///
 /// # Returns
-/// Vec<String> with the column values
+/// `Vec<String>` with the column values
 ///
 /// # Errors
 /// Returns error if column cannot be cast to string type
@@ -81,7 +81,7 @@ pub fn column_to_strings(column: &Column) -> Result<Vec<String>, TreeBoostError>
         .collect())
 }
 
-/// Convert a Polars Series to Vec<f32>
+/// Convert a Polars Series to `Vec<f32>`
 ///
 /// Handles numeric types by casting to f64 then f32.
 /// NaN values are preserved.
@@ -90,7 +90,7 @@ pub fn column_to_strings(column: &Column) -> Result<Vec<String>, TreeBoostError>
 /// * `series` - The Polars Series to convert
 ///
 /// # Returns
-/// Vec<f32> with the series values
+/// `Vec<f32>` with the series values
 ///
 /// # Errors
 /// Returns error if series cannot be cast to numeric type
@@ -99,7 +99,7 @@ pub fn series_to_f32(series: &Series) -> Result<Vec<f32>, TreeBoostError> {
     column_to_f32(&col)
 }
 
-/// Convert a Polars Series to Vec<String>
+/// Convert a Polars Series to `Vec<String>`
 ///
 /// Handles string types. Null values become empty strings.
 ///
@@ -107,7 +107,7 @@ pub fn series_to_f32(series: &Series) -> Result<Vec<f32>, TreeBoostError> {
 /// * `series` - The Polars Series to convert
 ///
 /// # Returns
-/// Vec<String> with the series values
+/// `Vec<String>` with the series values
 ///
 /// # Errors
 /// Returns error if series cannot be cast to string type
@@ -118,7 +118,7 @@ pub fn series_to_strings(series: &Series) -> Result<Vec<String>, TreeBoostError>
 
 /// Convert DataFrame columns to row-major f32 matrix
 ///
-/// Extracts specified columns and converts them to a flat Vec<f32>
+/// Extracts specified columns and converts them to a flat `Vec<f32>`
 /// in row-major order: [row0_col0, row0_col1, ..., row1_col0, row1_col1, ...]
 ///
 /// # Arguments
@@ -215,7 +215,7 @@ pub fn features_to_df(
         .map_err(|e| TreeBoostError::Data(format!("Failed to create DataFrame: {}", e)))
 }
 
-/// Extract target column as Vec<f32>
+/// Extract target column as `Vec<f32>`
 ///
 /// Convenience wrapper around column_to_f32 for target extraction.
 ///
@@ -224,7 +224,7 @@ pub fn features_to_df(
 /// * `target_col` - Name of the target column
 ///
 /// # Returns
-/// Vec<f32> with target values
+/// `Vec<f32>` with target values
 pub fn df_to_target(df: &DataFrame, target_col: &str) -> Result<Vec<f32>, TreeBoostError> {
     let column = df.column(target_col).map_err(|e| {
         TreeBoostError::Data(format!("Target column '{}' not found: {}", target_col, e))

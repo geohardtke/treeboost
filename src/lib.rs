@@ -76,7 +76,7 @@
 //! - Scalers: [`StandardScaler`], [`MinMaxScaler`], [`RobustScaler`]
 //! - Encoders: [`FrequencyEncoder`], [`LabelEncoder`], [`OneHotEncoder`]
 //! - Imputers: [`SimpleImputer`], [`IndicatorImputer`]
-//! - Time-series: [`LagGenerator`], [`RollingGenerator`], [`EwmaGenerator`]
+//! - Time-series: [`features::LagGenerator`], [`features::RollingGenerator`], [`features::EwmaGenerator`]
 //!
 //! # Additional Features
 //!
@@ -103,7 +103,7 @@
 //! ```ignore
 //! // High-level AutoML
 //! let model = AutoBuilder::new()
-//!     .with_random_validation_split(0.2)  // 20% for validation
+//!     .with_random_validation_split(0.2)  // 20% for validation (random split)
 //!     .fit(&df, "target")?;
 //!
 //! // Manual tuning
@@ -155,10 +155,10 @@
 //! Encoding (especially target encoding) must be fit on training data only to prevent leakage.
 //!
 //! See also:
-//! - [`AutoBuilder::with_random_validation_split`] - Random split API
-//! - [`AutoBuilder::with_presplit_validation`] - Pre-split API
-//! - [`AutoTuner::tune`] - Tuner with random split
-//! - [`AutoTuner::tune_with_validation`] - Tuner with pre-split validation
+//! - [`model::AutoBuilder::with_random_validation_split`] - Random split API
+//! - [`model::AutoBuilder::with_presplit_validation`] - Pre-split API
+//! - [`tuner::AutoTuner::tune`] - Tuner with random split
+//! - [`tuner::AutoTuner::tune_with_validation`] - Tuner with pre-split validation
 //!
 //! # Production Features
 //!
@@ -288,15 +288,14 @@
 //! let filtered = filter.filter_batch(&categories);  // "rare" → "unknown"
 //! ```
 //!
-//! See [`OrderedTargetEncoder`], [`CategoryFilter`]
+//! See [`encoding::OrderedTargetEncoder`], [`encoding::CategoryFilter`]
 //!
 //! ## Time-Series & Cross-Sectional Feature Engineering
 //!
 //! Automatic feature generation for panel data and time series:
 //!
 //! ```ignore
-//! use treeboost::preprocessing::{LagGenerator, RollingGenerator, EwmaGenerator};
-//! use treeboost::features::{PolynomialGenerator, RatioGenerator};
+//! use treeboost::features::{LagGenerator, RollingGenerator, EwmaGenerator, PolynomialGenerator, RatioGenerator};
 //!
 //! // Time-series features (lag, rolling, EWMA)
 //! let lag_gen = LagGenerator::new(vec![1, 2, 7]);  // 1-day, 2-day, 7-day lags
@@ -308,7 +307,7 @@
 //! let ratio_gen = RatioGenerator::new();            // x₁/x₂, x₂/x₁
 //! ```
 //!
-//! See [`preprocessing::LagGenerator`], [`preprocessing::RollingGenerator`],
+//! See [`features::LagGenerator`], [`features::RollingGenerator`],
 //! [`features::PolynomialGenerator`], [`features::RatioGenerator`]
 //!
 //! ## Outlier Detection & Robust Preprocessing
@@ -327,7 +326,7 @@
 //! let mask = detector.detect(&features);     // true = outlier
 //! ```
 //!
-//! See [`RobustScaler`], [`OutlierDetector`]
+//! See [`preprocessing::RobustScaler`], [`preprocessing::OutlierDetector`]
 //!
 //! ## Incremental Preprocessing
 //!
@@ -342,7 +341,7 @@
 //! scaler.partial_fit(&batch2, num_features)?;  // Blend with batch2 (90% old, 10% new)
 //! ```
 //!
-//! See [`StandardScaler::with_forget_factor`], [`StandardScaler::partial_fit`]
+//! See [`preprocessing::StandardScaler::with_forget_factor`] and see the `partial_fit()` method for incremental updates
 //!
 //! ## Split Conformal Prediction
 //!
@@ -359,6 +358,288 @@
 //! ```
 //!
 //! See [`GBDTConfig::with_conformal`], [`GBDTModel::conformal_quantile`]
+//!
+//! ---
+//!
+//! # Trait Hierarchy & Extensibility
+//!
+//! TreeBoost uses a collection of 16 carefully designed traits to enable extensibility
+//! and composition. This section documents them and explains when to implement each.
+//!
+//! ## Trait Hierarchy Overview
+//!
+//! The traits are organized into five functional categories:
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────┐
+//! │                     TreeBoost Trait Hierarchy                    │
+//! ├─────────────────────────────────────────────────────────────────┤
+//! │                                                                   │
+//! │  ┌──────────────────  MODEL TRAITS ───────────────────────┐    │
+//! │  │                                                          │    │
+//! │  │  ┌─ WeakLearner ─────────┐                             │    │
+//! │  │  │  Base abstraction for  │                             │    │
+//! │  │  │  trees, linear, hybrid │                             │    │
+//! │  │  └────────────────────────┘                             │    │
+//! │  │          ▲                                               │    │
+//! │  │          └─ IncrementalLearner (warm start)             │    │
+//! │  │          └─ AppendableLearner (tree-level updates)      │    │
+//! │  │                                                          │    │
+//! │  │  TunableModel: Control hyperparameter fitting            │    │
+//! │  └──────────────────────────────────────────────────────────┘    │
+//! │                                                                   │
+//! │  ┌──────────────  DATA PROCESSING TRAITS ──────────────────┐   │
+//! │  │                                                          │    │
+//! │  │  LossFunction: Compute gradients & hessians             │    │
+//! │  │                                                          │    │
+//! │  │  ┌─ Scaler ──────────────────────┐                      │    │
+//! │  │  │  Fit-transform pattern for    │                      │    │
+//! │  │  │  StandardScaler, MinMaxScaler │                      │    │
+//! │  │  └────────────────────────────────┘                      │    │
+//! │  │       ▲                                                   │    │
+//! │  │       └─ IncrementalScaler (partial_fit)                │    │
+//! │  │                                                          │    │
+//! │  │  IncrementalEncoder: Online category encoding            │    │
+//! │  │  FeatureGenerator: Polynomial, ratio, interaction        │    │
+//! │  │                                                          │    │
+//! │  └──────────────────────────────────────────────────────────┘    │
+//! │                                                                   │
+//! │  ┌────────────────  BACKEND TRAITS ──────────────────────┐     │
+//! │  │                                                        │     │
+//! │  │  BinStorage: Abstract binned feature access           │     │
+//! │  │   ├─ Column-major (scalar backend)                    │     │
+//! │  │   └─ Row-major (GPU/tensor-tile backends)             │     │
+//! │  │                                                        │     │
+//! │  │  HistogramBackend: Hardware-accelerated split finding │     │
+//! │  │   ├─ ScalarBackend (AVX2/NEON)                        │     │
+//! │  │   ├─ WgpuBackend (Vulkan/Metal/DX12) [future]         │     │
+//! │  │   ├─ Avx512Backend [future]                           │     │
+//! │  │   └─ Sve2Backend [future]                             │     │
+//! │  │                                                        │     │
+//! │  └────────────────────────────────────────────────────────┘     │
+//! │                                                                   │
+//! │  ┌────────────────  ENSEMBLE TRAITS ────────────────────┐      │
+//! │  │                                                        │      │
+//! │  │  EnsembleMember: Models participating in stacking      │      │
+//! │  │  Stacker: Combines predictions (Ridge, Median, etc.)  │      │
+//! │  │                                                        │      │
+//! │  └────────────────────────────────────────────────────────┘      │
+//! │                                                                   │
+//! │  ┌──────────────  MONITORING TRAITS ─────────────────────┐     │
+//! │  │                                                        │     │
+//! │  │  DistributionMetric: PSI, KS test, JS divergence      │     │
+//! │  │  ProgressCallback: Console/custom progress tracking   │     │
+//! │  │                                                        │     │
+//! │  └────────────────────────────────────────────────────────┘     │
+//! │                                                                   │
+//! │  ┌────────────────  UTILITY TRAITS ──────────────────────┐     │
+//! │  │                                                        │     │
+//! │  │  ParamMapExt: Convert f32 maps to ParamValue maps     │     │
+//! │  │                                                        │     │
+//! │  └────────────────────────────────────────────────────────┘     │
+//! │                                                                   │
+//! └─────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Model Traits
+//!
+//! | Trait | Purpose | When to Implement |
+//! |-------|---------|-------------------|
+//! | [`learner::WeakLearner`] | Base abstraction for all learners (trees, linear, hybrid) | When building a new model type (TreeBooster, LinearBooster) |
+//! | `IncrementalLearner` | Warm-start fitting with new data | For LinearBooster, LinearTreeBooster (online learning) |
+//! | `AppendableLearner` | Tree-level incremental updates (residuals) | For GBDTModel, ensemble-based models |
+//! | [`tuner::TunableModel`] | Enable AutoTuner to work with your model | For any model type you want to tune with AutoTuner |
+//!
+//! ## Data Processing Traits
+//!
+//! | Trait | Purpose | When to Implement |
+//! |-------|---------|-------------------|
+//! | [`loss::LossFunction`] | Compute gradients & hessians for boosting | When adding a new loss (e.g., custom Huber variant) |
+//! | [`preprocessing::Scaler`] | Fit-transform interface for StandardScaler, MinMaxScaler | When creating a new scaler type |
+//! | `IncrementalScaler` | Online mean/variance updates via Welford's algorithm | For StandardScaler, MinMaxScaler (partial_fit) |
+//! | `IncrementalEncoder` | Online category encoding | For FrequencyEncoder (incremental learning) |
+//! | [`features::FeatureGenerator`] | Generate polynomial, ratio, interaction features | When adding a new feature generation method |
+//!
+//! ## Backend Traits
+//!
+//! | Trait | Purpose | When to Implement |
+//! |-------|---------|-------------------|
+//! | [`backend::BinStorage`] | Abstract binned feature access (column-major or row-major) | When implementing a new bin storage backend |
+//! | [`backend::HistogramBackend`] | Hardware-accelerated histogram building & split finding | When adding GPU/SIMD backend (CUDA, WGPU, AVX-512, SVE2) |
+//!
+//! ## Ensemble Traits
+//!
+//! | Trait | Purpose | When to Implement |
+//! |-------|---------|-------------------|
+//! | [`ensemble::EnsembleMember`] | Models that can participate in stacking | For custom model types that provide OOF predictions |
+//! | [`ensemble::Stacker`] | Blending strategy (Ridge, Median, custom weighted) | When creating a new ensemble combination method |
+//!
+//! ## Monitoring Traits
+//!
+//! | Trait | Purpose | When to Implement |
+//! |-------|---------|-------------------|
+//! | `DistributionMetric` | Drift detection (PSI, KS test, JS divergence) | When adding a new distribution distance metric |
+//! | [`model::ProgressCallback`] | Progress tracking (console, logging, UI) | When integrating TreeBoost into an application with custom progress reporting |
+//!
+//! ## Utility Traits
+//!
+//! | Trait | Purpose | When to Implement |
+//! |-------|---------|-------------------|
+//! | `ParamMapExt` | Convert f32 maps to ParamValue (helper for backward compatibility) | Rarely - built-in impl for HashMap |
+//!
+//! ## Implementation Guide by Use Case
+//!
+//! ### Adding a New Weak Learner
+//!
+//! If you want to use a different model type (besides trees and linear) in boosting:
+//!
+//! 1. Implement [`learner::WeakLearner`] to define fitting and prediction
+//! 2. Optionally implement `IncrementalLearner` if your learner supports warm-start
+//! 3. Optionally implement [`tuner::TunableModel`] if you want AutoTuner to explore hyperparameters
+//!
+//! **Example use cases:** Neural network base learners, kernel methods, splines
+//!
+//! ### Adding a New Loss Function
+//!
+//! Implement [`loss::LossFunction`] to:
+//! - Compute loss value for single sample
+//! - Compute gradient (negative gradient for residuals)
+//! - Compute hessian (for Newton step in leaf weight computation)
+//! - Optionally batch compute for efficiency
+//! - Provide initial prediction (typically mean for regression)
+//!
+//! **Example use cases:** Custom Huber variant, Tilted loss, Quantile regression
+//!
+//! ### Adding a GPU or SIMD Backend
+//!
+//! Implement [`backend::HistogramBackend`] to:
+//! - Build histograms on your target hardware (GPU, tensor-tile SIMD, etc.)
+//! - Find best split using hardware-accelerated comparisons
+//! - Implement histogram subtraction trick for efficiency
+//! - Optionally batch multiple small histogram builds
+//!
+//! Also implement [`backend::BinStorage`] if you have a custom bin layout:
+//! - Row-major for tensor-tile backends (GPU, AVX-512, SVE2)
+//! - Column-major for scalar backends (AVX2, NEON)
+//!
+//! **Example use cases:** CUDA backend, WGPU (Vulkan/Metal/DX12), AVX-512 kernel fusion
+//!
+//! ### Adding Preprocessing to Model Pipeline
+//!
+//! | Need | Implement | Key Methods |
+//! |------|-----------|-------------|
+//! | Scale features | [`preprocessing::Scaler`] | `fit()`, `transform()` |
+//! | Online scaling | `IncrementalScaler` | `partial_fit()`, `n_samples()`, `merge()` |
+//! | Encode categories | `IncrementalEncoder` | `partial_fit()`, `n_samples()` |
+//! | Generate features | [`features::FeatureGenerator`] | `generate()`, `name()` |
+//!
+//! ### Adding Ensemble Methods
+//!
+//! 1. Implement [`ensemble::Stacker`] for a new blending strategy:
+//!    - `fit()` learns weights from out-of-fold predictions
+//!    - `combine()` applies weights to new data
+//!    - Optional `weights()` returns explicit weights
+//!
+//! 2. Wrap existing models in [`ensemble::EnsembleMember`]:
+//!    - Provide `oof_predictions()` for stacking training
+//!    - Provide `predict()` for inference
+//!    - Provide `model_id()` and `seed()` for tracking
+//!
+//! **Example use cases:** Custom weighted averaging, median blending, soft voting
+//!
+//! ### Adding Drift Detection Metrics
+//!
+//! Implement `DistributionMetric` to:
+//! - Compute distance between reference and target distributions
+//! - Return non-negative value (higher = more drift)
+//! - Provide warning and critical thresholds
+//!
+//! **Example use cases:** PSI (built-in), KL divergence, Wasserstein distance
+//!
+//! ### Adding Custom Progress Reporting
+//!
+//! Implement `model::ProgressCallback` to:
+//! - Receive progress updates at each training phase
+//! - Handle phase name, percentage, elapsed time, optional message
+//! - Integrate with UI, logging, or monitoring systems
+//!
+//! **Example use cases:** Web dashboard, Jupyter widget, structured logging
+//!
+//! ## Key Design Patterns
+//!
+//! ### Fit-Transform Pattern (Scalers)
+//!
+//! ```ignore
+//! trait Scaler {
+//!     fn fit(&mut self, data: &[f32], num_features: usize) -> Result<()>;
+//!     fn transform(&self, data: &mut [f32], num_features: usize) -> Result<()>;
+//! }
+//! ```
+//! Learn parameters from training data, apply to test data (prevents data leakage).
+//!
+//! ### Weak Learner Pattern (All Base Learners)
+//!
+//! ```ignore
+//! trait WeakLearner {
+//!     fn fit_on_gradients(
+//!         &mut self,
+//!         features: &[f32],
+//!         num_features: usize,
+//!         gradients: &[f32],      // Negative gradient of loss
+//!         hessians: &[f32],        // Second derivative
+//!     ) -> Result<()>;
+//!     fn predict_batch(&self, features: &[f32], num_features: usize) -> Vec<f32>;
+//! }
+//! ```
+//! Fit residuals (gradients) instead of raw targets, combine for boosting.
+//!
+//! ### Loss Function Pattern (Gradient Computation)
+//!
+//! ```ignore
+//! trait LossFunction {
+//!     fn gradient(&self, target: f32, prediction: f32) -> f32;      // d L / d pred
+//!     fn hessian(&self, target: f32, prediction: f32) -> f32;       // d²L / d pred²
+//!     fn compute_gradients(&self, targets: &[f32], preds: &[f32],
+//!         gradients: &mut [f32], hessians: &mut [f32]);
+//! }
+//! ```
+//! Twice-differentiable for Newton-Raphson leaf weight updates.
+//!
+//! ### Histogram Backend Pattern (Hardware Abstraction)
+//!
+//! ```ignore
+//! trait HistogramBackend {
+//!     fn build_histograms(&self, bins: &dyn BinStorage, grad_hess: &[(f32, f32)],
+//!         row_indices: &[usize]) -> Vec<Histogram>;
+//!     fn find_best_split(&self, histograms: &[Histogram], config: &SplitConfig)
+//!         -> Option<SplitCandidate>;
+//! }
+//! ```
+//! Abstracts over CPU (AVX2/NEON), GPU (WGPU/CUDA), and SIMD (AVX-512/SVE2).
+//!
+//! ## Composition Examples
+//!
+//! ### Example 1: Time-Series Regression with AutoML
+//!
+//! 1. Load data with time column
+//! 2. Use [`features::FeatureGenerator`] (lag, rolling, EWMA) to create time-series features
+//! 3. Use `IncrementalScaler` if training on streaming data batches
+//! 4. Use [`tuner::TunableModel`] (UniversalModel) with AutoTuner to find optimal boosting mode
+//! 5. Use [`model::ProgressCallback`] to track tuning progress
+//!
+//! ### Example 2: Custom Loss with GPU Acceleration
+//!
+//! 1. Implement custom [`loss::LossFunction`] (e.g., Huber with learnable threshold)
+//! 2. Implement custom [`backend::HistogramBackend`] on CUDA for fast split finding
+//! 3. Wrap custom backend in [`backend::HistogramBackend`] trait object
+//! 4. Use with GBDTModel and custom loss
+//!
+//! ### Example 3: Multi-Model Stacking
+//!
+//! 1. Train multiple models (GBDT, Random Forest, etc.)
+//! 2. Wrap each in [`ensemble::EnsembleMember`] to provide OOF predictions
+//! 3. Implement custom [`ensemble::Stacker`] (e.g., Ridge regression blending)
+//! 4. Use StackedEnsemble to combine and predict
 //!
 //! ---
 //!
