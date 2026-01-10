@@ -25,7 +25,7 @@
 
 use crate::analysis::profiler::{ColumnDataType, ColumnProfile, DataFrameProfile};
 use crate::analysis::{DatasetAnalysis, PanelDataInfo};
-use crate::defaults::features as feature_defaults;
+use crate::defaults::features::smart as feature_defaults;
 use crate::features::timeseries::RollingStat;
 use std::collections::HashSet;
 

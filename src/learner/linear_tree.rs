@@ -31,7 +31,7 @@
 //! ```
 
 use crate::dataset::BinnedDataset;
-use crate::defaults::linear_tree as linear_tree_defaults;
+use crate::defaults::learners::linear_tree as linear_tree_defaults;
 use crate::learner::{LinearConfig, TreeConfig};
 use crate::tree::{NodeType, Tree};
 use crate::Result;

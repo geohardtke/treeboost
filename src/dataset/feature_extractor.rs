@@ -95,7 +95,7 @@ use rkyv::Archive;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-use crate::defaults::linear_feature as linear_feature_defaults;
+use crate::defaults::features::linear_feature as linear_feature_defaults;
 use crate::Result;
 use crate::TreeBoostError;
 

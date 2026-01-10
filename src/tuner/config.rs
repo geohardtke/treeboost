@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::defaults::{seeds as seeds_defaults, tuner as tuner_defaults};
+use crate::defaults::tuning::{seeds as seeds_defaults, tuner as tuner_defaults};
 use crate::TreeBoostError;
 
 /// Type-safe tunable parameter names
@@ -38,7 +38,7 @@ use crate::TreeBoostError;
 /// # Example
 ///
 /// ```
-/// use treeboost::tuner::config::{TunableParam, ParamBounds, ParamDef};
+/// use treeboost::tuner::{TunableParam, ParamBounds, ParamDef};
 ///
 /// // Type-safe parameter definition
 /// let param = ParamDef::new(
@@ -114,7 +114,7 @@ impl TunableParam {
     /// # Example
     ///
     /// ```
-    /// use treeboost::tuner::config::TunableParam;
+    /// use treeboost::tuner::TunableParam;
     ///
     /// let param = TunableParam::parse("max_depth")?;
     /// assert_eq!(param, TunableParam::MaxDepth);
@@ -161,7 +161,7 @@ impl TunableParam {
     /// # Example
     ///
     /// ```
-    /// use treeboost::tuner::config::TunableParam;
+    /// use treeboost::tuner::TunableParam;
     ///
     /// assert_eq!(TunableParam::MaxDepth.to_string(), "max_depth");
     /// assert_eq!(TunableParam::LearningRate.to_string(), "learning_rate");

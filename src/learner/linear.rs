@@ -110,7 +110,7 @@
 //! let preds = booster.predict_batch(&features, 10);
 //! ```
 
-use crate::defaults::linear as linear_defaults;
+use crate::defaults::learners::linear as linear_defaults;
 use crate::learner::WeakLearner;
 use crate::{Result, TreeBoostError};
 use rkyv::{Archive, Deserialize, Serialize};

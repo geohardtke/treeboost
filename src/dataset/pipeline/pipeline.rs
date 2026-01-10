@@ -10,7 +10,7 @@
 
 use crate::dataset::binning::QuantileBinner;
 use crate::dataset::core::{BinnedDataset, FeatureInfo, FeatureType};
-use crate::defaults::{gbdt as gbdt_defaults, preprocessing as preprocessing_defaults};
+use crate::defaults::{learners::gbdt as gbdt_defaults, preprocessing as preprocessing_defaults};
 use crate::encoding::{CategoryFilter, CategoryMapping, EncodingMap, OrderedTargetEncoder};
 use crate::{Result, TreeBoostError};
 use polars::prelude::*;

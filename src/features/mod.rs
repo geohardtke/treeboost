@@ -40,7 +40,7 @@ mod stats;
 pub mod timeseries;
 pub mod timeseries_grouped;
 
-use crate::defaults::feature_generation as feature_generation_defaults;
+use crate::defaults::features::generation as feature_generation_defaults;
 pub use dataframe::{
     apply_crosssectional_features, apply_crosssectional_features_selective,
     apply_interaction_features, apply_polynomial_features, apply_ratio_features,

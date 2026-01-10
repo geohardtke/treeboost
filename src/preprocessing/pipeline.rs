@@ -368,11 +368,7 @@ impl Preprocessor {
     }
 
     /// Fit and transform numerical data (convenience)
-    pub fn fit_transform_numerical(
-        &mut self,
-        data: &mut [f32],
-        num_features: usize,
-    ) -> Result<()> {
+    pub fn fit_transform_numerical(&mut self, data: &mut [f32], num_features: usize) -> Result<()> {
         self.fit_numerical(data, num_features)?;
         self.transform_numerical(data, num_features)?;
         Ok(())
@@ -487,9 +483,10 @@ impl Preprocessor {
             | Preprocessor::Robust(_)
             | Preprocessor::Imputer(_)
             | Preprocessor::YeoJohnson(_) => true,
-            Preprocessor::Custom { instance, .. } => {
-                instance.as_ref().map(|i| i.supports_numerical()).unwrap_or(false)
-            }
+            Preprocessor::Custom { instance, .. } => instance
+                .as_ref()
+                .map(|i| i.supports_numerical())
+                .unwrap_or(false),
             _ => false,
         }
     }
@@ -498,9 +495,10 @@ impl Preprocessor {
     pub fn is_categorical(&self) -> bool {
         match self {
             Preprocessor::Frequency(_) | Preprocessor::Label(_) | Preprocessor::OneHot(_) => true,
-            Preprocessor::Custom { instance, .. } => {
-                instance.as_ref().map(|i| i.supports_categorical()).unwrap_or(false)
-            }
+            Preprocessor::Custom { instance, .. } => instance
+                .as_ref()
+                .map(|i| i.supports_categorical())
+                .unwrap_or(false),
             _ => false,
         }
     }
@@ -887,13 +885,13 @@ mod tests {
                 .map_err(|e| crate::TreeBoostError::Serialization(e.to_string()))?;
             let parts: Vec<&str> = s.split('|').collect();
             if parts.len() != 2 {
-                return Err(crate::TreeBoostError::Serialization("Invalid format".into()));
+                return Err(crate::TreeBoostError::Serialization(
+                    "Invalid format".into(),
+                ));
             }
-            self.mean = parts[0]
-                .parse()
-                .map_err(|e: std::num::ParseFloatError| {
-                    crate::TreeBoostError::Serialization(e.to_string())
-                })?;
+            self.mean = parts[0].parse().map_err(|e: std::num::ParseFloatError| {
+                crate::TreeBoostError::Serialization(e.to_string())
+            })?;
             self.fitted = parts[1] == "true";
             Ok(())
         }
@@ -991,9 +989,6 @@ mod tests {
         let mut data = vec![1.0, 2.0];
         let result = custom.transform_numerical(&mut data, 2);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not initialized"));
+        assert!(result.unwrap_err().to_string().contains("not initialized"));
     }
 }

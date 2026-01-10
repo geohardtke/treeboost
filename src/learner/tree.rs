@@ -14,7 +14,7 @@
 
 use crate::backend::BackendType;
 use crate::dataset::BinnedDataset;
-use crate::defaults::tree as tree_defaults;
+use crate::defaults::learners::tree as tree_defaults;
 use crate::tree::{InteractionConstraints, MonotonicConstraint, Tree, TreeGrower};
 use crate::Result;
 use rkyv::{Archive, Deserialize, Serialize};

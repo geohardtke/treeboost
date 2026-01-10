@@ -5,7 +5,7 @@
 
 use crate::booster::{GBDTConfig, GBDTModel};
 use crate::dataset::{split_kfold, BinnedDataset};
-use crate::defaults::{ensemble as ensemble_defaults, seeds as seeds_defaults};
+use crate::defaults::{ensemble as ensemble_defaults, tuning::seeds as seeds_defaults};
 use crate::tuner::Metric;
 use crate::Result;
 use rayon::prelude::*;

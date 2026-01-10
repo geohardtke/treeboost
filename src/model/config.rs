@@ -5,7 +5,7 @@
 
 use crate::analysis::{Confidence, DataFrameProfile, DatasetAnalysis};
 use crate::dataset::feature_extractor::LinearFeatureConfig;
-use crate::defaults::{auto as auto_defaults, seeds as seeds_defaults};
+use crate::defaults::{auto as auto_defaults, tuning::seeds as seeds_defaults};
 use crate::ensemble::{MultiSeedConfig, SelectionConfig, StackingConfig};
 use crate::features::FeaturePlan;
 use crate::model::progress::{ProgressCallback, QuietProgress};
@@ -332,7 +332,7 @@ impl Default for AutoConfig {
             val_ratio: auto_defaults::DEFAULT_VALIDATION_RATIO,
             auto_features: true,
             auto_preprocessing: true,
-            mode_selection: ModeSelection::Auto,  // AutoBuilder defaults to automatic mode selection
+            mode_selection: ModeSelection::Auto, // AutoBuilder defaults to automatic mode selection
             max_generated_features: auto_defaults::AUTO_FEATURES_DEFAULT_COUNT,
             seed: seeds_defaults::DEFAULT_SEED,
             verbose: false,

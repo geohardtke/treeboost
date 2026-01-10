@@ -13,4 +13,6 @@ mod reorder;
 pub use loader::DatasetLoader;
 
 // Re-export reorder types
-pub use reorder::{reorder_dataset, AccessTracker, ColumnPermutation, OrderingStrategy, ReorderBuilder};
+pub use reorder::{
+    reorder_dataset, AccessTracker, ColumnPermutation, OrderingStrategy, ReorderBuilder,
+};

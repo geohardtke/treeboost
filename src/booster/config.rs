@@ -2,7 +2,10 @@
 
 use crate::backend::{BackendType, GpuMode};
 use crate::dataset::OrderingStrategy;
-use crate::defaults::{gbdt as gbdt_defaults, seeds as seeds_defaults, tree as tree_defaults};
+use crate::defaults::{
+    learners::gbdt as gbdt_defaults, learners::tree as tree_defaults,
+    tuning::seeds as seeds_defaults,
+};
 use crate::loss::{BinaryLogLoss, LossFunction, MseLoss, PseudoHuberLoss};
 use crate::tree::MonotonicConstraint;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -265,7 +268,7 @@ impl Default for GBDTConfig {
             // Early stopping (disabled by default)
             early_stopping_rounds: gbdt_defaults::DEFAULT_EARLY_STOPPING_ROUNDS,
             min_early_stopping_trees: gbdt_defaults::MIN_EARLY_STOPPING_TREES,
-            validation_ratio: gbdt_defaults::DEFAULT_VALIDATION_RATIO,
+            validation_ratio: gbdt_defaults::DEFAULT_GBDT_VALIDATION_RATIO,
 
             // Performance optimizations (all ON by default)
             parallel_prediction: true,
@@ -484,7 +487,7 @@ impl GBDTConfig {
     /// Set minimum trees before early stopping can trigger
     ///
     /// Prevents early stopping from killing models too early.
-    /// Default is 20 trees (`defaults::gbdt::MIN_EARLY_STOPPING_TREES`).
+    /// Default is 20 trees (`defaults::learners::gbdt::MIN_EARLY_STOPPING_TREES`).
     pub fn with_min_early_stopping_trees(mut self, min_trees: usize) -> Self {
         self.min_early_stopping_trees = min_trees;
         self

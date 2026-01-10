@@ -2,7 +2,7 @@
 //!
 //! Filters generated features based on variance, correlation, and target importance.
 
-use crate::defaults::feature_selection as feature_selection_defaults;
+use crate::defaults::features::selection as feature_selection_defaults;
 
 /// Configuration for feature selection
 #[derive(Debug, Clone)]

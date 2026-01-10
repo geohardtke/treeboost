@@ -350,9 +350,9 @@ mod tests {
             if parts.len() != 2 {
                 return Err(TreeBoostError::Serialization("Invalid format".into()));
             }
-            self.mean = parts[0]
-                .parse()
-                .map_err(|e: std::num::ParseFloatError| TreeBoostError::Serialization(e.to_string()))?;
+            self.mean = parts[0].parse().map_err(|e: std::num::ParseFloatError| {
+                TreeBoostError::Serialization(e.to_string())
+            })?;
             self.fitted = parts[1] == "true";
             Ok(())
         }

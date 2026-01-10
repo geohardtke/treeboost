@@ -51,8 +51,8 @@ use crate::features::{FeaturePlan, SmartFeatureEngine};
 use crate::model::config::{
     AutoConfig, AutoEnsembleConfig, AutoEnsembleMethod, BuildPhaseTimes, BuildResult, TuningLevel,
 };
-use crate::model::universal::ModeSelection;
 use crate::model::progress::{ProgressCallback, ProgressUpdate, TrainingPhase};
+use crate::model::universal::ModeSelection;
 use crate::model::{BoostingMode, UniversalConfig, UniversalModel};
 use crate::preprocessing::{ModelType, PreprocessingPlan, SmartPreprocessor};
 use crate::Result;

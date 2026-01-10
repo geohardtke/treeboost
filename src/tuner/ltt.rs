@@ -36,7 +36,8 @@ use crate::analysis::{compute_mse, compute_r2};
 use crate::booster::{GBDTConfig, GBDTModel};
 use crate::dataset::{BinnedDataset, FeatureInfo, QuantileBinner};
 use crate::defaults::{
-    linear as linear_defaults, ltt as ltt_defaults, seeds as seeds_defaults, tree as tree_defaults,
+    learners::linear as linear_defaults, learners::tree as tree_defaults,
+    tuning::ltt as ltt_defaults, tuning::seeds as seeds_defaults,
 };
 use crate::learner::{LinearBooster, LinearConfig, WeakLearner};
 use crate::{Result, TreeBoostError};

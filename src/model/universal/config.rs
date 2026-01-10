@@ -2,8 +2,8 @@
 
 use crate::dataset::feature_extractor::FeatureExtractor;
 use crate::defaults::{
-    ensemble as ensemble_defaults, gbdt as gbdt_defaults, seeds as seeds_defaults,
-    tree as tree_defaults, universal as universal_defaults,
+    ensemble as ensemble_defaults, learners::gbdt as gbdt_defaults, learners::tree as tree_defaults,
+    learners::universal as universal_defaults, tuning::seeds as seeds_defaults,
 };
 use crate::learner::{LinearConfig, LinearPreset, TreeConfig, TreePreset};
 use crate::model::universal::mode::BoostingMode;
@@ -179,7 +179,7 @@ impl Default for UniversalConfig {
             linear_config: LinearConfig::default(),
             learning_rate: tree_defaults::DEFAULT_LEARNING_RATE,
             subsample: gbdt_defaults::DEFAULT_SUBSAMPLE,
-            validation_ratio: gbdt_defaults::DEFAULT_VALIDATION_RATIO,
+            validation_ratio: gbdt_defaults::DEFAULT_GBDT_VALIDATION_RATIO,
             early_stopping_rounds: gbdt_defaults::DEFAULT_EARLY_STOPPING_ROUNDS,
             calibration_ratio: gbdt_defaults::DEFAULT_CALIBRATION_RATIO,
             conformal_quantile: gbdt_defaults::DEFAULT_CONFORMAL_QUANTILE,

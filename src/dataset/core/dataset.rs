@@ -1000,8 +1000,7 @@ mod tests {
         let feature_info = vec![create_test_feature_info("f0", 4)];
         let era_indices = vec![0u16, 1, 2, 1];
 
-        let dataset =
-            BinnedDataset::new_with_eras(4, features, targets, feature_info, era_indices);
+        let dataset = BinnedDataset::new_with_eras(4, features, targets, feature_info, era_indices);
 
         assert!(dataset.has_eras());
         assert_eq!(dataset.num_eras(), 3);
