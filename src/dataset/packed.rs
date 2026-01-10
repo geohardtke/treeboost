@@ -112,7 +112,10 @@ impl PackedColumn {
 
         if full_bytes > 0 {
             // Unpack full bytes using SIMD kernel
-            crate::backend::scalar::kernel::unpack_4bit(&self.data[..full_bytes], &mut buffer[..full_bytes * 2]);
+            crate::backend::scalar::kernel::unpack_4bit(
+                &self.data[..full_bytes],
+                &mut buffer[..full_bytes * 2],
+            );
         }
 
         // Handle odd row count manually (last row if num_rows is odd)

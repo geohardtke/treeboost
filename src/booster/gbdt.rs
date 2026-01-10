@@ -650,7 +650,8 @@ impl GBDTModel {
                         // Compute gradients and hessians
                         if config.parallel_gradient {
                             train_indices.par_iter().for_each(|&idx| {
-                                let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
+                                let (g, h) =
+                                    loss_fn.gradient_hessian(targets[idx], predictions[idx]);
                                 // SAFETY: Each idx is unique within train_indices, so no data races
                                 unsafe {
                                     let grad_ptr = gradients.as_ptr() as *mut f32;
@@ -661,7 +662,8 @@ impl GBDTModel {
                             });
                         } else {
                             for &idx in &train_indices {
-                                let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
+                                let (g, h) =
+                                    loss_fn.gradient_hessian(targets[idx], predictions[idx]);
                                 gradients[idx] = g;
                                 hessians[idx] = h;
                             }
@@ -695,7 +697,12 @@ impl GBDTModel {
                         };
 
                         // Grow tree using the selected training indices
-                        tree_grower.grow_with_indices(dataset, &gradients, &hessians, tree_indices)?
+                        tree_grower.grow_with_indices(
+                            dataset,
+                            &gradients,
+                            &hessians,
+                            tree_indices,
+                        )?
                     }
                 }
             };
@@ -1134,8 +1141,12 @@ impl GBDTModel {
                 );
 
                 // Grow tree for this class
-                let tree =
-                    tree_grower.grow_with_indices(dataset, &gradients, &hessians, &train_indices)?;
+                let tree = tree_grower.grow_with_indices(
+                    dataset,
+                    &gradients,
+                    &hessians,
+                    &train_indices,
+                )?;
 
                 // Update predictions for this class
                 for idx in 0..num_rows {
@@ -2275,7 +2286,8 @@ mod tests {
 
         let config = GBDTConfig::new()
             .with_num_rounds(10)
-            .with_conformal(0.2, 0.9).unwrap();
+            .with_conformal(0.2, 0.9)
+            .unwrap();
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
@@ -2301,7 +2313,8 @@ mod tests {
         let config = GBDTConfig::new()
             .with_num_rounds(100) // Max rounds
             .with_max_depth(4)
-            .with_early_stopping(5, 0.2).unwrap(); // Stop after 5 rounds without improvement, 20% validation
+            .with_early_stopping(5, 0.2)
+            .unwrap(); // Stop after 5 rounds without improvement, 20% validation
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
@@ -2318,8 +2331,10 @@ mod tests {
         let config = GBDTConfig::new()
             .with_num_rounds(10)
             .with_max_depth(4)
-            .with_subsample(0.8).unwrap() // 80% row subsampling
-            .with_colsample(0.8).unwrap(); // 80% column subsampling
+            .with_subsample(0.8)
+            .unwrap() // 80% row subsampling
+            .with_colsample(0.8)
+            .unwrap(); // 80% column subsampling
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
@@ -2577,7 +2592,8 @@ mod tests {
             .with_num_rounds(10)
             .with_max_depth(3)
             .with_learning_rate(0.1)
-            .with_multiclass_logloss(num_classes).unwrap();
+            .with_multiclass_logloss(num_classes)
+            .unwrap();
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
@@ -2596,7 +2612,8 @@ mod tests {
             .with_num_rounds(20)
             .with_max_depth(4)
             .with_learning_rate(0.1)
-            .with_multiclass_logloss(num_classes).unwrap();
+            .with_multiclass_logloss(num_classes)
+            .unwrap();
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
@@ -2790,7 +2807,8 @@ mod tests {
             .with_num_rounds(42)
             .with_max_depth(7)
             .with_learning_rate(0.05)
-            .with_subsample(0.8).unwrap()
+            .with_subsample(0.8)
+            .unwrap()
             .with_lambda(2.0)
             .with_entropy_weight(0.1);
 

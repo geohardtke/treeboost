@@ -139,7 +139,8 @@ impl BackendSelector {
         } else {
             Err(TreeBoostError::Backend(
                 "WGPU backend unavailable: no GPU detected or 'gpu' feature not enabled. \
-                 Enable 'gpu' feature or set BackendConfig::fallback_to_scalar = true".to_string()
+                 Enable 'gpu' feature or set BackendConfig::fallback_to_scalar = true"
+                    .to_string(),
             ))
         }
     }
@@ -183,7 +184,8 @@ impl BackendSelector {
         } else {
             Err(TreeBoostError::Backend(
                 "CUDA backend unavailable: no NVIDIA GPU detected or 'cuda' feature not enabled. \
-                 Enable 'cuda' feature or set BackendConfig::fallback_to_scalar = true".to_string()
+                 Enable 'cuda' feature or set BackendConfig::fallback_to_scalar = true"
+                    .to_string(),
             ))
         }
     }

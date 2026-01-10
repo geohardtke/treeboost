@@ -24,9 +24,9 @@
 //!
 //! The scatter (accumulation) is always scalar due to bin conflicts.
 
+use crate::backend::scalar::kernel;
 use crate::dataset::{BinnedDataset, SparseColumn, DEFAULT_BIN};
 use crate::histogram::{Histogram, NodeHistograms};
-use crate::backend::scalar::kernel;
 use rayon::prelude::*;
 
 /// Block size for cache-blocked histogram building

@@ -86,7 +86,8 @@ fn test_conformal_prediction() {
     let config = GBDTConfig::new()
         .with_num_rounds(30)
         .with_max_depth(4)
-        .with_conformal(0.2, 0.9).unwrap(); // 20% calibration, 90% coverage
+        .with_conformal(0.2, 0.9)
+        .unwrap(); // 20% calibration, 90% coverage
 
     let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
 

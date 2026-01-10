@@ -404,7 +404,8 @@ impl GBDTConfig {
     pub fn with_multiclass_logloss(mut self, num_classes: usize) -> crate::Result<Self> {
         if num_classes < 2 {
             return Err(crate::TreeBoostError::Config(format!(
-                "num_classes must be >= 2, got {}", num_classes
+                "num_classes must be >= 2, got {}",
+                num_classes
             )));
         }
         self.loss_type = LossType::MultiClassLogLoss { num_classes };
@@ -415,7 +416,8 @@ impl GBDTConfig {
     pub fn with_subsample(mut self, ratio: f32) -> crate::Result<Self> {
         if ratio <= 0.0 || ratio > 1.0 {
             return Err(crate::TreeBoostError::Config(format!(
-                "subsample must be in (0, 1], got {}", ratio
+                "subsample must be in (0, 1], got {}",
+                ratio
             )));
         }
         self.subsample = ratio;
@@ -426,7 +428,8 @@ impl GBDTConfig {
     pub fn with_colsample(mut self, ratio: f32) -> crate::Result<Self> {
         if ratio <= 0.0 || ratio > 1.0 {
             return Err(crate::TreeBoostError::Config(format!(
-                "colsample must be in (0, 1], got {}", ratio
+                "colsample must be in (0, 1], got {}",
+                ratio
             )));
         }
         self.colsample = ratio;
@@ -437,12 +440,14 @@ impl GBDTConfig {
     pub fn with_conformal(mut self, calibration_ratio: f32, quantile: f32) -> crate::Result<Self> {
         if calibration_ratio < 0.0 || calibration_ratio >= 1.0 {
             return Err(crate::TreeBoostError::Config(format!(
-                "calibration_ratio must be in [0, 1), got {}", calibration_ratio
+                "calibration_ratio must be in [0, 1), got {}",
+                calibration_ratio
             )));
         }
         if quantile <= 0.0 || quantile >= 1.0 {
             return Err(crate::TreeBoostError::Config(format!(
-                "quantile must be in (0, 1), got {}", quantile
+                "quantile must be in (0, 1), got {}",
+                quantile
             )));
         }
         self.calibration_ratio = calibration_ratio;
@@ -455,15 +460,20 @@ impl GBDTConfig {
     /// # Arguments
     /// * `rounds` - Number of consecutive rounds without improvement before stopping
     /// * `validation_ratio` - Fraction of data to use for validation (e.g., 0.1 for 10%)
-    pub fn with_early_stopping(mut self, rounds: usize, validation_ratio: f32) -> crate::Result<Self> {
+    pub fn with_early_stopping(
+        mut self,
+        rounds: usize,
+        validation_ratio: f32,
+    ) -> crate::Result<Self> {
         if rounds == 0 {
             return Err(crate::TreeBoostError::Config(
-                "early_stopping_rounds must be > 0".to_string()
+                "early_stopping_rounds must be > 0".to_string(),
             ));
         }
         if validation_ratio <= 0.0 || validation_ratio >= 1.0 {
             return Err(crate::TreeBoostError::Config(format!(
-                "validation_ratio must be in (0, 1), got {}", validation_ratio
+                "validation_ratio must be in (0, 1), got {}",
+                validation_ratio
             )));
         }
         self.early_stopping_rounds = rounds;
@@ -763,7 +773,8 @@ mod tests {
             .with_max_depth(4)
             .with_pseudo_huber_loss(1.0)
             .with_entropy_weight(0.1)
-            .with_conformal(0.1, 0.9).unwrap();
+            .with_conformal(0.1, 0.9)
+            .unwrap();
 
         assert_eq!(config.num_rounds, 50);
         assert_eq!(config.learning_rate, 0.05);

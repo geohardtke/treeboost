@@ -528,7 +528,12 @@ impl TreeGrower {
     /// * `dataset` - Binned training data
     /// * `gradients` - Gradient for each sample
     /// * `hessians` - Hessian for each sample
-    pub fn grow(&self, dataset: &BinnedDataset, gradients: &[f32], hessians: &[f32]) -> Result<Tree> {
+    pub fn grow(
+        &self,
+        dataset: &BinnedDataset,
+        gradients: &[f32],
+        hessians: &[f32],
+    ) -> Result<Tree> {
         // Use all rows
         let all_rows: Vec<usize> = (0..dataset.num_rows()).collect();
         self.grow_with_indices(dataset, gradients, hessians, &all_rows)
