@@ -349,7 +349,10 @@ impl TreeBooster {
             self.num_features = Some(num_features);
         }
 
-        let grower = self.grower.as_ref().unwrap();
+        let grower = self
+            .grower
+            .as_ref()
+            .expect("grower must be Some after initialization above");
 
         // Grow tree
         self.tree = Some(match row_indices {
