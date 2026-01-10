@@ -283,7 +283,7 @@ impl Preprocessor {
 /// use treeboost::preprocessing::{PipelineBuilder, StandardScaler, FrequencyEncoder};
 ///
 /// let pipeline = PipelineBuilder::new()
-///     .add_scaler(StandardScaler::new())
+///     .with_scaler(StandardScaler::new())
 ///     .build();
 /// ```
 #[derive(Debug, Clone, Default)]
@@ -298,53 +298,53 @@ impl PipelineBuilder {
     }
 
     /// Add a StandardScaler to the pipeline
-    pub fn add_standard_scaler(mut self) -> Self {
+    pub fn with_standard_scaler(mut self) -> Self {
         self.steps
             .push(Preprocessor::Standard(StandardScaler::new()));
         self
     }
 
     /// Add a MinMaxScaler to the pipeline
-    pub fn add_minmax_scaler(mut self) -> Self {
+    pub fn with_minmax_scaler(mut self) -> Self {
         self.steps.push(Preprocessor::MinMax(MinMaxScaler::new()));
         self
     }
 
     /// Add a RobustScaler to the pipeline
-    pub fn add_robust_scaler(mut self) -> Self {
+    pub fn with_robust_scaler(mut self) -> Self {
         self.steps.push(Preprocessor::Robust(RobustScaler::new()));
         self
     }
 
     /// Add a mean imputer to the pipeline
-    pub fn add_mean_imputer(mut self) -> Self {
+    pub fn with_mean_imputer(mut self) -> Self {
         self.steps
             .push(Preprocessor::Imputer(SimpleImputer::mean()));
         self
     }
 
     /// Add a median imputer to the pipeline
-    pub fn add_median_imputer(mut self) -> Self {
+    pub fn with_median_imputer(mut self) -> Self {
         self.steps
             .push(Preprocessor::Imputer(SimpleImputer::median()));
         self
     }
 
     /// Add a custom imputer to the pipeline
-    pub fn add_imputer(mut self, imputer: SimpleImputer) -> Self {
+    pub fn with_imputer(mut self, imputer: SimpleImputer) -> Self {
         self.steps.push(Preprocessor::Imputer(imputer));
         self
     }
 
     /// Add a Yeo-Johnson transform to the pipeline
-    pub fn add_yeo_johnson(mut self) -> Self {
+    pub fn with_yeo_johnson(mut self) -> Self {
         self.steps
             .push(Preprocessor::YeoJohnson(YeoJohnsonTransform::new()));
         self
     }
 
     /// Add a custom scaler to the pipeline
-    pub fn add_scaler(mut self, scaler: impl Into<Preprocessor>) -> Self {
+    pub fn with_scaler(mut self, scaler: impl Into<Preprocessor>) -> Self {
         self.steps.push(scaler.into());
         self
     }
@@ -486,8 +486,8 @@ mod tests {
     #[test]
     fn test_pipeline_builder() {
         let pipeline = PipelineBuilder::new()
-            .add_standard_scaler()
-            .add_minmax_scaler()
+            .with_standard_scaler()
+            .with_minmax_scaler()
             .build();
 
         assert!(pipeline.is_pipeline());
