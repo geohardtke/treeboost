@@ -115,15 +115,12 @@ fn tune_tree_model(
     let param_space = ParameterSpace::new()
         .with_param(
             "max_depth",
-            ParamBounds::discrete(tuner_cfg.max_depth_range.0, tuner_cfg.max_depth_range.1),
+            ParamBounds::discrete(tuner_cfg.depth.min, tuner_cfg.depth.max),
             6.0,
         )
         .with_param(
             "learning_rate",
-            ParamBounds::log_continuous(
-                tuner_cfg.learning_rate_range.0,
-                tuner_cfg.learning_rate_range.1,
-            ),
+            ParamBounds::log_continuous(tuner_cfg.learning_rate.min, tuner_cfg.learning_rate.max),
             0.1,
         )
         .with_param("subsample", ParamBounds::continuous(0.6, 1.0), 0.8)
@@ -176,7 +173,7 @@ fn tune_tree_model(
     // 3. Else → use profile detection
     let tuner_task_type = if let Some(explicit_type) = tuner_cfg.task_type {
         explicit_type
-    } else if tuner_cfg.optimization_metric == crate::tuner::OptimizationMetric::RankIc {
+    } else if tuner_cfg.output.metric == crate::tuner::OptimizationMetric::RankIc {
         TunerTaskType::Regression
     } else {
         match &profile.task_type {
@@ -189,7 +186,7 @@ fn tune_tree_model(
     if config.verbose {
         println!(
             "  [Tuning] Task type: {:?}, Optimization metric: {:?}",
-            tuner_task_type, tuner_cfg.optimization_metric
+            tuner_task_type, tuner_cfg.output.metric
         );
     }
 
@@ -199,26 +196,29 @@ fn tune_tree_model(
     let effective_val_ratio = if validation_dataset.is_some() {
         0.2 // Dummy value (won't be used, but must be non-zero for config validation)
     } else {
-        tuner_cfg.validation_ratio
+        tuner_cfg.stopping.validation_ratio
     };
 
     let mut tuner_config = TunerConfig::new()
-        .with_iterations(tuner_cfg.n_iterations)
+        .with_iterations(tuner_cfg.search.n_iterations)
         .with_grid_strategy(GridStrategy::LatinHypercube {
-            n_samples: tuner_cfg.n_samples,
+            n_samples: tuner_cfg.search.n_samples,
         })
         .with_eval_strategy(EvalStrategy::conformal_90(effective_val_ratio))
         .with_tuning_mode(TuningMode::Optimistic) // Use pre-encoded data
         .with_num_rounds(tuner_cfg.max_rounds)
-        .with_early_stopping(tuner_cfg.early_stopping_rounds, effective_val_ratio)
-        .with_improvement_threshold(tuner_cfg.improvement_threshold)
-        .with_min_f1_score(tuner_cfg.min_f1_score)
-        .with_optimization_metric(tuner_cfg.optimization_metric)
+        .with_early_stopping(
+            tuner_cfg.stopping.early_stopping_rounds,
+            effective_val_ratio,
+        )
+        .with_improvement_threshold(tuner_cfg.stopping.improvement_threshold)
+        .with_min_f1_score(tuner_cfg.stopping.min_f1_score)
+        .with_optimization_metric(tuner_cfg.output.metric)
         .with_task_type(tuner_task_type)
         .with_verbose(false); // Quiet internal logging
 
     // Enable CSV logging if output_dir is specified
-    if let Some(ref dir) = tuner_cfg.output_dir {
+    if let Some(ref dir) = tuner_cfg.output.dir {
         tuner_config = tuner_config.with_output_dir(dir);
     }
 
@@ -252,7 +252,7 @@ fn tune_tree_model(
     // Extract tuning results
     let tuning_result = history.best().map(|best| {
         // Use the actual optimization metric value
-        let best_metric = match tuner_cfg.optimization_metric {
+        let best_metric = match tuner_cfg.output.metric {
             crate::tuner::OptimizationMetric::ValidationLoss => best.val_loss,
             crate::tuner::OptimizationMetric::F1Score => best.f1_score.unwrap_or(0.0),
             crate::tuner::OptimizationMetric::RocAuc => best.roc_auc.unwrap_or(0.0) as f32,
@@ -268,7 +268,7 @@ fn tune_tree_model(
     if config.verbose {
         if let Some(best) = history.best() {
             // Show the optimization metric value with clear labeling
-            match tuner_cfg.optimization_metric {
+            match tuner_cfg.output.metric {
                 crate::tuner::OptimizationMetric::ValidationLoss => {
                     println!("  [Tuning] Best loss (MSE): {:.6}", best.val_loss);
                 }

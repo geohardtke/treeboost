@@ -546,36 +546,166 @@ pub struct TreeTuningResult {
     pub best_params: std::collections::HashMap<String, f32>,
 }
 
-/// Configuration for tree-based model tuning (PureTree, RandomForest)
-#[derive(Debug, Clone)]
-pub struct TreeTunerConfig {
-    /// Maximum tree depth range (min, max)
-    pub max_depth_range: (usize, usize),
-    /// Learning rate range (min, max) - log scale
-    pub learning_rate_range: (f32, f32),
+/// Depth range configuration for tree tuning.
+#[derive(Debug, Clone, Copy)]
+pub struct DepthConfig {
+    /// Minimum depth to explore
+    pub min: usize,
+    /// Maximum depth to explore
+    pub max: usize,
+}
+
+impl DepthConfig {
+    /// Create depth config from range tuple
+    pub fn new(min: usize, max: usize) -> Self {
+        Self { min, max }
+    }
+
+    /// Create from tuple (min, max)
+    pub fn from_range(range: (usize, usize)) -> Self {
+        Self {
+            min: range.0,
+            max: range.1,
+        }
+    }
+
+    /// Convert to range tuple
+    pub fn to_range(self) -> (usize, usize) {
+        (self.min, self.max)
+    }
+}
+
+/// Learning rate range configuration for tree tuning.
+#[derive(Debug, Clone, Copy)]
+pub struct LearningRateConfig {
+    /// Minimum learning rate to explore (log scale)
+    pub min: f32,
+    /// Maximum learning rate to explore (log scale)
+    pub max: f32,
+}
+
+impl LearningRateConfig {
+    /// Create learning rate config from range tuple
+    pub fn new(min: f32, max: f32) -> Self {
+        Self { min, max }
+    }
+
+    /// Create from tuple (min, max)
+    pub fn from_range(range: (f32, f32)) -> Self {
+        Self {
+            min: range.0,
+            max: range.1,
+        }
+    }
+
+    /// Convert to range tuple
+    pub fn to_range(self) -> (f32, f32) {
+        (self.min, self.max)
+    }
+}
+
+/// Search configuration for tree tuning.
+#[derive(Debug, Clone, Copy)]
+pub struct SearchConfig {
     /// Number of Latin Hypercube samples per iteration
     pub n_samples: usize,
     /// Number of zoom iterations (iterative refinement)
     pub n_iterations: usize,
-    /// Maximum boosting rounds per trial
-    pub max_rounds: usize,
-    /// Early stopping rounds
+}
+
+impl SearchConfig {
+    /// Create search config
+    pub fn new(n_samples: usize, n_iterations: usize) -> Self {
+        Self {
+            n_samples,
+            n_iterations,
+        }
+    }
+}
+
+/// Stopping criteria configuration for tree tuning.
+#[derive(Debug, Clone, Copy)]
+pub struct StoppingConfig {
+    /// Early stopping rounds (stop if no improvement)
     pub early_stopping_rounds: usize,
     /// Validation ratio for early stopping
     pub validation_ratio: f32,
     /// Improvement threshold for stopping iterations (e.g., 0.001 = 0.1%)
     pub improvement_threshold: f32,
-    /// Minimum F1 score required before stopping
+    /// Minimum F1 score required before stopping (classification only)
     pub min_f1_score: f32,
+}
+
+impl StoppingConfig {
+    /// Create stopping config
+    pub fn new(
+        early_stopping_rounds: usize,
+        validation_ratio: f32,
+        improvement_threshold: f32,
+        min_f1_score: f32,
+    ) -> Self {
+        Self {
+            early_stopping_rounds,
+            validation_ratio,
+            improvement_threshold,
+            min_f1_score,
+        }
+    }
+}
+
+/// Output and metric configuration for tree tuning.
+#[derive(Debug, Clone)]
+pub struct OutputConfig {
     /// Optional output directory for CSV logging (None = no logging)
-    pub output_dir: Option<std::path::PathBuf>,
+    pub dir: Option<std::path::PathBuf>,
     /// Metric to optimize (ValidationLoss, F1Score, RocAuc, RankIc)
-    ///
-    /// - `ValidationLoss`: Use val_metric (lower is better) - default
-    /// - `F1Score`: Use F1 score (higher is better) - classification
-    /// - `RocAuc`: Use ROC-AUC (higher is better) - binary classification
-    /// - `RankIc`: Use Rank IC (higher is better) - regression
-    pub optimization_metric: OptimizationMetric,
+    pub metric: OptimizationMetric,
+}
+
+impl OutputConfig {
+    /// Create output config
+    pub fn new(dir: Option<std::path::PathBuf>, metric: OptimizationMetric) -> Self {
+        Self { dir, metric }
+    }
+}
+
+/// Configuration for tree-based model tuning (PureTree, RandomForest)
+///
+/// This config groups parameters into logical sub-configs for better organization:
+/// - `depth`: Depth range to explore
+/// - `learning_rate`: Learning rate range to explore
+/// - `search`: Latin Hypercube sampling and iteration parameters
+/// - `stopping`: Early stopping and convergence criteria
+/// - `output`: Logging and metric optimization
+///
+/// # Examples
+///
+/// ```ignore
+/// use treeboost::TreeTunerConfig;
+///
+/// // Use preset
+/// let config = TreeTunerConfig::with_preset(TreeTunerPreset::Standard);
+///
+/// // Custom config
+/// let config = TreeTunerConfig::new()
+///     .with_depth_range(3, 10)
+///     .with_n_samples(200)
+///     .with_n_iterations(5);
+/// ```
+#[derive(Debug, Clone)]
+pub struct TreeTunerConfig {
+    /// Depth range configuration
+    pub depth: DepthConfig,
+    /// Learning rate range configuration
+    pub learning_rate: LearningRateConfig,
+    /// Search space sampling configuration
+    pub search: SearchConfig,
+    /// Maximum boosting rounds per trial
+    pub max_rounds: usize,
+    /// Stopping criteria configuration
+    pub stopping: StoppingConfig,
+    /// Output and metric configuration
+    pub output: OutputConfig,
     /// Task type (Regression, BinaryClassification, MultiClassClassification)
     ///
     /// When set to Some, overrides the profile-detected task type.
@@ -668,64 +798,224 @@ pub enum TreeTunerPreset {
 impl TreeTunerConfig {
     fn preset_quick() -> Self {
         Self {
-            max_depth_range: auto_defaults::QUICK_DEPTH_RANGE,
-            learning_rate_range: auto_defaults::QUICK_LR_RANGE,
-            n_samples: 30, // Default for Quick preset
-            n_iterations: 1,
+            depth: DepthConfig::from_range(auto_defaults::QUICK_DEPTH_RANGE),
+            learning_rate: LearningRateConfig::from_range(auto_defaults::QUICK_LR_RANGE),
+            search: SearchConfig::new(30, 1),
             max_rounds: 100,
-            early_stopping_rounds: 10,
-            validation_ratio: auto_defaults::DEFAULT_VALIDATION_RATIO,
-            improvement_threshold: 0.001,
-            min_f1_score: 0.80,
-            output_dir: None,
-            optimization_metric: OptimizationMetric::ValidationLoss,
+            stopping: StoppingConfig::new(10, auto_defaults::DEFAULT_VALIDATION_RATIO, 0.001, 0.80),
+            output: OutputConfig::new(None, OptimizationMetric::ValidationLoss),
             task_type: None, // Use profile detection
         }
     }
 
     fn preset_standard() -> Self {
         Self {
-            max_depth_range: auto_defaults::STANDARD_DEPTH_RANGE,
-            learning_rate_range: auto_defaults::STANDARD_LR_RANGE,
-            n_samples: 100,
-            n_iterations: 3,
+            depth: DepthConfig::from_range(auto_defaults::STANDARD_DEPTH_RANGE),
+            learning_rate: LearningRateConfig::from_range(auto_defaults::STANDARD_LR_RANGE),
+            search: SearchConfig::new(100, 3),
             max_rounds: 200,
-            early_stopping_rounds: 10,
-            validation_ratio: auto_defaults::DEFAULT_VALIDATION_RATIO,
-            improvement_threshold: 0.001,
-            min_f1_score: 0.85,
-            output_dir: None,
-            optimization_metric: OptimizationMetric::ValidationLoss,
+            stopping: StoppingConfig::new(10, auto_defaults::DEFAULT_VALIDATION_RATIO, 0.001, 0.85),
+            output: OutputConfig::new(None, OptimizationMetric::ValidationLoss),
             task_type: None, // Use profile detection
         }
     }
 
     fn preset_thorough() -> Self {
         Self {
-            max_depth_range: auto_defaults::THOROUGH_DEPTH_RANGE,
-            learning_rate_range: auto_defaults::STANDARD_LR_RANGE,
-            n_samples: 150,
-            n_iterations: 15,
+            depth: DepthConfig::from_range(auto_defaults::THOROUGH_DEPTH_RANGE),
+            learning_rate: LearningRateConfig::from_range(auto_defaults::STANDARD_LR_RANGE),
+            search: SearchConfig::new(150, 15),
             max_rounds: 200,
-            early_stopping_rounds: 10,
-            validation_ratio: auto_defaults::DEFAULT_VALIDATION_RATIO,
-            improvement_threshold: 0.001,
-            min_f1_score: 0.85,
-            output_dir: None,
-            optimization_metric: OptimizationMetric::ValidationLoss,
+            stopping: StoppingConfig::new(10, auto_defaults::DEFAULT_VALIDATION_RATIO, 0.001, 0.85),
+            output: OutputConfig::new(None, OptimizationMetric::ValidationLoss),
             task_type: None, // Use profile detection
         }
     }
 
     /// Set the optimization metric
     pub fn with_optimization_metric(mut self, metric: OptimizationMetric) -> Self {
-        self.optimization_metric = metric;
+        self.output.metric = metric;
         self
     }
 
     /// Set the task type explicitly (overrides profile detection)
     pub fn with_task_type(mut self, task_type: TunerTaskType) -> Self {
         self.task_type = Some(task_type);
+        self
+    }
+
+    /// Create a new TreeTunerConfig with standard defaults.
+    pub fn new() -> Self {
+        Self::preset_standard()
+    }
+
+    /// Set depth range for tree tuning.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = TreeTunerConfig::new().with_depth_range(3, 10);
+    /// ```
+    pub fn with_depth_range(mut self, min: usize, max: usize) -> Self {
+        self.depth = DepthConfig::new(min, max);
+        self
+    }
+
+    /// Set learning rate range for tree tuning.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = TreeTunerConfig::new().with_learning_rate_range(0.01, 0.3);
+    /// ```
+    pub fn with_learning_rate_range(mut self, min: f32, max: f32) -> Self {
+        self.learning_rate = LearningRateConfig::new(min, max);
+        self
+    }
+
+    /// Set number of Latin Hypercube samples per iteration.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = TreeTunerConfig::new().with_n_samples(200);
+    /// ```
+    pub fn with_n_samples(mut self, n_samples: usize) -> Self {
+        self.search.n_samples = n_samples;
+        self
+    }
+
+    /// Set number of zoom iterations.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = TreeTunerConfig::new().with_n_iterations(5);
+    /// ```
+    pub fn with_n_iterations(mut self, n_iterations: usize) -> Self {
+        self.search.n_iterations = n_iterations;
+        self
+    }
+
+    /// Set maximum boosting rounds per trial.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = TreeTunerConfig::new().with_max_rounds(500);
+    /// ```
+    pub fn with_max_rounds(mut self, max_rounds: usize) -> Self {
+        self.max_rounds = max_rounds;
+        self
+    }
+
+    /// Set early stopping rounds.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = TreeTunerConfig::new().with_early_stopping(20);
+    /// ```
+    pub fn with_early_stopping(mut self, rounds: usize) -> Self {
+        self.stopping.early_stopping_rounds = rounds;
+        self
+    }
+
+    /// Set validation ratio for early stopping.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = TreeTunerConfig::new().with_validation_ratio(0.15);
+    /// ```
+    pub fn with_validation_ratio(mut self, ratio: f32) -> Self {
+        self.stopping.validation_ratio = ratio;
+        self
+    }
+
+    /// Set improvement threshold for iteration stopping.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = TreeTunerConfig::new().with_improvement_threshold(0.005);
+    /// ```
+    pub fn with_improvement_threshold(mut self, threshold: f32) -> Self {
+        self.stopping.improvement_threshold = threshold;
+        self
+    }
+
+    /// Set minimum F1 score for classification.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = TreeTunerConfig::new().with_min_f1_score(0.90);
+    /// ```
+    pub fn with_min_f1_score(mut self, score: f32) -> Self {
+        self.stopping.min_f1_score = score;
+        self
+    }
+
+    /// Set output directory for CSV logging.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = TreeTunerConfig::new().with_output_dir(Some("logs/tuning".into()));
+    /// ```
+    pub fn with_output_dir(mut self, dir: Option<std::path::PathBuf>) -> Self {
+        self.output.dir = dir;
+        self
+    }
+
+    /// Set the entire depth configuration.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let depth_cfg = DepthConfig::new(5, 12);
+    /// let config = TreeTunerConfig::new().with_depth_config(depth_cfg);
+    /// ```
+    pub fn with_depth_config(mut self, depth: DepthConfig) -> Self {
+        self.depth = depth;
+        self
+    }
+
+    /// Set the entire learning rate configuration.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let lr_cfg = LearningRateConfig::new(0.01, 0.5);
+    /// let config = TreeTunerConfig::new().with_learning_rate_config(lr_cfg);
+    /// ```
+    pub fn with_learning_rate_config(mut self, learning_rate: LearningRateConfig) -> Self {
+        self.learning_rate = learning_rate;
+        self
+    }
+
+    /// Set the entire search configuration.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let search_cfg = SearchConfig::new(200, 10);
+    /// let config = TreeTunerConfig::new().with_search_config(search_cfg);
+    /// ```
+    pub fn with_search_config(mut self, search: SearchConfig) -> Self {
+        self.search = search;
+        self
+    }
+
+    /// Set the entire stopping configuration.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let stopping_cfg = StoppingConfig::new(15, 0.15, 0.002, 0.88);
+    /// let config = TreeTunerConfig::new().with_stopping_config(stopping_cfg);
+    /// ```
+    pub fn with_stopping_config(mut self, stopping: StoppingConfig) -> Self {
+        self.stopping = stopping;
+        self
+    }
+
+    /// Set the entire output configuration.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let output_cfg = OutputConfig::new(Some("logs".into()), OptimizationMetric::F1Score);
+    /// let config = TreeTunerConfig::new().with_output_config(output_cfg);
+    /// ```
+    pub fn with_output_config(mut self, output: OutputConfig) -> Self {
+        self.output = output;
         self
     }
 
