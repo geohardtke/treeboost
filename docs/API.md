@@ -215,7 +215,7 @@ println!("{}", model.analysis_summary().unwrap());
 
 ### Serialization
 
-UniversalModel supports zero-copy serialization via rkyv, making it perfect for production deployment.
+UniversalModel supports zero-copy serialization via rkyv, making it perfect for real world deployment.
 
 ```rust
 // Save model for inference
@@ -1295,12 +1295,12 @@ Update models with new data without full retraining. TreeBoost provides a custom
 
 ### Why Incremental Learning?
 
-| Scenario | Without Incremental | With Incremental |
-|----------|---------------------|------------------|
+| Scenario            | Without Incremental     | With Incremental             |
+| ------------------- | ----------------------- | ---------------------------- |
 | Daily model updates | Retrain on full history | Add trees from new data only |
-| Storage for updates | New file per version | Single file, append updates |
-| Compute cost | O(total_data) | O(new_data) |
-| Recovery from crash | Restart training | Resume from last checkpoint |
+| Storage for updates | New file per version    | Single file, append updates  |
+| Compute cost        | O(total_data)           | O(new_data)                  |
+| Recovery from crash | Restart training        | Resume from last checkpoint  |
 
 ### TRB Workflow Overview
 
@@ -1443,6 +1443,7 @@ cargo build --release --features mmap
 ```
 
 **When to use:**
+
 - Large models (100MB+) where heap allocation is expensive
 - Inference servers requiring minimal startup time
 - Running multiple model instances (OS deduplicates pages)
@@ -1450,10 +1451,10 @@ cargo build --release --features mmap
 
 **Comparison:**
 
-| Reader | Load Time | Memory | Use Case |
-|--------|-----------|--------|----------|
-| `TrbReader` | O(model_size) | O(model_size) | Default, works everywhere |
-| `MmapTrbReader` | O(1) initial | O(1) initial | Large models, servers |
+| Reader          | Load Time     | Memory        | Use Case                  |
+| --------------- | ------------- | ------------- | ------------------------- |
+| `TrbReader`     | O(model_size) | O(model_size) | Default, works everywhere |
+| `MmapTrbReader` | O(1) initial  | O(1) initial  | Large models, servers     |
 
 **Usage:**
 
@@ -1481,14 +1482,14 @@ cargo build --release --features mmap
 
 **API:**
 
-| Method | Description |
-|--------|-------------|
-| `open(path)` | Open TRB file with memory mapping |
-| `header()` | Get the `TrbHeader` |
-| `load_model()` | Deserialize `UniversalModel` |
-| `base_blob_bytes()` | Zero-copy access to base blob |
-| `iter_updates()` | Iterate update segments (zero-copy) |
-| `mapped_size()` | Size of memory-mapped region |
+| Method              | Description                         |
+| ------------------- | ----------------------------------- |
+| `open(path)`        | Open TRB file with memory mapping   |
+| `header()`          | Get the `TrbHeader`                 |
+| `load_model()`      | Deserialize `UniversalModel`        |
+| `base_blob_bytes()` | Zero-copy access to base blob       |
+| `iter_updates()`    | Iterate update segments (zero-copy) |
+| `mapped_size()`     | Size of memory-mapped region        |
 
 ### UniversalModel Incremental API
 
@@ -1634,28 +1635,28 @@ treeboost info --model model.trb --force
 
 **UniversalModel (TRB format):**
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `load_trb(path)` | Result<UniversalModel> | Load model from TRB file |
-| `save_trb(path, desc)` | Result<()> | Save model to TRB format |
-| `save_trb_update(path, rows, desc)` | Result<()> | Append update to existing TRB |
-| `update(&dataset, &loss, rounds)` | Result<IncrementalUpdateReport> | Add trees from BinnedDataset |
-| `predict(&dataset)` | Vec<f32> | Inference on BinnedDataset |
+| Method                              | Returns                         | Description                   |
+| ----------------------------------- | ------------------------------- | ----------------------------- |
+| `load_trb(path)`                    | Result<UniversalModel>          | Load model from TRB file      |
+| `save_trb(path, desc)`              | Result<()>                      | Save model to TRB format      |
+| `save_trb_update(path, rows, desc)` | Result<()>                      | Append update to existing TRB |
+| `update(&dataset, &loss, rounds)`   | Result<IncrementalUpdateReport> | Add trees from BinnedDataset  |
+| `predict(&dataset)`                 | Vec<f32>                        | Inference on BinnedDataset    |
 
 **AutoModel (initial training only):**
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `train(&df, target)` | Result<AutoModel> | Train from DataFrame |
-| `inner()` | &UniversalModel | Get underlying model for TRB save |
+| Method               | Returns           | Description                       |
+| -------------------- | ----------------- | --------------------------------- |
+| `train(&df, target)` | Result<AutoModel> | Train from DataFrame              |
+| `inner()`            | &UniversalModel   | Get underlying model for TRB save |
 
 **IncrementalDriftDetector:**
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `from_dataset(&data)` | Self | Create from reference distribution |
-| `with_thresholds(warn, crit)` | Self | Set PSI thresholds |
-| `check_update(&data)` | IncrementalDriftResult | Check for drift |
+| Method                        | Returns                | Description                        |
+| ----------------------------- | ---------------------- | ---------------------------------- |
+| `from_dataset(&data)`         | Self                   | Create from reference distribution |
+| `with_thresholds(warn, crit)` | Self                   | Set PSI thresholds                 |
+| `check_update(&data)`         | IncrementalDriftResult | Check for drift                    |
 
 ---
 

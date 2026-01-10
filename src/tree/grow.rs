@@ -19,6 +19,7 @@ use crate::loss::LossFunction;
 use crate::tree::{
     InteractionConstraints, MonotonicConstraint, Node, SplitFinder, SplitInfo, Tree,
 };
+use crate::Result;
 
 /// Storage for node histograms - either standard or era-stratified
 enum NodeHistogramStorage {
@@ -420,12 +421,12 @@ impl TreeGrower {
     ///
     /// # Arguments
     /// * `full_dataset_rows` - Total rows in the FULL dataset (before any splits)
-    pub fn init_backend(&self, full_dataset_rows: usize) {
-        self.ensure_backend(full_dataset_rows);
+    pub fn init_backend(&self, full_dataset_rows: usize) -> Result<()> {
+        self.ensure_backend(full_dataset_rows)
     }
 
     /// Initialize backend (called once at start of tree growing)
-    fn ensure_backend(&self, num_rows: usize) {
+    fn ensure_backend(&self, num_rows: usize) -> Result<()> {
         let mut cached = self.cached_backend.borrow_mut();
         if cached.is_none() {
             let config = BackendConfig {
@@ -433,8 +434,9 @@ impl TreeGrower {
                 use_gpu_subgroups: self.use_gpu_subgroups,
                 ..Default::default()
             };
-            *cached = Some(BackendSelector::with_config(config).select(num_rows));
+            *cached = Some(BackendSelector::with_config(config).select(num_rows)?);
         }
+        Ok(())
     }
 
     /// Get the backend for histogram operations
@@ -526,7 +528,7 @@ impl TreeGrower {
     /// * `dataset` - Binned training data
     /// * `gradients` - Gradient for each sample
     /// * `hessians` - Hessian for each sample
-    pub fn grow(&self, dataset: &BinnedDataset, gradients: &[f32], hessians: &[f32]) -> Tree {
+    pub fn grow(&self, dataset: &BinnedDataset, gradients: &[f32], hessians: &[f32]) -> Result<Tree> {
         // Use all rows
         let all_rows: Vec<usize> = (0..dataset.num_rows()).collect();
         self.grow_with_indices(dataset, gradients, hessians, &all_rows)
@@ -545,7 +547,7 @@ impl TreeGrower {
         gradients: &[f32],
         hessians: &[f32],
         row_indices: &[usize],
-    ) -> Tree {
+    ) -> Result<Tree> {
         // Use era splitting path if enabled and dataset has era indices
         if self.era_splitting && dataset.has_eras() {
             return self.grow_with_indices_era(dataset, gradients, hessians, row_indices);
@@ -555,7 +557,7 @@ impl TreeGrower {
         let num_rows = row_indices.len();
 
         // Ensure backend is initialized
-        self.ensure_backend(num_rows);
+        self.ensure_backend(num_rows)?;
         let split_finder = self.create_split_finder();
 
         // Convert separate gradient/hessian arrays to interleaved format for backend
@@ -924,7 +926,7 @@ impl TreeGrower {
             }
         }
 
-        tree
+        Ok(tree)
     }
 
     /// Grow a tree using era-stratified histograms (Directional Era Splitting / DES)
@@ -943,14 +945,14 @@ impl TreeGrower {
         gradients: &[f32],
         hessians: &[f32],
         row_indices: &[usize],
-    ) -> Tree {
+    ) -> Result<Tree> {
         debug_assert!(dataset.has_eras(), "Dataset must have era indices for DES");
 
         let num_features = dataset.num_features();
         let num_rows = row_indices.len();
 
         // Ensure backend is initialized for GPU era histograms
-        self.ensure_backend(num_rows);
+        self.ensure_backend(num_rows)?;
 
         // Convert separate gradient/hessian arrays to interleaved format for backend
         let grad_hess: Vec<(f32, f32)> = gradients
@@ -1271,7 +1273,7 @@ impl TreeGrower {
             });
         }
 
-        tree
+        Ok(tree)
     }
 
     /// Grow a tree with fused gradient+histogram computation for the root
@@ -1303,12 +1305,12 @@ impl TreeGrower {
         loss_fn: &dyn LossFunction,
         gradients: &mut [f32],
         hessians: &mut [f32],
-    ) -> Tree {
+    ) -> Result<Tree> {
         let num_features = dataset.num_features();
         let num_rows = row_indices.len();
 
         // Ensure backend is initialized
-        self.ensure_backend(num_rows);
+        self.ensure_backend(num_rows)?;
         let fused_builder = FusedHistogramBuilder::new();
         let split_finder = self.create_split_finder();
 
@@ -1674,7 +1676,7 @@ impl TreeGrower {
             }
         }
 
-        tree
+        Ok(tree)
     }
 
     /// Compute effective feature mask combining interaction constraints and column subsampling
@@ -1758,7 +1760,7 @@ mod tests {
 
         let grower = TreeGrower::new().with_max_depth(3).with_min_gain(1000.0); // Very high min gain = no splits
 
-        let tree = grower.grow(&dataset, &gradients, &hessians);
+        let tree = grower.grow(&dataset, &gradients, &hessians).unwrap();
 
         assert_eq!(tree.num_leaves(), 1);
         assert_eq!(tree.num_nodes(), 1);
@@ -1780,7 +1782,7 @@ mod tests {
             .with_min_samples_leaf(10)
             .with_learning_rate(0.1);
 
-        let tree = grower.grow(&dataset, &gradients, &hessians);
+        let tree = grower.grow(&dataset, &gradients, &hessians).unwrap();
 
         // Should have multiple nodes
         assert!(tree.num_nodes() > 1);
@@ -1796,7 +1798,7 @@ mod tests {
 
         let grower = TreeGrower::new().with_max_depth(2).with_max_leaves(100);
 
-        let tree = grower.grow(&dataset, &gradients, &hessians);
+        let tree = grower.grow(&dataset, &gradients, &hessians).unwrap();
 
         assert!(tree.max_depth() <= 2);
     }
@@ -1809,7 +1811,7 @@ mod tests {
 
         let grower = TreeGrower::new().with_max_depth(10).with_max_leaves(5);
 
-        let tree = grower.grow(&dataset, &gradients, &hessians);
+        let tree = grower.grow(&dataset, &gradients, &hessians).unwrap();
 
         assert!(tree.num_leaves() <= 5);
     }

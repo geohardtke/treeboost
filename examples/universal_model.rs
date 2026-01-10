@@ -181,7 +181,7 @@ fn main() {
     let config = UniversalConfig::new()
         .with_mode(BoostingMode::RandomForest)
         .with_num_rounds(100) // Number of trees
-        .with_subsample(0.7) // Bootstrap sample ratio
+        .with_subsample(0.7)? // Bootstrap sample ratio
         .with_seed(42);
 
     let start = std::time::Instant::now();

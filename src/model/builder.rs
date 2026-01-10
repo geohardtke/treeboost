@@ -36,7 +36,7 @@
 //! // Or customize the process
 //! let model = AutoBuilder::new()
 //!     .with_tuning(TuningLevel::Thorough)
-//!     .with_validation_split(0.2)
+//!     .with_random_validation_split(0.2)
 //!     .fit(&df, "target_column")?;
 //!
 //! // Predict on new data
@@ -92,8 +92,32 @@ impl AutoBuilder {
         self
     }
 
-    /// Set validation split ratio
-    pub fn with_validation_split(mut self, ratio: f32) -> Self {
+    /// Set validation split ratio for **random** train/validation split.
+    ///
+    /// **WARNING**: Only use this for cross-sectional (i.i.d.) data where rows are independent.
+    /// For time-series or panel data, use [`with_presplit_validation`] instead to avoid data leakage.
+    ///
+    /// The library will randomly split your data into:
+    /// - Training set: (1 - ratio) * num_rows
+    /// - Validation set: ratio * num_rows
+    ///
+    /// # Arguments
+    ///
+    /// * `ratio` - Fraction of data to use for validation (typically 0.2 for 80/20 split)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Cross-sectional data (rows are independent)
+    /// let model = AutoBuilder::new()
+    ///     .with_random_validation_split(0.2)  // Random 80/20 split
+    ///     .fit(&df, "target")?;
+    /// ```
+    ///
+    /// # See Also
+    ///
+    /// * [`with_presplit_validation`] - For time-series or panel data
+    pub fn with_random_validation_split(mut self, ratio: f32) -> Self {
         self.config.val_ratio = ratio;
         self
     }
@@ -104,26 +128,51 @@ impl AutoBuilder {
         self
     }
 
-    /// Provide custom validation data (for time-series or grouped data)
+    /// Use pre-split validation data for time-series, panel, or grouped data.
     ///
-    /// When provided, this disables internal validation splitting (sets val_ratio to 0.0)
-    /// to prevent conflicts. Use this for:
-    /// - Time-series data (date-based splits)
-    /// - Grouped data (no group leakage across splits)
-    /// - Pre-split data from custom strategies
+    /// **Use this method when** random splits would cause data leakage:
+    /// - **Time-series data**: Validate on future dates (date-based split)
+    /// - **Panel data**: Validate on held-out groups (no group leakage)
+    /// - **Cross-validation**: Custom fold splits
+    /// - **Any non-i.i.d. data**: Where rows have dependencies
     ///
-    /// # Example
+    /// When you provide pre-split validation data, the library will:
+    /// 1. Disable internal random splitting (sets `val_ratio = 0.0` automatically)
+    /// 2. Use your training DataFrame for training
+    /// 3. Use your validation DataFrame for hyperparameter tuning and early stopping
+    ///
+    /// # Arguments
+    ///
+    /// * `validation_df` - Pre-split validation DataFrame with same schema as training data
+    ///
+    /// # Example: Time-Series (Date-Based Split)
     ///
     /// ```ignore
-    /// // Split by date for time-series
-    /// let train_df = df.filter(col("date").lt(lit(cutoff_date)))?;
-    /// let val_df = df.filter(col("date").gt_eq(lit(cutoff_date)))?;
+    /// // Split by date for time-series forecasting
+    /// let train_df = df.filter(col("date").lt(lit("2024-01-01")))?;
+    /// let val_df = df.filter(col("date").gte(lit("2024-01-01")))?;
     ///
     /// let model = AutoBuilder::new()
-    ///     .with_validation_data(val_df)  // Disables internal split
+    ///     .with_presplit_validation(val_df)  // Correct: no leakage!
     ///     .fit(&train_df, "target")?;
     /// ```
-    pub fn with_validation_data(mut self, validation_df: DataFrame) -> Self {
+    ///
+    /// # Example: Panel Data (Group-Based Split)
+    ///
+    /// ```ignore
+    /// // Hold out specific stocks for validation
+    /// let train_df = df.filter(col("stock_id").is_in(train_stocks))?;
+    /// let val_df = df.filter(col("stock_id").is_in(val_stocks))?;
+    ///
+    /// let model = AutoBuilder::new()
+    ///     .with_presplit_validation(val_df)
+    ///     .fit(&train_df, "target")?;
+    /// ```
+    ///
+    /// # See Also
+    ///
+    /// * [`with_random_validation_split`] - For cross-sectional (i.i.d.) data
+    pub fn with_presplit_validation(mut self, validation_df: DataFrame) -> Self {
         // Disable internal validation split when custom data is provided
         self.config.val_ratio = 0.0;
         self.validation_df = Some(validation_df);
@@ -908,7 +957,7 @@ mod tests {
     fn test_auto_config_builder() {
         let config = AutoConfig::new()
             .with_tuning(TuningLevel::Thorough)
-            .with_validation_split(0.3)
+            .with_random_validation_split(0.3)
             .with_auto_features(false)
             .with_mode(BoostingMode::LinearThenTree);
 

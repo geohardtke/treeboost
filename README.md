@@ -6,7 +6,7 @@
 
 > **Practical tabular ML for messy, real-world data. Fast baselines first, deep control when you need it.**
 
-TreeBoost is a Rust-first library for tabular machine learning that starts simple and scales to expert use. It is built for the reality of production datasets: time series, missing values, drift, mixed feature types, and noisy labels. You get a clean path from “just give me a working model” to full control over training, backends, and constraints.
+TreeBoost is a Rust-first library for tabular machine learning that starts simple and scales to expert use. It is built for the reality of real-world datasets: time series, missing values, drift, mixed feature types, and noisy labels. You get a clean path from “just give me a working model” to full control over training, backends, and constraints.
 
 ## At a Glance
 
@@ -14,7 +14,7 @@ TreeBoost is a Rust-first library for tabular machine learning that starts simpl
 - Hybrid Linear+Tree mode for trend extrapolation + non-linear interactions
 - Built-in preprocessing that serializes with your model
 - GPU acceleration (WebGPU, CUDA) plus AVX-512/SVE2 CPU backends
-- Zero-copy serialization and incremental TRB updates for production pipelines
+- Zero-copy serialization and incremental TRB updates
 
 ## Why TreeBoost
 
@@ -180,6 +180,68 @@ model = GBDTModel.train(X, y, config)
 - **Linear Trees** for piecewise-linear data with far fewer trees.
 - **Conformal prediction** for uncertainty intervals.
 - **Incremental learning** via TRB format with drift detection.
+
+## Advanced Features
+
+TreeBoost includes battle-tested capabilities for real-world deployments.
+
+### Feature Matrix
+
+| Category          | Capability                        | Use Case                            | API Entry Point                              |
+| ----------------- | --------------------------------- | ----------------------------------- | -------------------------------------------- |
+| **Model Updates** | Incremental Learning (TRB format) | Daily model updates, streaming data | `UniversalModel::update()`                   |
+|                   | O(1) Append Updates               | Efficient model versioning          | `save_trb_update()`                          |
+|                   | Memory-Mapped I/O                 | Large model inference               | `MmapTrbReader` (mmap feature)               |
+| **Monitoring**    | Drift Detection (PSI, KL, KS)     | Distribution shift alerts           | `IncrementalDriftDetector`                   |
+|                   | Drift History Tracking            | Long-term monitoring                | `DriftHistory`                               |
+| **Ensembles**     | Multi-Seed Training               | Variance reduction                  | `with_ensemble_seeds()`                      |
+|                   | Stacked Blending                  | Meta-learner combination            | `StackingStrategy::Ridge`                    |
+| **Constraints**   | Monotonic Constraints             | Domain knowledge enforcement        | `TreeConfig::with_monotonic_constraints()`   |
+|                   | Interaction Constraints           | Feature interaction control         | `TreeConfig::with_interaction_constraints()` |
+| **Encoding**      | Ordered Target Encoding           | High-cardinality categoricals       | `OrderedTargetEncoder`                       |
+|                   | Count-Min Sketch Filtering        | Rare category handling              | `CategoryFilter`                             |
+| **Features**      | Time-Series (Lag/Rolling/EWMA)    | Panel data, forecasting             | `LagGenerator`, `RollingGenerator`           |
+|                   | Cross-Sectional (Poly/Ratio)      | Feature engineering                 | `PolynomialGenerator`, `RatioGenerator`      |
+| **Preprocessing** | Incremental Scaler (Welford)      | Adaptive preprocessing              | `StandardScaler::with_forget_factor()`       |
+|                   | Outlier Detection (IQR/Z-score)   | Robust pipelines                    | `OutlierDetector`, `RobustScaler`            |
+| **Uncertainty**   | Split Conformal Prediction        | Distribution-free intervals         | `GBDTConfig::with_conformal()`               |
+
+### Example: Incremental Learning Workflow
+
+```rust
+use treeboost::{AutoModel, UniversalModel};
+use treeboost::monitoring::IncrementalDriftDetector;
+use treeboost::loss::MseLoss;
+
+// 1. Initial training
+let auto = AutoModel::train(&df, "target")?;
+auto.inner().save_trb("model.trb", "Initial training")?;
+
+// 2. Production: Load and monitor for drift
+let mut model = UniversalModel::load_trb("model.trb")?;
+let detector = IncrementalDriftDetector::from_dataset(&train_data);
+
+// 3. Before updating, check for drift
+let result = detector.check_update(&new_data);
+if !result.has_critical_drift() {
+    let report = model.update(&new_data, &MseLoss, 10)?;
+    model.save_trb_update("model.trb", new_data.num_rows(), "Weekly update")?;
+} else {
+    eprintln!("Critical drift detected: {}", result);
+}
+```
+
+### Why These Features Matter
+
+- **Incremental Learning**: Update models in O(new_data) instead of O(total_data) - essential for daily retraining
+- **Drift Detection**: Catch distribution shifts before they degrade model performance
+- **Ensemble Methods**: Reduce variance and improve stability in noisy environments
+- **Constraints**: Enforce domain knowledge (e.g., "age must increase risk") for trust and interpretability
+- **High-Cardinality Encoding**: Handle millions of categories without memory explosion
+- **Time-Series Features**: Automatic lag/rolling/EWMA generation for panel data
+- **Conformal Prediction**: Valid uncertainty estimates regardless of data distribution
+
+📖 **For detailed API documentation with examples, see [docs/API.md](docs/API.md)**
 
 ## Backends (Automatic by Default)
 

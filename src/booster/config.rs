@@ -401,33 +401,53 @@ impl GBDTConfig {
     ///
     /// # Arguments
     /// * `num_classes` - Number of classes (K)
-    pub fn with_multiclass_logloss(mut self, num_classes: usize) -> Self {
-        assert!(num_classes >= 2, "num_classes must be >= 2");
+    pub fn with_multiclass_logloss(mut self, num_classes: usize) -> crate::Result<Self> {
+        if num_classes < 2 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "num_classes must be >= 2, got {}", num_classes
+            )));
+        }
         self.loss_type = LossType::MultiClassLogLoss { num_classes };
-        self
+        Ok(self)
     }
 
     /// Set row subsampling ratio
-    pub fn with_subsample(mut self, ratio: f32) -> Self {
-        assert!(ratio > 0.0 && ratio <= 1.0);
+    pub fn with_subsample(mut self, ratio: f32) -> crate::Result<Self> {
+        if ratio <= 0.0 || ratio > 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "subsample must be in (0, 1], got {}", ratio
+            )));
+        }
         self.subsample = ratio;
-        self
+        Ok(self)
     }
 
     /// Set column subsampling ratio
-    pub fn with_colsample(mut self, ratio: f32) -> Self {
-        assert!(ratio > 0.0 && ratio <= 1.0);
+    pub fn with_colsample(mut self, ratio: f32) -> crate::Result<Self> {
+        if ratio <= 0.0 || ratio > 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "colsample must be in (0, 1], got {}", ratio
+            )));
+        }
         self.colsample = ratio;
-        self
+        Ok(self)
     }
 
     /// Enable conformal prediction
-    pub fn with_conformal(mut self, calibration_ratio: f32, quantile: f32) -> Self {
-        assert!((0.0..1.0).contains(&calibration_ratio));
-        assert!(quantile > 0.0 && quantile < 1.0);
+    pub fn with_conformal(mut self, calibration_ratio: f32, quantile: f32) -> crate::Result<Self> {
+        if calibration_ratio < 0.0 || calibration_ratio >= 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "calibration_ratio must be in [0, 1), got {}", calibration_ratio
+            )));
+        }
+        if quantile <= 0.0 || quantile >= 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "quantile must be in (0, 1), got {}", quantile
+            )));
+        }
         self.calibration_ratio = calibration_ratio;
         self.conformal_quantile = quantile;
-        self
+        Ok(self)
     }
 
     /// Enable early stopping
@@ -435,12 +455,20 @@ impl GBDTConfig {
     /// # Arguments
     /// * `rounds` - Number of consecutive rounds without improvement before stopping
     /// * `validation_ratio` - Fraction of data to use for validation (e.g., 0.1 for 10%)
-    pub fn with_early_stopping(mut self, rounds: usize, validation_ratio: f32) -> Self {
-        assert!(rounds > 0, "early_stopping_rounds must be > 0");
-        assert!(validation_ratio > 0.0 && validation_ratio < 1.0);
+    pub fn with_early_stopping(mut self, rounds: usize, validation_ratio: f32) -> crate::Result<Self> {
+        if rounds == 0 {
+            return Err(crate::TreeBoostError::Config(
+                "early_stopping_rounds must be > 0".to_string()
+            ));
+        }
+        if validation_ratio <= 0.0 || validation_ratio >= 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "validation_ratio must be in (0, 1), got {}", validation_ratio
+            )));
+        }
         self.early_stopping_rounds = rounds;
         self.validation_ratio = validation_ratio;
-        self
+        Ok(self)
     }
 
     /// Set minimum trees before early stopping can trigger
@@ -735,7 +763,7 @@ mod tests {
             .with_max_depth(4)
             .with_pseudo_huber_loss(1.0)
             .with_entropy_weight(0.1)
-            .with_conformal(0.1, 0.9);
+            .with_conformal(0.1, 0.9).unwrap();
 
         assert_eq!(config.num_rounds, 50);
         assert_eq!(config.learning_rate, 0.05);

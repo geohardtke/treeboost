@@ -11,6 +11,8 @@
 //! - **ROCm**: AMD GPU direct (future)
 //! - **Metal**: Apple GPU direct (future)
 
+use crate::{Result, TreeBoostError};
+
 mod config;
 mod hybrid;
 pub mod scalar;
@@ -64,17 +66,17 @@ impl BackendSelector {
     ///
     /// # Returns
     /// A boxed trait object implementing HistogramBackend
-    pub fn select(&self, num_rows: usize) -> Box<dyn HistogramBackend> {
+    pub fn select(&self, num_rows: usize) -> Result<Box<dyn HistogramBackend>> {
         match self.config.preferred {
             BackendType::Auto => {
                 // For Auto mode, apply threshold check for small datasets
                 if num_rows < self.config.tensor_tile_min_rows {
-                    return Box::new(ScalarBackend::new());
+                    return Ok(Box::new(ScalarBackend::new()));
                 }
                 self.detect_best()
             }
             // For explicit backend choices, respect them regardless of dataset size
-            BackendType::Scalar => Box::new(ScalarBackend::new()),
+            BackendType::Scalar => Ok(Box::new(ScalarBackend::new())),
             BackendType::Wgpu => self.try_wgpu_or_fallback(),
             BackendType::Avx512 => self.try_avx512_or_fallback(),
             BackendType::Sve2 => self.try_sve2_or_fallback(),
@@ -85,7 +87,7 @@ impl BackendSelector {
     }
 
     /// Detect the best available backend.
-    fn detect_best(&self) -> Box<dyn HistogramBackend> {
+    fn detect_best(&self) -> Result<Box<dyn HistogramBackend>> {
         // Priority order: CUDA > WGPU > AVX-512 > SVE2 > Scalar
 
         // Try CUDA first (NVIDIA-only but fastest: 10-100μs dispatch)
@@ -93,10 +95,10 @@ impl BackendSelector {
         {
             if let Some(backend) = cuda::CudaBackend::new() {
                 // Wrap CUDA in hybrid backend with user-configured threshold
-                return Box::new(HybridGpuBackend::with_threshold(
+                return Ok(Box::new(HybridGpuBackend::with_threshold(
                     Box::new(backend),
                     self.config.cuda_hybrid_threshold,
-                ));
+                )));
             }
         }
 
@@ -106,97 +108,111 @@ impl BackendSelector {
             if let Some(backend) = wgpu::WgpuBackend::new() {
                 backend.set_use_subgroups(self.config.use_gpu_subgroups);
                 // Wrap WGPU in hybrid backend with user-configured threshold
-                return Box::new(HybridGpuBackend::with_threshold(
+                return Ok(Box::new(HybridGpuBackend::with_threshold(
                     Box::new(backend),
                     self.config.wgpu_hybrid_threshold,
-                ));
+                )));
             }
         }
 
         // TODO: Check for AVX-512 availability
         // TODO: Check for SVE2 availability
 
-        Box::new(ScalarBackend::new())
+        Ok(Box::new(ScalarBackend::new()))
     }
 
-    fn try_wgpu_or_fallback(&self) -> Box<dyn HistogramBackend> {
+    fn try_wgpu_or_fallback(&self) -> Result<Box<dyn HistogramBackend>> {
         #[cfg(feature = "gpu")]
         {
             if let Some(backend) = wgpu::WgpuBackend::new() {
                 backend.set_use_subgroups(self.config.use_gpu_subgroups);
                 // Wrap WGPU in hybrid backend with user-configured threshold
-                return Box::new(HybridGpuBackend::with_threshold(
+                return Ok(Box::new(HybridGpuBackend::with_threshold(
                     Box::new(backend),
                     self.config.wgpu_hybrid_threshold,
-                ));
+                )));
             }
         }
 
         if self.config.fallback_to_scalar {
-            Box::new(ScalarBackend::new())
+            Ok(Box::new(ScalarBackend::new()))
         } else {
-            panic!("WGPU backend requested but not available (no GPU or 'gpu' feature disabled)")
+            Err(TreeBoostError::Backend(
+                "WGPU backend unavailable: no GPU detected or 'gpu' feature not enabled. \
+                 Enable 'gpu' feature or set BackendConfig::fallback_to_scalar = true".to_string()
+            ))
         }
     }
 
-    fn try_avx512_or_fallback(&self) -> Box<dyn HistogramBackend> {
+    fn try_avx512_or_fallback(&self) -> Result<Box<dyn HistogramBackend>> {
         // TODO: Implement AVX-512 tensor-tile backend
         if self.config.fallback_to_scalar {
-            Box::new(ScalarBackend::new())
+            Ok(Box::new(ScalarBackend::new()))
         } else {
-            panic!("AVX-512 tensor-tile backend not yet implemented")
+            Err(TreeBoostError::Backend(
+                "AVX-512 tensor-tile backend not yet implemented. Use BackendType::Auto or enable fallback_to_scalar".to_string()
+            ))
         }
     }
 
-    fn try_sve2_or_fallback(&self) -> Box<dyn HistogramBackend> {
+    fn try_sve2_or_fallback(&self) -> Result<Box<dyn HistogramBackend>> {
         // TODO: Implement SVE2 tensor-tile backend
         if self.config.fallback_to_scalar {
-            Box::new(ScalarBackend::new())
+            Ok(Box::new(ScalarBackend::new()))
         } else {
-            panic!("SVE2 tensor-tile backend not yet implemented")
+            Err(TreeBoostError::Backend(
+                "SVE2 tensor-tile backend not yet implemented. Use BackendType::Auto or enable fallback_to_scalar".to_string()
+            ))
         }
     }
 
-    fn try_cuda_or_fallback(&self) -> Box<dyn HistogramBackend> {
+    fn try_cuda_or_fallback(&self) -> Result<Box<dyn HistogramBackend>> {
         #[cfg(feature = "cuda")]
         {
             if let Some(backend) = cuda::CudaBackend::new() {
                 // Wrap CUDA in hybrid backend with user-configured threshold
-                return Box::new(HybridGpuBackend::with_threshold(
+                return Ok(Box::new(HybridGpuBackend::with_threshold(
                     Box::new(backend),
                     self.config.cuda_hybrid_threshold,
-                ));
+                )));
             }
         }
 
         if self.config.fallback_to_scalar {
-            Box::new(ScalarBackend::new())
+            Ok(Box::new(ScalarBackend::new()))
         } else {
-            panic!("CUDA backend requested but not available (no NVIDIA GPU or 'cuda' feature disabled)")
+            Err(TreeBoostError::Backend(
+                "CUDA backend unavailable: no NVIDIA GPU detected or 'cuda' feature not enabled. \
+                 Enable 'cuda' feature or set BackendConfig::fallback_to_scalar = true".to_string()
+            ))
         }
     }
 
-    fn try_rocm_or_fallback(&self) -> Box<dyn HistogramBackend> {
+    fn try_rocm_or_fallback(&self) -> Result<Box<dyn HistogramBackend>> {
         // TODO: Implement native ROCm backend
         if self.config.fallback_to_scalar {
-            Box::new(ScalarBackend::new())
+            Ok(Box::new(ScalarBackend::new()))
         } else {
-            panic!("ROCm backend not yet implemented")
+            Err(TreeBoostError::Backend(
+                "ROCm backend not yet implemented. Use BackendType::Auto or enable fallback_to_scalar".to_string()
+            ))
         }
     }
 
-    fn try_metal_or_fallback(&self) -> Box<dyn HistogramBackend> {
+    fn try_metal_or_fallback(&self) -> Result<Box<dyn HistogramBackend>> {
         // TODO: Implement native Metal backend
         if self.config.fallback_to_scalar {
-            Box::new(ScalarBackend::new())
+            Ok(Box::new(ScalarBackend::new()))
         } else {
-            panic!("Metal backend not yet implemented")
+            Err(TreeBoostError::Backend(
+                "Metal backend not yet implemented. Use BackendType::Auto or enable fallback_to_scalar".to_string()
+            ))
         }
     }
 
     /// Get the name of the currently selected backend.
-    pub fn backend_name(&self, num_rows: usize) -> &'static str {
-        self.select(num_rows).name()
+    pub fn backend_name(&self, num_rows: usize) -> Result<&'static str> {
+        Ok(self.select(num_rows)?.name())
     }
 }
 

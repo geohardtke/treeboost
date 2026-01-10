@@ -197,6 +197,25 @@ impl UniversalModel {
         config: UniversalConfig,
         loss_fn: &dyn LossFunction,
     ) -> Result<Self> {
+        // Validate configuration
+        if config.num_rounds == 0 {
+            return Err(crate::TreeBoostError::Config(
+                "num_rounds must be greater than 0".to_string(),
+            ));
+        }
+        if config.learning_rate <= 0.0 || config.learning_rate > 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "learning_rate must be in (0, 1], got {}",
+                config.learning_rate
+            )));
+        }
+        if config.subsample <= 0.0 || config.subsample > 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "subsample must be in (0, 1], got {}",
+                config.subsample
+            )));
+        }
+
         let feature_extractor = config.feature_extractor.clone();
         match config.mode {
             BoostingMode::PureTree => {
@@ -283,6 +302,25 @@ impl UniversalModel {
         config: UniversalConfig,
         loss_fn: &dyn LossFunction,
     ) -> Result<Self> {
+        // Validate configuration
+        if config.num_rounds == 0 {
+            return Err(crate::TreeBoostError::Config(
+                "num_rounds must be greater than 0".to_string(),
+            ));
+        }
+        if config.learning_rate <= 0.0 || config.learning_rate > 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "learning_rate must be in (0, 1], got {}",
+                config.learning_rate
+            )));
+        }
+        if config.subsample <= 0.0 || config.subsample > 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "subsample must be in (0, 1], got {}",
+                config.subsample
+            )));
+        }
+
         let feature_extractor = config.feature_extractor.clone();
         match config.mode {
             BoostingMode::PureTree => {
@@ -462,7 +500,7 @@ impl UniversalModel {
     pub(crate) fn to_gbdt_config(
         config: &UniversalConfig,
         loss_fn: &dyn LossFunction,
-    ) -> GBDTConfig {
+    ) -> Result<GBDTConfig> {
         let mut gbdt_config = GBDTConfig::new()
             .with_num_rounds(config.num_rounds)
             .with_learning_rate(config.learning_rate)
@@ -470,14 +508,14 @@ impl UniversalModel {
             .with_max_leaves(config.tree_config.max_leaves)
             .with_lambda(config.tree_config.lambda)
             .with_entropy_weight(config.tree_config.entropy_weight) // Pass entropy regularization
-            .with_subsample(config.subsample)
+            .with_subsample(config.subsample)?
             .with_backend(config.backend_type) // Pass backend type
             .with_seed(config.seed);
 
         // Early stopping
         if config.early_stopping_rounds > 0 && config.validation_ratio > 0.0 {
             gbdt_config = gbdt_config
-                .with_early_stopping(config.early_stopping_rounds, config.validation_ratio);
+                .with_early_stopping(config.early_stopping_rounds, config.validation_ratio)?;
         }
 
         // Conformal calibration
@@ -495,7 +533,7 @@ impl UniversalModel {
         }
         // Default is MSE which is already the default
 
-        gbdt_config
+        Ok(gbdt_config)
     }
 
     // =========================================================================
@@ -518,7 +556,7 @@ impl UniversalModel {
                 Self::train_gbdt_ensemble(dataset, &config, loss_fn, seeds)?
             } else {
                 // Single GBDT training (standard path)
-                let gbdt_config = Self::to_gbdt_config(&config, loss_fn);
+                let gbdt_config = Self::to_gbdt_config(&config, loss_fn)?;
                 let gbdt_model = GBDTModel::train_binned(dataset, gbdt_config)?;
                 (Some(gbdt_model), None, None, None)
             };
@@ -694,7 +732,7 @@ impl UniversalModel {
                 Self::train_gbdt_ensemble(&residual_dataset, &config, loss_fn, seeds)?
             } else {
                 // Single GBDT training (standard path)
-                let gbdt_config = Self::to_gbdt_config(&config, loss_fn);
+                let gbdt_config = Self::to_gbdt_config(&config, loss_fn)?;
                 let gbdt_model = GBDTModel::train_binned(&residual_dataset, gbdt_config)?;
                 (Some(gbdt_model), None, None, None)
             };
@@ -862,7 +900,7 @@ impl UniversalModel {
         let mut oof_predictions = Vec::with_capacity(seeds.len());
 
         for &seed in seeds {
-            let mut gbdt_config = Self::to_gbdt_config(config, loss_fn);
+            let mut gbdt_config = Self::to_gbdt_config(config, loss_fn)?;
             gbdt_config.seed = seed;
 
             let model = GBDTModel::train_binned(dataset, gbdt_config)?;
@@ -1857,7 +1895,7 @@ impl UniversalModel {
         // Train new trees on residuals using same config
         let mut update_config = self.config.clone();
         update_config.num_rounds = additional_rounds;
-        let gbdt_config = Self::to_gbdt_config(&update_config, loss_fn);
+        let gbdt_config = Self::to_gbdt_config(&update_config, loss_fn)?;
         let new_model = GBDTModel::train_binned(&residual_dataset, gbdt_config)?;
 
         // Append new trees
@@ -1929,7 +1967,7 @@ impl UniversalModel {
             // Train new trees on residuals
             let mut update_config = self.config.clone();
             update_config.num_rounds = additional_rounds;
-            let gbdt_config = Self::to_gbdt_config(&update_config, loss_fn);
+            let gbdt_config = Self::to_gbdt_config(&update_config, loss_fn)?;
             let new_model = GBDTModel::train_binned(&residual_dataset, gbdt_config)?;
 
             gbdt.append_trees(new_model.trees().to_vec());

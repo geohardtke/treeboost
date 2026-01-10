@@ -282,27 +282,121 @@ impl<M: TunableModel> AutoTuner<M> {
 
     /// Tune hyperparameters with custom validation dataset (for time-series/grouped data)
     ///
-    /// Use this when you need custom validation splits (e.g., date-based splits for time-series,
-    /// group-based splits for hierarchical data) to prevent data leakage.
+    /// **When to use this method:**
+    ///
+    /// Use `tune_with_validation()` when random validation splits would cause **data leakage**.
+    /// This is critical for:
+    ///
+    /// - **Time-series data**: Train on past dates, validate on future dates
+    /// - **Panel data**: Train on some groups, validate on held-out groups
+    /// - **Hierarchical data**: Prevent leakage across hierarchical levels
+    /// - **Cross-validation with custom folds**: Control exact train/val composition
+    ///
+    /// For standard cross-sectional (i.i.d.) data where rows are independent,
+    /// use [`tune()`] instead, which performs random splits internally.
+    ///
+    /// **Key difference from `tune()`:**
+    ///
+    /// - [`tune()`]: Accepts single dataset, performs random internal splits
+    /// - `tune_with_validation()`: Accepts pre-split train/val datasets, no further splitting
     ///
     /// # Arguments
-    /// * `train_dataset` - Training data (will NOT be split)
-    /// * `val_dataset` - Validation data (for evaluation)
+    ///
+    /// * `train_dataset` - Training data (will NOT be split further)
+    /// * `val_dataset` - Validation data (for hyperparameter evaluation)
     ///
     /// # Returns
+    ///
     /// * Best model config found and the complete search history
     ///
-    /// # Example
+    /// # Example 1: Time-Series (Date-Based Split)
+    ///
     /// ```ignore
-    /// // Split by date for time-series
-    /// let (train_dataset, val_dataset) = split_by_date(full_dataset, cutoff_date);
+    /// use treeboost::{AutoTuner, TunerConfig, ParameterSpace, SpacePreset};
+    /// use treeboost::dataset::{DatasetLoader, BinnedDataset};
+    /// use polars::prelude::*;
+    ///
+    /// // Load time-series data
+    /// let df = CsvReadOptions::default()
+    ///     .try_into_reader_with_file_path(Some("stock_prices.csv".into()))?
+    ///     .finish()?;
+    ///
+    /// // CRITICAL: Split by date BEFORE binning (prevents target leakage)
+    /// let train_df = df.filter(col("date").lt(lit("2024-01-01")))?;
+    /// let val_df = df.filter(col("date").gte(lit("2024-01-01")))?;
+    ///
+    /// // Encode train and validation datasets separately
+    /// let loader = DatasetLoader::new(255);
+    /// let train_dataset = loader.load_dataframe(train_df, "return", None)?;
+    /// let val_dataset = loader.load_dataframe(val_df, "return", None)?;
+    ///
+    /// // Configure tuner
+    /// let base_config = GBDTConfig::default();
+    /// let tuner_config = TunerConfig::new()
+    ///     .with_eval_strategy(EvalStrategy::holdout(0.0));  // No further splits!
     ///
     /// let mut tuner = AutoTuner::new(base_config)
     ///     .with_config(tuner_config)
-    ///     .with_space(param_space);
+    ///     .with_space(ParameterSpace::from_preset(SpacePreset::Moderate));
     ///
+    /// // Tune using pre-split data (no random splits)
+    /// let (best_config, history) = tuner.tune_with_validation(&train_dataset, &val_dataset)?;
+    ///
+    /// // Train final model on full training set with best config
+    /// let final_model = GBDTModel::train(&train_dataset, &best_config)?;
+    /// ```
+    ///
+    /// # Example 2: Panel Data (Group-Based Split)
+    ///
+    /// ```ignore
+    /// use treeboost::{AutoTuner, GBDTConfig};
+    /// use polars::prelude::*;
+    ///
+    /// // Panel data: stocks × dates
+    /// let df = CsvReadOptions::default()
+    ///     .try_into_reader_with_file_path(Some("panel_data.csv".into()))?
+    ///     .finish()?;
+    ///
+    /// // Hold out specific stocks for validation (no group leakage)
+    /// let train_stocks = vec!["AAPL", "MSFT", "GOOGL"];
+    /// let val_stocks = vec!["TSLA", "AMZN"];
+    ///
+    /// let train_df = df.filter(col("stock_id").is_in(lit(train_stocks)))?;
+    /// let val_df = df.filter(col("stock_id").is_in(lit(val_stocks)))?;
+    ///
+    /// // Encode separately
+    /// let loader = DatasetLoader::new(255);
+    /// let train_dataset = loader.load_dataframe(train_df, "return", None)?;
+    /// let val_dataset = loader.load_dataframe(val_df, "return", None)?;
+    ///
+    /// // Tune with group-aware validation
+    /// let mut tuner = AutoTuner::new(GBDTConfig::default());
     /// let (best_config, history) = tuner.tune_with_validation(&train_dataset, &val_dataset)?;
     /// ```
+    ///
+    /// # Integration with AutoBuilder
+    ///
+    /// For high-level AutoML workflows, use [`AutoBuilder::with_presplit_validation()`]
+    /// which handles preprocessing and feature engineering automatically:
+    ///
+    /// ```ignore
+    /// use treeboost::model::AutoBuilder;
+    ///
+    /// // Split raw DataFrame by date
+    /// let train_df = df.filter(col("date").lt(lit("2024-01-01")))?;
+    /// let val_df = df.filter(col("date").gte(lit("2024-01-01")))?;
+    ///
+    /// // AutoBuilder handles preprocessing + tuning with pre-split validation
+    /// let model = AutoBuilder::new()
+    ///     .with_presplit_validation(val_df)
+    ///     .fit(&train_df, "target")?;
+    /// ```
+    ///
+    /// # See Also
+    ///
+    /// * [`tune()`] - For cross-sectional (i.i.d.) data with random splits
+    /// * [`AutoBuilder::with_presplit_validation()`] - High-level API for AutoML workflows
+    /// * [`AutoBuilder::with_random_validation_split()`] - For cross-sectional data
     pub fn tune_with_validation(
         &mut self,
         train_dataset: &BinnedDataset,

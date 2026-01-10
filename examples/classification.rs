@@ -82,7 +82,7 @@ fn main() {
         .with_max_depth(6)
         .with_learning_rate(0.1)
         .with_binary_logloss()
-        .with_subsample(0.8)
+        .with_subsample(0.8)?
         .with_seed(42);
 
     println!("   Rounds: 100");

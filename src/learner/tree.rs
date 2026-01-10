@@ -353,8 +353,8 @@ impl TreeBooster {
 
         // Grow tree
         self.tree = Some(match row_indices {
-            Some(indices) => grower.grow_with_indices(dataset, gradients, hessians, indices),
-            None => grower.grow(dataset, gradients, hessians),
+            Some(indices) => grower.grow_with_indices(dataset, gradients, hessians, indices)?,
+            None => grower.grow(dataset, gradients, hessians)?,
         });
 
         Ok(())

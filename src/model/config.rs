@@ -24,7 +24,7 @@ pub enum TuningLevel {
     Quick,
 
     /// Moderate tuning - good balance of speed and quality
-    /// Best for: Most production use cases
+    /// Best for: Most real world use cases
     #[default]
     Standard,
 
@@ -223,8 +223,11 @@ impl AutoConfig {
         self
     }
 
-    /// Set validation split ratio
-    pub fn with_validation_split(mut self, ratio: f32) -> Self {
+    /// Set validation split ratio for **random** train/validation split.
+    ///
+    /// **For cross-sectional (i.i.d.) data only** where rows are independent.
+    /// For time-series or panel data, use `AutoBuilder::with_presplit_validation` instead.
+    pub fn with_random_validation_split(mut self, ratio: f32) -> Self {
         self.val_ratio = ratio.clamp(0.1, 0.4);
         self
     }

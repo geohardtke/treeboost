@@ -160,8 +160,8 @@ fn main() {
         .with_num_rounds(100)
         .with_max_depth(6)
         .with_learning_rate(0.1)
-        .with_subsample(0.8)
-        .with_colsample(0.8)
+        .with_subsample(0.8)?
+        .with_colsample(0.8)?
         .with_seed(42);
 
     let start = std::time::Instant::now();

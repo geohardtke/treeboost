@@ -233,7 +233,7 @@ impl LinearTreeBooster {
 
         // Step 2: Grow tree structure using TreeGrower
         let grower = self.config.tree_config.build_grower(num_features, None);
-        let tree = grower.grow(dataset, gradients, hessians);
+        let tree = grower.grow(dataset, gradients, hessians)?;
 
         // Step 3: Assign samples to leaves
         let leaf_assignments = self.assign_samples_to_leaves(&tree, dataset, num_rows);

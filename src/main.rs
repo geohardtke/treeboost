@@ -253,12 +253,12 @@ fn main() -> Result<()> {
                 .with_min_samples_leaf(min_samples_leaf)
                 .with_lambda(lambda)
                 .with_entropy_weight(entropy_weight)
-                .with_subsample(subsample)
-                .with_colsample(colsample);
+                .with_subsample(subsample)?
+                .with_colsample(colsample)?;
 
             // Enable early stopping if requested
             if early_stopping > 0 {
-                config = config.with_early_stopping(early_stopping, validation_ratio);
+                config = config.with_early_stopping(early_stopping, validation_ratio)?;
                 println!(
                     "Early stopping enabled: {} rounds, {:.1}% validation",
                     early_stopping,
@@ -278,7 +278,7 @@ fn main() -> Result<()> {
 
             // Enable conformal prediction if requested
             if let Some(calib_ratio) = conformal {
-                config = config.with_conformal(calib_ratio, conformal_quantile);
+                config = config.with_conformal(calib_ratio, conformal_quantile)?;
                 println!(
                     "Conformal prediction enabled: {:.1}% calibration, {:.1}% coverage",
                     calib_ratio * 100.0,

@@ -137,7 +137,7 @@ fn tune_tree_model(
             preferred: BackendType::Auto,
             ..Default::default()
         })
-        .select(dataset.num_rows());
+        .select(dataset.num_rows())?;
 
         // Convert backend name to BackendType
         match resolved.name() {
@@ -164,7 +164,7 @@ fn tune_tree_model(
             .with_seed(42)
             .with_backend(backend_type),
         TaskType::MultiClassification { num_classes } => GBDTConfig::new()
-            .with_multiclass_logloss(*num_classes)
+            .with_multiclass_logloss(*num_classes)?
             .with_min_samples_leaf(5)
             .with_seed(42)
             .with_backend(backend_type),

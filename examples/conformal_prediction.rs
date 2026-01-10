@@ -74,7 +74,7 @@ fn main() {
         .with_num_rounds(50)
         .with_max_depth(5)
         .with_learning_rate(0.1)
-        .with_subsample(0.8)
+        .with_subsample(0.8)?
         .with_seed(42);
 
     let model = GBDTModel::train_binned(&train_dataset, config).expect("Training failed");

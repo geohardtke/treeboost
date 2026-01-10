@@ -436,7 +436,7 @@ impl GBDTModel {
                     preferred: crate::backend::BackendType::Auto,
                     ..Default::default()
                 })
-                .select(dataset.num_rows());
+                .select(dataset.num_rows())?;
 
             // Update config with resolved backend (CUDA/WGPU/Scalar/etc)
             let resolved_type = match resolved.name() {
@@ -628,74 +628,77 @@ impl GBDTModel {
             }
 
             // Fall back to TreeGrower (Hybrid mode or CPU)
-            let tree = tree.unwrap_or_else(|| {
-                if use_fused {
-                    // FUSED PATH: Compute gradients AND build root histogram in single pass
-                    // This eliminates cache pollution for ~40-80% speedup on large datasets
-                    tree_grower.grow_fused(
-                        dataset,
-                        &train_indices,
-                        targets,
-                        &predictions,
-                        loss_fn.as_ref(),
-                        &mut gradients,
-                        &mut hessians,
-                    )
-                } else {
-                    // SEPARATE PATH: Compute gradients first, then build histogram
-                    // Required for GOSS (needs all gradients for sampling) and random subsampling
-
-                    // Compute gradients and hessians
-                    if config.parallel_gradient {
-                        train_indices.par_iter().for_each(|&idx| {
-                            let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
-                            // SAFETY: Each idx is unique within train_indices, so no data races
-                            unsafe {
-                                let grad_ptr = gradients.as_ptr() as *mut f32;
-                                let hess_ptr = hessians.as_ptr() as *mut f32;
-                                *grad_ptr.add(idx) = g;
-                                *hess_ptr.add(idx) = h;
-                            }
-                        });
-                    } else {
-                        for &idx in &train_indices {
-                            let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
-                            gradients[idx] = g;
-                            hessians[idx] = h;
-                        }
-                    }
-
-                    // GOSS or random subsampling
-                    let tree_indices: &[usize] = if config.goss_enabled {
-                        // GOSS: Gradient-based One-Side Sampling
-                        sample_indices.clear();
-                        Self::goss_sample_into(
+            let tree = match tree {
+                Some(t) => t,
+                None => {
+                    if use_fused {
+                        // FUSED PATH: Compute gradients AND build root histogram in single pass
+                        // This eliminates cache pollution for ~40-80% speedup on large datasets
+                        tree_grower.grow_fused(
+                            dataset,
                             &train_indices,
+                            targets,
+                            &predictions,
+                            loss_fn.as_ref(),
                             &mut gradients,
                             &mut hessians,
-                            config.goss_top_rate,
-                            config.goss_other_rate,
-                            &mut rng,
-                            &mut goss_indexed,
-                            &mut sample_indices,
-                        );
-                        &sample_indices
-                    } else if config.subsample < 1.0 {
-                        // Random subsampling (Stochastic Gradient Boosting)
-                        sample_indices.clear();
-                        let n_samples =
-                            ((train_indices.len() as f32) * config.subsample).ceil() as usize;
-                        shuffle_buffer.shuffle(&mut rng);
-                        sample_indices.extend_from_slice(&shuffle_buffer[..n_samples]);
-                        &sample_indices
+                        )?
                     } else {
-                        &train_indices
-                    };
+                        // SEPARATE PATH: Compute gradients first, then build histogram
+                        // Required for GOSS (needs all gradients for sampling) and random subsampling
 
-                    // Grow tree using the selected training indices
-                    tree_grower.grow_with_indices(dataset, &gradients, &hessians, tree_indices)
+                        // Compute gradients and hessians
+                        if config.parallel_gradient {
+                            train_indices.par_iter().for_each(|&idx| {
+                                let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
+                                // SAFETY: Each idx is unique within train_indices, so no data races
+                                unsafe {
+                                    let grad_ptr = gradients.as_ptr() as *mut f32;
+                                    let hess_ptr = hessians.as_ptr() as *mut f32;
+                                    *grad_ptr.add(idx) = g;
+                                    *hess_ptr.add(idx) = h;
+                                }
+                            });
+                        } else {
+                            for &idx in &train_indices {
+                                let (g, h) = loss_fn.gradient_hessian(targets[idx], predictions[idx]);
+                                gradients[idx] = g;
+                                hessians[idx] = h;
+                            }
+                        }
+
+                        // GOSS or random subsampling
+                        let tree_indices: &[usize] = if config.goss_enabled {
+                            // GOSS: Gradient-based One-Side Sampling
+                            sample_indices.clear();
+                            Self::goss_sample_into(
+                                &train_indices,
+                                &mut gradients,
+                                &mut hessians,
+                                config.goss_top_rate,
+                                config.goss_other_rate,
+                                &mut rng,
+                                &mut goss_indexed,
+                                &mut sample_indices,
+                            );
+                            &sample_indices
+                        } else if config.subsample < 1.0 {
+                            // Random subsampling (Stochastic Gradient Boosting)
+                            sample_indices.clear();
+                            let n_samples =
+                                ((train_indices.len() as f32) * config.subsample).ceil() as usize;
+                            shuffle_buffer.shuffle(&mut rng);
+                            sample_indices.extend_from_slice(&shuffle_buffer[..n_samples]);
+                            &sample_indices
+                        } else {
+                            &train_indices
+                        };
+
+                        // Grow tree using the selected training indices
+                        tree_grower.grow_with_indices(dataset, &gradients, &hessians, tree_indices)?
+                    }
                 }
-            });
+            };
 
             // Update predictions using tree-wise batch prediction
             // This is more cache-friendly than row-wise and avoids intermediate allocation
@@ -823,7 +826,7 @@ impl GBDTModel {
                     preferred: crate::backend::BackendType::Auto,
                     ..Default::default()
                 })
-                .select(train_dataset.num_rows());
+                .select(train_dataset.num_rows())?;
 
             // Update config with resolved backend (CUDA/WGPU/Scalar/etc)
             let resolved_type = match resolved.name() {
@@ -881,7 +884,7 @@ impl GBDTModel {
 
         // CRITICAL: Initialize backend with FULL dataset size before any training
         // This ensures consistent backend (CUDA/GPU/CPU) throughout, no mixing!
-        tree_grower.init_backend(train_dataset.num_rows());
+        tree_grower.init_backend(train_dataset.num_rows())?;
 
         let mut trees = Vec::with_capacity(config.num_rounds);
         let mut rng = rand::rngs::StdRng::seed_from_u64(config.seed);
@@ -918,7 +921,7 @@ impl GBDTModel {
                     loss_fn.as_ref(),
                     &mut gradients,
                     &mut hessians,
-                )
+                )?
             } else {
                 // Compute gradients
                 for &idx in &train_indices {
@@ -952,7 +955,7 @@ impl GBDTModel {
                     &train_indices
                 };
 
-                tree_grower.grow_with_indices(train_dataset, &gradients, &hessians, tree_indices)
+                tree_grower.grow_with_indices(train_dataset, &gradients, &hessians, tree_indices)?
             };
 
             // Update training predictions
@@ -1132,7 +1135,7 @@ impl GBDTModel {
 
                 // Grow tree for this class
                 let tree =
-                    tree_grower.grow_with_indices(dataset, &gradients, &hessians, &train_indices);
+                    tree_grower.grow_with_indices(dataset, &gradients, &hessians, &train_indices)?;
 
                 // Update predictions for this class
                 for idx in 0..num_rows {
@@ -2272,7 +2275,7 @@ mod tests {
 
         let config = GBDTConfig::new()
             .with_num_rounds(10)
-            .with_conformal(0.2, 0.9);
+            .with_conformal(0.2, 0.9).unwrap();
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
@@ -2298,7 +2301,7 @@ mod tests {
         let config = GBDTConfig::new()
             .with_num_rounds(100) // Max rounds
             .with_max_depth(4)
-            .with_early_stopping(5, 0.2); // Stop after 5 rounds without improvement, 20% validation
+            .with_early_stopping(5, 0.2).unwrap(); // Stop after 5 rounds without improvement, 20% validation
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
@@ -2315,8 +2318,8 @@ mod tests {
         let config = GBDTConfig::new()
             .with_num_rounds(10)
             .with_max_depth(4)
-            .with_subsample(0.8) // 80% row subsampling
-            .with_colsample(0.8); // 80% column subsampling
+            .with_subsample(0.8).unwrap() // 80% row subsampling
+            .with_colsample(0.8).unwrap(); // 80% column subsampling
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
@@ -2574,7 +2577,7 @@ mod tests {
             .with_num_rounds(10)
             .with_max_depth(3)
             .with_learning_rate(0.1)
-            .with_multiclass_logloss(num_classes);
+            .with_multiclass_logloss(num_classes).unwrap();
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
@@ -2593,7 +2596,7 @@ mod tests {
             .with_num_rounds(20)
             .with_max_depth(4)
             .with_learning_rate(0.1)
-            .with_multiclass_logloss(num_classes);
+            .with_multiclass_logloss(num_classes).unwrap();
 
         let model = GBDTModel::train_binned(&dataset, config).unwrap();
 
@@ -2787,7 +2790,7 @@ mod tests {
             .with_num_rounds(42)
             .with_max_depth(7)
             .with_learning_rate(0.05)
-            .with_subsample(0.8)
+            .with_subsample(0.8).unwrap()
             .with_lambda(2.0)
             .with_entropy_weight(0.1);
 

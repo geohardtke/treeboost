@@ -293,7 +293,7 @@ fn test_autotuner_early_stopping() {
     let base_config = GBDTConfig::new()
         .with_num_rounds(30) // Moderate max rounds
         .with_learning_rate(0.1)
-        .with_early_stopping(5, 0.2); // Stop after 5 rounds no improvement
+        .with_early_stopping(5, 0.2).unwrap(); // Stop after 5 rounds no improvement
 
     let tuner_config = TunerConfig::new()
         .with_iterations(1)

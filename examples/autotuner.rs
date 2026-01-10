@@ -237,7 +237,7 @@ fn main() {
     let base_config_es = GBDTConfig::new()
         .with_num_rounds(200) // High max, but early stopping will kick in
         .with_learning_rate(0.1)
-        .with_early_stopping(10, 0.2) // Stop after 10 rounds no improvement
+        .with_early_stopping(10, 0.2)? // Stop after 10 rounds no improvement
         .with_seed(123);
 
     let tuner_config = TunerConfig::new()
