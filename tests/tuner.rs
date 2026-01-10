@@ -389,8 +389,8 @@ fn test_autotuner_history_json() {
         "JSON should have best_trial_id"
     );
     assert!(
-        json.contains("\"val_loss\""),
-        "JSON should have val_loss field"
+        json.contains("\"val_metric\""),
+        "JSON should have val_metric field"
     );
     assert!(json.contains("\"params\""), "JSON should have params field");
 
