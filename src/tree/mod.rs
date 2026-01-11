@@ -6,18 +6,23 @@
 //! - Histogram Subtraction Trick integration
 //! - Vector split finding for multi-output learning
 //! - Vector trees with multi-output leaf values
+//! - Unified EnsembleTree for scalar and vector trees
 
+mod ensemble;
 mod grow;
 mod node;
 mod split;
 #[allow(clippy::module_inception)]
 mod tree;
+mod vector_grow;
 mod vector_split;
 mod vector_tree;
 
+pub use ensemble::EnsembleTree;
 pub use grow::TreeGrower;
 pub use node::{Node, NodeType};
 pub use split::{InteractionConstraints, MonotonicConstraint, SplitFinder, SplitInfo};
 pub use tree::Tree;
+pub use vector_grow::VectorTreeGrower;
 pub use vector_split::{VectorSplitFinder, VectorSplitInfo};
 pub use vector_tree::{VectorNode, VectorNodeType, VectorTree};
