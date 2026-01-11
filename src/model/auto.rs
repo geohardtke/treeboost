@@ -91,6 +91,12 @@ pub struct AutoModel {
 
     /// Time breakdown by phase
     phase_times: BuildPhaseTimes,
+
+    /// Tuned thresholds for multi-label classification (one per label)
+    ///
+    /// These thresholds are optimized to maximize F1 score on validation data.
+    /// Use `tune_thresholds()` to set these, then `predict_labels_tuned()` will use them.
+    tuned_thresholds: Option<Vec<f32>>,
 }
 
 impl AutoModel {
@@ -110,6 +116,7 @@ impl AutoModel {
             analysis: result.analysis,
             build_time: result.build_time,
             phase_times: result.phase_times,
+            tuned_thresholds: None,
         }
     }
 
@@ -155,6 +162,293 @@ impl AutoModel {
         let builder = AutoBuilder::with_config(config);
         let result = builder.fit(df, target_col)?;
         Ok(Self::from_build_result(result))
+    }
+
+    // =========================================================================
+    // Multi-Label Training Methods
+    // =========================================================================
+
+    /// Train a multi-label classification model
+    ///
+    /// This is the recommended entry point for multi-label tasks where each sample
+    /// can have multiple binary labels (e.g., multi-tag classification).
+    ///
+    /// # Arguments
+    /// * `df` - DataFrame containing features and target columns
+    /// * `target_cols` - Names of the binary target columns (each should be 0/1)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Multi-label: each article can have multiple tags
+    /// let model = AutoModel::train_multilabel(&df, &["is_tech", "is_finance", "is_sports"])?;
+    /// let predictions = model.predict_multilabel(&test_df)?;
+    /// ```
+    pub fn train_multilabel(df: &DataFrame, target_cols: &[&str]) -> Result<Self> {
+        Self::train_multilabel_with_mode(df, target_cols, BoostingMode::LinearThenTree)
+    }
+
+    /// Train a multi-label model with a specific boosting mode
+    pub fn train_multilabel_with_mode(
+        df: &DataFrame,
+        target_cols: &[&str],
+        mode: BoostingMode,
+    ) -> Result<Self> {
+        use crate::loss::MultiLabelLogLoss;
+        use crate::model::UniversalModel;
+
+        let start = std::time::Instant::now();
+
+        if target_cols.len() < 2 {
+            return Err(TreeBoostError::Config(
+                "Multi-label training requires at least 2 target columns".to_string(),
+            ));
+        }
+
+        // Validate all target columns exist
+        for &col in target_cols {
+            if df.column(col).is_err() {
+                return Err(TreeBoostError::Data(format!(
+                    "Target column '{}' not found in DataFrame",
+                    col
+                )));
+            }
+        }
+
+        let num_rows = df.height();
+        let num_labels = target_cols.len();
+
+        // Use first target column for pipeline processing (features are independent of which target)
+        let primary_target = target_cols[0];
+
+        // Process through pipeline
+        let pipeline = DataPipeline::with_defaults();
+        let (binned_dataset, pipeline_state, _preprocessed_df) =
+            pipeline.process_for_training(df.clone(), primary_target, None, None)?;
+
+        // Extract all targets (row-wise flattened: [row0_label0, row0_label1, ..., row1_label0, ...])
+        let mut targets = Vec::with_capacity(num_rows * num_labels);
+        for row_idx in 0..num_rows {
+            for &col_name in target_cols {
+                let series = df.column(col_name)?;
+                let value = series
+                    .get(row_idx)
+                    .map_err(|e| TreeBoostError::Data(format!("Failed to get value: {}", e)))?;
+
+                let target_val = match value {
+                    AnyValue::Int32(v) => v as f32,
+                    AnyValue::Int64(v) => v as f32,
+                    AnyValue::Float32(v) => v,
+                    AnyValue::Float64(v) => v as f32,
+                    AnyValue::UInt32(v) => v as f32,
+                    AnyValue::UInt64(v) => v as f32,
+                    _ => {
+                        return Err(TreeBoostError::Data(format!(
+                            "Target column '{}' has unsupported type: {:?}",
+                            col_name, value
+                        )))
+                    }
+                };
+                targets.push(target_val);
+            }
+        }
+
+        // Create multi-output dataset with our targets
+        let multioutput_dataset = BinnedDataset::new_multioutput(
+            num_rows,
+            binned_dataset.features().to_vec(),
+            targets,
+            binned_dataset.all_feature_info().to_vec(),
+            num_labels,
+        );
+
+        // Configure model
+        let config = crate::model::UniversalConfig::default()
+            .with_mode(mode)
+            .with_num_rounds(100)
+            .with_learning_rate(0.1);
+
+        // Train with multi-label log loss
+        let loss_fn = MultiLabelLogLoss::new();
+        let model = UniversalModel::train_multilabel(&multioutput_dataset, config, &loss_fn)?;
+
+        let build_time = start.elapsed();
+
+        Ok(Self {
+            model,
+            mode,
+            target_column: target_cols.join(","),
+            mode_confidence: None,
+            preprocessing_plan: None,
+            feature_plan: None,
+            ltt_tuning: None,
+            tree_tuning: None,
+            column_profile: None,
+            analysis: None,
+            pipeline_state: Some(pipeline_state),
+            build_time,
+            phase_times: BuildPhaseTimes::default(),
+            tuned_thresholds: None,
+        })
+    }
+
+    /// Get number of labels (for multi-label models)
+    pub fn num_labels(&self) -> usize {
+        self.model.num_linear_boosters().max(
+            self.model.num_gbdt_per_label().max(
+                self.model
+                    .gbdt_model()
+                    .map(|m| m.num_outputs())
+                    .unwrap_or(1),
+            ),
+        )
+    }
+
+    /// Predict multi-label probabilities on a DataFrame
+    ///
+    /// Returns `Vec<Vec<f32>>` where each inner vec contains probabilities for all labels.
+    pub fn predict_multilabel(&self, df: &DataFrame) -> Result<Vec<Vec<f32>>> {
+        let (_preprocessed_df, dataset) = self.prepare_dataset_for_prediction(df)?;
+        Ok(self.model.predict_multilabel(&dataset))
+    }
+
+    /// Predict multi-label probabilities (sigmoid applied)
+    pub fn predict_proba_multilabel(&self, df: &DataFrame) -> Result<Vec<Vec<f32>>> {
+        let (_preprocessed_df, dataset) = self.prepare_dataset_for_prediction(df)?;
+        Ok(self.model.predict_proba_multilabel(&dataset))
+    }
+
+    /// Predict multi-label boolean labels with threshold 0.5
+    ///
+    /// Returns `Vec<Vec<bool>>` where each inner vec contains boolean labels for all outputs.
+    pub fn predict_labels(&self, df: &DataFrame) -> Result<Vec<Vec<bool>>> {
+        let (_preprocessed_df, dataset) = self.prepare_dataset_for_prediction(df)?;
+        Ok(self.model.predict_labels(&dataset))
+    }
+
+    /// Predict multi-label boolean labels with custom threshold
+    ///
+    /// # Arguments
+    /// * `df` - Input DataFrame
+    /// * `threshold` - Classification threshold (0.0 to 1.0)
+    pub fn predict_labels_with_threshold(
+        &self,
+        df: &DataFrame,
+        threshold: f32,
+    ) -> Result<Vec<Vec<bool>>> {
+        let (_preprocessed_df, dataset) = self.prepare_dataset_for_prediction(df)?;
+        Ok(self.model.predict_labels_with_threshold(&dataset, threshold))
+    }
+
+    /// Tune thresholds for multi-label classification using F1 optimization
+    ///
+    /// This sweeps thresholds from 0.01 to 0.99 and finds the optimal threshold
+    /// for each label that maximizes F1 score on the validation data.
+    ///
+    /// **IMPORTANT**: Use held-out validation data, NOT training data, to avoid leakage.
+    ///
+    /// # Arguments
+    /// * `val_df` - Validation DataFrame with features and target columns
+    /// * `target_cols` - Names of the target columns (must match training)
+    ///
+    /// # Returns
+    /// `TuneResult` with optimal thresholds and metrics per label
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Train on training data
+    /// let mut model = AutoModel::train_multilabel(&train_df, &target_cols)?;
+    ///
+    /// // Tune thresholds on validation data
+    /// let tune_result = model.tune_thresholds(&val_df, &target_cols)?;
+    /// println!("Optimal thresholds: {:?}", tune_result.thresholds);
+    ///
+    /// // Now predict_labels_tuned() will use optimal thresholds
+    /// let labels = model.predict_labels_tuned(&test_df)?;
+    /// ```
+    pub fn tune_thresholds(
+        &mut self,
+        val_df: &DataFrame,
+        target_cols: &[&str],
+    ) -> Result<crate::analysis::TuneResult> {
+        use crate::analysis::ThresholdTuner;
+
+        let num_labels = target_cols.len();
+        let num_rows = val_df.height();
+
+        // Get probabilities on validation set
+        let probabilities = self.predict_proba_multilabel(val_df)?;
+
+        // Extract targets from validation DataFrame
+        let mut targets = Vec::with_capacity(num_rows);
+        for row_idx in 0..num_rows {
+            let mut row_targets = Vec::with_capacity(num_labels);
+            for &col_name in target_cols {
+                let series = val_df.column(col_name)?;
+                let value = series.get(row_idx).map_err(|e| {
+                    TreeBoostError::Data(format!("Failed to get value: {}", e))
+                })?;
+
+                let target_val = match value {
+                    AnyValue::Int32(v) => v as f32,
+                    AnyValue::Int64(v) => v as f32,
+                    AnyValue::Float32(v) => v,
+                    AnyValue::Float64(v) => v as f32,
+                    AnyValue::UInt32(v) => v as f32,
+                    AnyValue::UInt64(v) => v as f32,
+                    _ => {
+                        return Err(TreeBoostError::Data(format!(
+                            "Target column '{}' has unsupported type",
+                            col_name
+                        )))
+                    }
+                };
+                row_targets.push(target_val);
+            }
+            targets.push(row_targets);
+        }
+
+        // Run threshold tuning
+        let tuner = ThresholdTuner::new();
+        let result = tuner.tune(&probabilities, &targets, num_labels)?;
+
+        // Store the tuned thresholds
+        self.tuned_thresholds = Some(result.thresholds.clone());
+
+        Ok(result)
+    }
+
+    /// Get tuned thresholds (if available)
+    pub fn tuned_thresholds(&self) -> Option<&[f32]> {
+        self.tuned_thresholds.as_deref()
+    }
+
+    /// Predict labels using tuned thresholds
+    ///
+    /// Falls back to 0.5 if thresholds haven't been tuned.
+    pub fn predict_labels_tuned(&self, df: &DataFrame) -> Result<Vec<Vec<bool>>> {
+        let probabilities = self.predict_proba_multilabel(df)?;
+
+        let labels: Vec<Vec<bool>> = if let Some(ref thresholds) = self.tuned_thresholds {
+            probabilities
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .zip(thresholds.iter())
+                        .map(|(&prob, &threshold)| prob >= threshold)
+                        .collect()
+                })
+                .collect()
+        } else {
+            // Fallback to 0.5 threshold
+            probabilities
+                .iter()
+                .map(|row| row.iter().map(|&prob| prob >= 0.5).collect())
+                .collect()
+        };
+
+        Ok(labels)
     }
 
     /// Predict on a DataFrame
@@ -714,6 +1008,7 @@ impl AutoModel {
             pipeline_state: None, // Note: pipeline_state not preserved in TRB format yet
             build_time: Duration::default(),
             phase_times: BuildPhaseTimes::default(),
+            tuned_thresholds: None,
         })
     }
 
