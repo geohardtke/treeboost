@@ -145,29 +145,74 @@ impl TreeConfig {
         self
     }
 
-    pub fn with_max_depth(mut self, max_depth: usize) -> Self {
+    /// Set maximum tree depth
+    ///
+    /// Returns error if max_depth is 0 or > 20.
+    pub fn with_max_depth(mut self, max_depth: usize) -> Result<Self> {
+        if max_depth == 0 || max_depth > 20 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "max_depth must be in [1, 20], got {}",
+                max_depth
+            )));
+        }
         self.max_depth = max_depth;
-        self
+        Ok(self)
     }
 
-    pub fn with_max_leaves(mut self, max_leaves: usize) -> Self {
+    /// Set maximum number of leaves
+    ///
+    /// Returns error if max_leaves < 2.
+    pub fn with_max_leaves(mut self, max_leaves: usize) -> Result<Self> {
+        if max_leaves < 2 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "max_leaves must be >= 2, got {}",
+                max_leaves
+            )));
+        }
         self.max_leaves = max_leaves;
-        self
+        Ok(self)
     }
 
-    pub fn with_lambda(mut self, lambda: f32) -> Self {
-        self.lambda = lambda.max(0.0);
-        self
+    /// Set L2 regularization (lambda)
+    ///
+    /// Returns error if lambda < 0.0.
+    pub fn with_lambda(mut self, lambda: f32) -> Result<Self> {
+        if lambda < 0.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "lambda must be >= 0.0, got {}",
+                lambda
+            )));
+        }
+        self.lambda = lambda;
+        Ok(self)
     }
 
-    pub fn with_min_samples_leaf(mut self, min_samples: usize) -> Self {
-        self.min_samples_leaf = min_samples.max(1);
-        self
+    /// Set minimum samples per leaf
+    ///
+    /// Returns error if min_samples < 1.
+    pub fn with_min_samples_leaf(mut self, min_samples: usize) -> Result<Self> {
+        if min_samples < 1 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "min_samples_leaf must be >= 1, got {}",
+                min_samples
+            )));
+        }
+        self.min_samples_leaf = min_samples;
+        Ok(self)
     }
 
-    pub fn with_min_hessian_leaf(mut self, min_hessian: f32) -> Self {
+    /// Set minimum hessian sum per leaf
+    ///
+    /// Returns error if min_hessian < 0.0.
+    pub fn with_min_hessian_leaf(mut self, min_hessian: f32) -> Result<Self> {
+        if min_hessian < 0.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "min_hessian_leaf must be >= 0.0, got {}",
+                min_hessian
+            )));
+        }
         self.min_hessian_leaf = min_hessian;
-        self
+        Ok(self)
     }
 
     pub fn with_entropy_weight(mut self, weight: f32) -> Self {
@@ -180,14 +225,32 @@ impl TreeConfig {
         self
     }
 
-    pub fn with_learning_rate(mut self, lr: f32) -> Self {
-        self.learning_rate = lr.clamp(0.0, 1.0);
-        self
+    /// Set learning rate for gradient descent optimization
+    ///
+    /// Returns error if learning_rate is not in (0.0, 1.0].
+    pub fn with_learning_rate(mut self, lr: f32) -> Result<Self> {
+        if lr <= 0.0 || lr > 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "learning_rate must be in (0.0, 1.0], got {}",
+                lr
+            )));
+        }
+        self.learning_rate = lr;
+        Ok(self)
     }
 
-    pub fn with_colsample(mut self, colsample: f32) -> Self {
-        self.colsample = colsample.clamp(0.0, 1.0);
-        self
+    /// Set column subsampling ratio
+    ///
+    /// Returns error if colsample is not in (0.0, 1.0].
+    pub fn with_colsample(mut self, colsample: f32) -> Result<Self> {
+        if colsample <= 0.0 || colsample > 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "colsample must be in (0.0, 1.0], got {}",
+                colsample
+            )));
+        }
+        self.colsample = colsample;
+        Ok(self)
     }
 
     pub fn with_monotonic_constraints(mut self, constraints: Vec<MonotonicConstraint>) -> Self {
@@ -509,9 +572,10 @@ mod tests {
     fn test_tree_config_builder() {
         let config = TreeConfig::new()
             .with_max_depth(4)
-            .with_max_leaves(15)
-            .with_lambda(0.5)
-            .with_learning_rate(0.05);
+            .and_then(|c| c.with_max_leaves(15))
+            .and_then(|c| c.with_lambda(0.5))
+            .and_then(|c| c.with_learning_rate(0.05))
+            .unwrap();
 
         assert_eq!(config.max_depth, 4);
         assert_eq!(config.max_leaves, 15);
@@ -535,7 +599,10 @@ mod tests {
         let gradients: Vec<f32> = (0..100).map(|i| if i < 50 { -1.0 } else { 1.0 }).collect();
         let hessians = vec![1.0; 100];
 
-        let config = TreeConfig::default().with_max_depth(3).with_min_gain(0.0);
+        let config = TreeConfig::default()
+            .with_max_depth(3)
+            .unwrap()
+            .with_min_gain(0.0);
 
         let mut booster = TreeBooster::new(config);
         booster
@@ -647,5 +714,171 @@ mod tests {
         // Convert back
         let restored: TreeBooster = ser.into();
         assert!(restored.is_fitted());
+    }
+
+    // =========================================================================
+    // Validation Tests for with_*() Methods
+    // =========================================================================
+
+    #[test]
+    fn test_with_lambda_validation() {
+        let config = TreeConfig::new();
+
+        // Valid cases
+        assert!(config.clone().with_lambda(0.0).is_ok());
+        assert!(config.clone().with_lambda(1.0).is_ok());
+        assert!(config.clone().with_lambda(10.0).is_ok());
+
+        // Invalid case
+        let result = config.with_lambda(-0.1);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("lambda must be >= 0.0"));
+        assert!(err_msg.contains("-0.1"));
+    }
+
+    #[test]
+    fn test_with_min_samples_leaf_validation() {
+        let config = TreeConfig::new();
+
+        // Valid cases
+        assert!(config.clone().with_min_samples_leaf(1).is_ok());
+        assert!(config.clone().with_min_samples_leaf(10).is_ok());
+        assert!(config.clone().with_min_samples_leaf(100).is_ok());
+
+        // Invalid case
+        let result = config.with_min_samples_leaf(0);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("min_samples_leaf must be >= 1"));
+        assert!(err_msg.contains("0"));
+    }
+
+    #[test]
+    fn test_with_learning_rate_validation() {
+        let config = TreeConfig::new();
+
+        // Valid cases
+        assert!(config.clone().with_learning_rate(0.001).is_ok());
+        assert!(config.clone().with_learning_rate(0.1).is_ok());
+        assert!(config.clone().with_learning_rate(1.0).is_ok());
+
+        // Invalid cases: too low
+        let result = config.clone().with_learning_rate(0.0);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("learning_rate must be in (0.0, 1.0]"));
+
+        // Invalid cases: too high
+        let result = config.with_learning_rate(1.5);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("learning_rate must be in (0.0, 1.0]"));
+    }
+
+    #[test]
+    fn test_with_colsample_validation() {
+        let config = TreeConfig::new();
+
+        // Valid cases
+        assert!(config.clone().with_colsample(0.001).is_ok());
+        assert!(config.clone().with_colsample(0.5).is_ok());
+        assert!(config.clone().with_colsample(1.0).is_ok());
+
+        // Invalid cases: too low
+        let result = config.clone().with_colsample(0.0);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("colsample must be in (0.0, 1.0]"));
+
+        // Invalid cases: too high
+        let result = config.with_colsample(1.5);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("colsample must be in (0.0, 1.0]"));
+    }
+
+    #[test]
+    fn test_with_max_depth_validation() {
+        let config = TreeConfig::new();
+
+        // Valid cases
+        assert!(config.clone().with_max_depth(1).is_ok());
+        assert!(config.clone().with_max_depth(6).is_ok());
+        assert!(config.clone().with_max_depth(20).is_ok());
+
+        // Invalid case: zero
+        let result = config.clone().with_max_depth(0);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("max_depth must be in [1, 20]"));
+
+        // Invalid case: too deep
+        let result = config.with_max_depth(21);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("max_depth must be in [1, 20]"));
+    }
+
+    #[test]
+    fn test_with_max_leaves_validation() {
+        let config = TreeConfig::new();
+
+        // Valid cases
+        assert!(config.clone().with_max_leaves(2).is_ok());
+        assert!(config.clone().with_max_leaves(31).is_ok());
+        assert!(config.clone().with_max_leaves(1000).is_ok());
+
+        // Invalid case
+        let result = config.with_max_leaves(1);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("max_leaves must be >= 2"));
+        assert!(err_msg.contains("1"));
+    }
+
+    #[test]
+    fn test_with_min_hessian_leaf_validation() {
+        let config = TreeConfig::new();
+
+        // Valid cases
+        assert!(config.clone().with_min_hessian_leaf(0.0).is_ok());
+        assert!(config.clone().with_min_hessian_leaf(0.1).is_ok());
+        assert!(config.clone().with_min_hessian_leaf(10.0).is_ok());
+
+        // Invalid case
+        let result = config.with_min_hessian_leaf(-0.1);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("min_hessian_leaf must be >= 0.0"));
+        assert!(err_msg.contains("-0.1"));
+    }
+
+    #[test]
+    fn test_with_methods_builder_chain() {
+        let config = TreeConfig::new()
+            .with_max_depth(5)
+            .and_then(|c| c.with_lambda(0.5))
+            .and_then(|c| c.with_min_samples_leaf(5))
+            .and_then(|c| c.with_learning_rate(0.1))
+            .and_then(|c| c.with_colsample(0.8));
+
+        assert!(config.is_ok());
+        let config = config.unwrap();
+        assert_eq!(config.max_depth, 5);
+        assert_eq!(config.lambda, 0.5);
+        assert_eq!(config.min_samples_leaf, 5);
+        assert_eq!(config.learning_rate, 0.1);
+        assert_eq!(config.colsample, 0.8);
+    }
+
+    #[test]
+    fn test_with_methods_error_stops_chain() {
+        let result = TreeConfig::new()
+            .with_max_depth(5)
+            .and_then(|c| c.with_learning_rate(1.5)) // Invalid!
+            .and_then(|c| c.with_colsample(0.5));
+
+        assert!(result.is_err());
     }
 }

@@ -266,11 +266,16 @@ impl LinearConfig {
 
     /// Set overall regularization strength
     ///
-    /// **CRITICAL**: Minimum value is 1e-6 to prevent numerical instability.
-    pub fn with_lambda(mut self, lambda: f32) -> Self {
-        // NEVER allow lambda = 0
-        self.lambda = lambda.max(1e-6);
-        self
+    /// Returns error if lambda <= 0.0. Regularization is mandatory to prevent numerical instability.
+    pub fn with_lambda(mut self, lambda: f32) -> Result<Self> {
+        if lambda <= 0.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "lambda must be > 0.0, got {}. Regularization is mandatory to prevent numerical instability",
+                lambda
+            )));
+        }
+        self.lambda = lambda;
+        Ok(self)
     }
 
     /// Set Elastic Net mixing parameter
@@ -278,33 +283,73 @@ impl LinearConfig {
     /// - `0.0` = pure Ridge (L2 only) - default, most stable
     /// - `1.0` = pure LASSO (L1 only) - sparse solutions
     /// - `0.0-1.0` = Elastic Net mix
-    pub fn with_l1_ratio(mut self, l1_ratio: f32) -> Self {
-        self.l1_ratio = l1_ratio.clamp(0.0, 1.0);
-        self
+    ///
+    /// Returns error if l1_ratio is not in [0.0, 1.0].
+    pub fn with_l1_ratio(mut self, l1_ratio: f32) -> Result<Self> {
+        if l1_ratio < 0.0 || l1_ratio > 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "l1_ratio must be in [0, 1], got {}. Use 0.0 for Ridge, 1.0 for LASSO, 0.0-1.0 for Elastic Net",
+                l1_ratio
+            )));
+        }
+        self.l1_ratio = l1_ratio;
+        Ok(self)
     }
 
     /// Set shrinkage factor for boosting ensemble
-    pub fn with_shrinkage_factor(mut self, shrinkage: f32) -> Self {
-        self.shrinkage_factor = shrinkage.clamp(1e-6, 1.0);
-        self
+    ///
+    /// Returns error if shrinkage_factor is not in (0.0, 1.0].
+    pub fn with_shrinkage_factor(mut self, shrinkage: f32) -> Result<Self> {
+        if shrinkage <= 0.0 || shrinkage > 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "shrinkage_factor must be in (0.0, 1.0], got {}",
+                shrinkage
+            )));
+        }
+        self.shrinkage_factor = shrinkage;
+        Ok(self)
     }
 
     /// Set maximum iterations per round
-    pub fn with_max_iter(mut self, max_iter: usize) -> Self {
-        self.max_iter = max_iter.max(1);
-        self
+    ///
+    /// Returns error if max_iter < 1.
+    pub fn with_max_iter(mut self, max_iter: usize) -> Result<Self> {
+        if max_iter < 1 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "max_iter must be >= 1, got {}",
+                max_iter
+            )));
+        }
+        self.max_iter = max_iter;
+        Ok(self)
     }
 
     /// Set convergence tolerance
-    pub fn with_tol(mut self, tol: f32) -> Self {
-        self.tol = tol.max(1e-10);
-        self
+    ///
+    /// Returns error if tol <= 0.0.
+    pub fn with_tol(mut self, tol: f32) -> Result<Self> {
+        if tol <= 0.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "tol must be > 0.0, got {}",
+                tol
+            )));
+        }
+        self.tol = tol;
+        Ok(self)
     }
 
     /// Set maximum weight magnitude
-    pub fn with_max_weight(mut self, max_weight: f32) -> Self {
-        self.max_weight = max_weight.max(1.0);
-        self
+    ///
+    /// Returns error if max_weight < 1.0.
+    pub fn with_max_weight(mut self, max_weight: f32) -> Result<Self> {
+        if max_weight < 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "max_weight must be >= 1.0, got {}",
+                max_weight
+            )));
+        }
+        self.max_weight = max_weight;
+        Ok(self)
     }
 
     /// Set extrapolation damping toward target mean
@@ -318,9 +363,17 @@ impl LinearConfig {
     /// - `0.0` = no damping (default, use full model predictions)
     /// - `0.2` = 20% damping toward mean (recommended for OOD safety)
     /// - `0.5` = 50% damping (strong conservative bias)
-    pub fn with_extrapolation_damping(mut self, damping: f32) -> Self {
-        self.extrapolation_damping = damping.clamp(0.0, 1.0);
-        self
+    ///
+    /// Returns error if extrapolation_damping is not in [0.0, 1.0].
+    pub fn with_extrapolation_damping(mut self, damping: f32) -> Result<Self> {
+        if damping < 0.0 || damping > 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "extrapolation_damping must be in [0, 1], got {}",
+                damping
+            )));
+        }
+        self.extrapolation_damping = damping;
+        Ok(self)
     }
 
     /// Get L2 regularization component
@@ -973,11 +1026,11 @@ mod tests {
 
     #[test]
     fn test_linear_config_lambda_minimum() {
-        let config = LinearConfig::new().with_lambda(0.0);
-        assert!(config.lambda >= 1e-6, "Lambda should never be 0");
+        let result = LinearConfig::new().with_lambda(0.0);
+        assert!(result.is_err(), "with_lambda(0.0) should return error");
 
-        let config = LinearConfig::new().with_lambda(-1.0);
-        assert!(config.lambda >= 1e-6, "Lambda should never be negative");
+        let result = LinearConfig::new().with_lambda(-1.0);
+        assert!(result.is_err(), "with_lambda(-1.0) should return error");
     }
 
     #[test]
@@ -991,7 +1044,7 @@ mod tests {
     }
 
     #[test]
-    fn test_linear_booster_simple_fit() {
+    fn test_linear_booster_simple_fit() -> Result<()> {
         // Simple linear relationship: y = 2*x + 1
         let features = vec![1.0, 2.0, 3.0, 4.0, 5.0]; // 5 rows, 1 feature
         let targets = vec![3.0, 5.0, 7.0, 9.0, 11.0];
@@ -1002,9 +1055,9 @@ mod tests {
         let hessians = vec![1.0; 5]; // MSE has constant hessian
 
         let config = LinearConfig::default()
-            .with_lambda(0.01)
-            .with_shrinkage_factor(0.5)
-            .with_max_iter(100);
+            .with_lambda(0.01)?
+            .with_shrinkage_factor(0.5)?
+            .with_max_iter(100)?;
 
         let mut booster = LinearBooster::new(1, config);
         booster
@@ -1023,10 +1076,11 @@ mod tests {
                 target
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn test_linear_booster_multivariate() {
+    fn test_linear_booster_multivariate() -> Result<()> {
         // y = x1 + 2*x2
         // 4 rows, 2 features
         let features = vec![
@@ -1040,9 +1094,9 @@ mod tests {
         let hessians = vec![1.0; 4];
 
         let config = LinearConfig::default()
-            .with_lambda(0.001)
-            .with_shrinkage_factor(0.5)
-            .with_max_iter(200);
+            .with_lambda(0.001)?
+            .with_shrinkage_factor(0.5)?
+            .with_max_iter(200)?;
 
         let mut booster = LinearBooster::new(2, config);
         booster
@@ -1062,6 +1116,7 @@ mod tests {
                 target
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -1184,7 +1239,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lasso_sparsity() {
+    fn test_lasso_sparsity() -> Result<()> {
         // Create a problem where only feature 0 matters: y = 3*x0
         // Features 1, 2, 3 are noise - LASSO should zero them out
         let n_samples = 100;
@@ -1208,9 +1263,9 @@ mod tests {
         // Use LASSO with strong regularization
         let config = LinearConfig::default()
             .with_preset(LinearPreset::Lasso)
-            .with_lambda(2.0)
-            .with_shrinkage_factor(0.5)
-            .with_max_iter(200);
+            .with_lambda(2.0)?
+            .with_shrinkage_factor(0.5)?
+            .with_max_iter(200)?;
 
         let mut booster = LinearBooster::new(n_features, config);
         booster
@@ -1232,22 +1287,24 @@ mod tests {
         // At minimum, feature 0 should be selected (others may be selected too due to
         // gradient boosting dynamics, but sparsity should be encouraged)
         assert!(selected.contains(&0), "Feature 0 must be selected");
+        Ok(())
     }
 
     #[test]
-    fn test_elastic_net_config() {
+    fn test_elastic_net_config() -> Result<()> {
         let config = LinearConfig::default()
             .with_preset(LinearPreset::ElasticNet)
-            .with_lambda(1.0)
-            .with_l1_ratio(0.5);
+            .with_lambda(1.0)?
+            .with_l1_ratio(0.5)?;
         assert!((config.lambda - 1.0).abs() < 1e-6);
         assert!((config.l1_ratio - 0.5).abs() < 1e-6);
         assert!((config.l1_penalty() - 0.5).abs() < 1e-6);
         assert!((config.l2_penalty() - 0.5).abs() < 1e-6);
+        Ok(())
     }
 
     #[test]
-    fn test_ridge_vs_lasso_sparsity() {
+    fn test_ridge_vs_lasso_sparsity() -> Result<()> {
         // Same problem, compare Ridge vs LASSO sparsity
         let n_samples = 50;
         let n_features = 10;
@@ -1269,9 +1326,9 @@ mod tests {
         // Ridge - should have all non-zero weights
         let ridge_config = LinearConfig::default()
             .with_preset(LinearPreset::Ridge)
-            .with_lambda(0.1)
-            .with_shrinkage_factor(0.5)
-            .with_max_iter(100);
+            .with_lambda(0.1)?
+            .with_shrinkage_factor(0.5)?
+            .with_max_iter(100)?;
         let mut ridge_booster = LinearBooster::new(n_features, ridge_config);
         ridge_booster
             .fit_on_gradients(&features, n_features, &gradients, &hessians)
@@ -1280,9 +1337,9 @@ mod tests {
         // LASSO - should have sparser weights
         let lasso_config = LinearConfig::default()
             .with_preset(LinearPreset::Lasso)
-            .with_lambda(0.5)
-            .with_shrinkage_factor(0.5)
-            .with_max_iter(100);
+            .with_lambda(0.5)?
+            .with_shrinkage_factor(0.5)?
+            .with_max_iter(100)?;
         let mut lasso_booster = LinearBooster::new(n_features, lasso_config);
         lasso_booster
             .fit_on_gradients(&features, n_features, &gradients, &hessians)
@@ -1300,10 +1357,11 @@ mod tests {
         for pred in ridge_preds.iter().chain(lasso_preds.iter()) {
             assert!(pred.is_finite(), "Predictions must be finite");
         }
+        Ok(())
     }
 
     #[test]
-    fn test_elastic_net_stability() {
+    fn test_elastic_net_stability() -> Result<()> {
         // Elastic Net should handle correlated features better than pure LASSO
         let features = vec![
             1.0, 1.0, // x1 ≈ x2 (correlation)
@@ -1314,10 +1372,10 @@ mod tests {
 
         let config = LinearConfig::default()
             .with_preset(LinearPreset::ElasticNet)
-            .with_lambda(0.5)
-            .with_l1_ratio(0.5) // 50% L1, 50% L2
-            .with_shrinkage_factor(0.5)
-            .with_max_iter(100);
+            .with_lambda(0.5)?
+            .with_l1_ratio(0.5)? // 50% L1, 50% L2
+            .with_shrinkage_factor(0.5)?
+            .with_max_iter(100)?;
 
         let mut booster = LinearBooster::new(2, config);
         booster
@@ -1334,43 +1392,36 @@ mod tests {
                 pred
             );
         }
+        Ok(())
     }
 
     #[test]
     fn test_shrinkage_factor_clamping() {
-        // Test that shrinkage_factor is properly clamped to valid range
+        // Test that shrinkage_factor validation works
 
-        // Too low - should clamp to 1e-6
-        let config = LinearConfig::new().with_shrinkage_factor(-1.0);
-        assert!(
-            config.shrinkage_factor >= 1e-6,
-            "shrinkage_factor should be clamped to minimum 1e-6, got {}",
-            config.shrinkage_factor
-        );
+        // Too low - should return error
+        let result = LinearConfig::new().with_shrinkage_factor(-1.0);
+        assert!(result.is_err(), "shrinkage_factor < 0 should return error");
 
-        // Too high - should clamp to 1.0
-        let config = LinearConfig::new().with_shrinkage_factor(2.0);
-        assert!(
-            config.shrinkage_factor <= 1.0,
-            "shrinkage_factor should be clamped to maximum 1.0, got {}",
-            config.shrinkage_factor
-        );
+        // Too high - should return error
+        let result = LinearConfig::new().with_shrinkage_factor(2.0);
+        assert!(result.is_err(), "shrinkage_factor > 1.0 should return error");
 
-        // Valid values should pass through unchanged
-        let config = LinearConfig::new().with_shrinkage_factor(0.5);
+        // Valid values should succeed
+        let config = LinearConfig::new().with_shrinkage_factor(0.5).unwrap();
         assert_eq!(config.shrinkage_factor, 0.5);
     }
 
     #[test]
-    fn test_shrinkage_factor_near_zero_contribution() {
+    fn test_shrinkage_factor_near_zero_contribution() -> Result<()> {
         // When shrinkage_factor is very small (near 0), minimal linear contribution
-        // Note: with_shrinkage_factor clamps to minimum 1e-6, so we can't use exactly 0
+        // Note: with_shrinkage_factor validates to minimum 1e-6, so we test with 1e-6
 
         let features = vec![1.0, 2.0, 3.0, 4.0]; // 2 samples, 2 features
         let gradients = vec![-1.0, -2.0];
         let hessians = vec![1.0, 1.0];
 
-        let config = LinearConfig::default().with_shrinkage_factor(0.0);
+        let config = LinearConfig::default().with_shrinkage_factor(1e-6)?;
         let mut booster = LinearBooster::new(2, config);
         booster
             .fit_on_gradients(&features, 2, &gradients, &hessians)
@@ -1378,45 +1429,47 @@ mod tests {
 
         // Note: LinearBooster itself doesn't apply shrinkage_factor - that's done by
         // the ensemble (UniversalModel). This just verifies the config stores it correctly.
-        // Since 0.0 is clamped to 1e-6, that's what we should see
         assert_eq!(booster.config().shrinkage_factor, 1e-6);
+        Ok(())
     }
 
     #[test]
-    fn test_shrinkage_factor_full_contribution() {
+    fn test_shrinkage_factor_full_contribution() -> Result<()> {
         // When shrinkage_factor = 1.0, full linear predictions should be used
 
         let features = vec![1.0, 2.0, 3.0, 4.0]; // 2 samples, 2 features
         let gradients = vec![-1.0, -2.0];
         let hessians = vec![1.0, 1.0];
 
-        let config = LinearConfig::default().with_shrinkage_factor(1.0);
+        let config = LinearConfig::default().with_shrinkage_factor(1.0)?;
         let mut booster = LinearBooster::new(2, config);
         booster
             .fit_on_gradients(&features, 2, &gradients, &hessians)
             .unwrap();
 
         assert_eq!(booster.config().shrinkage_factor, 1.0);
+        Ok(())
     }
 
     #[test]
-    fn test_shrinkage_factor_vs_extrapolation_damping() {
+    fn test_shrinkage_factor_vs_extrapolation_damping() -> Result<()> {
         // Test that shrinkage_factor and extrapolation_damping are independent
 
         let config = LinearConfig::default()
-            .with_shrinkage_factor(0.3)
-            .with_extrapolation_damping(0.1);
+            .with_shrinkage_factor(0.3)?
+            .with_extrapolation_damping(0.1)?;
 
         assert_eq!(config.shrinkage_factor, 0.3);
         assert_eq!(config.extrapolation_damping, 0.1);
 
         // They should not affect each other
         let config2 = LinearConfig::default()
-            .with_shrinkage_factor(0.5)
-            .with_extrapolation_damping(0.0);
+            .with_shrinkage_factor(0.5)?
+            .with_extrapolation_damping(0.0)?;
 
         assert_eq!(config2.shrinkage_factor, 0.5);
         assert_eq!(config2.extrapolation_damping, 0.0);
+        Ok(())
     }
 
     // =========================================================================
@@ -1424,7 +1477,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_linear_warm_start() {
+    fn test_linear_warm_start() -> Result<()> {
         use crate::learner::incremental::IncrementalLearner;
 
         // Train on Data A: trend y = 2x
@@ -1433,7 +1486,7 @@ mod tests {
         let gradients_a: Vec<f32> = targets_a.iter().map(|&t| -t).collect();
         let hessians_a = vec![1.0; 5];
 
-        let config = LinearConfig::default().with_lambda(0.01).with_max_iter(100);
+        let config = LinearConfig::default().with_lambda(0.01)?.with_max_iter(100)?;
         let mut booster = LinearBooster::new(1, config);
 
         // Initial fit
@@ -1480,6 +1533,7 @@ mod tests {
             total_iters,
             initial_iters
         );
+        Ok(())
     }
 
     #[test]
@@ -1547,7 +1601,7 @@ mod tests {
         let gradients = vec![-1.0, -2.0, -3.0, -4.0];
         let hessians = vec![1.0; 4];
 
-        let config = LinearConfig::default().with_max_iter(10);
+        let config = LinearConfig::default().with_max_iter(10).unwrap();
         let mut booster = LinearBooster::new(1, config);
 
         assert_eq!(booster.iterations_completed(), 0);
@@ -1590,5 +1644,164 @@ mod tests {
         // Full reset (via WeakLearner trait)
         booster.reset();
         assert_eq!(booster.iterations_completed(), 0);
+    }
+
+    // =========================================================================
+    // Validation Tests for with_*() Methods
+    // =========================================================================
+
+    #[test]
+    fn test_with_lambda_validation() {
+        let config = LinearConfig::new();
+
+        // Valid cases
+        assert!(config.clone().with_lambda(0.001).is_ok());
+        assert!(config.clone().with_lambda(1.0).is_ok());
+        assert!(config.clone().with_lambda(10.0).is_ok());
+
+        // Invalid cases
+        let result = config.clone().with_lambda(0.0);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("lambda must be > 0.0"));
+
+        let result = config.with_lambda(-0.1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_with_l1_ratio_validation() {
+        let config = LinearConfig::new();
+
+        // Valid cases
+        assert!(config.clone().with_l1_ratio(0.0).is_ok());
+        assert!(config.clone().with_l1_ratio(0.5).is_ok());
+        assert!(config.clone().with_l1_ratio(1.0).is_ok());
+
+        // Invalid cases
+        let result = config.clone().with_l1_ratio(-0.1);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("l1_ratio must be in [0, 1]"));
+        assert!(err_msg.contains("Ridge"));
+
+        let result = config.with_l1_ratio(1.5);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_with_shrinkage_factor_validation() {
+        let config = LinearConfig::new();
+
+        // Valid cases
+        assert!(config.clone().with_shrinkage_factor(0.001).is_ok());
+        assert!(config.clone().with_shrinkage_factor(0.5).is_ok());
+        assert!(config.clone().with_shrinkage_factor(1.0).is_ok());
+
+        // Invalid cases
+        let result = config.clone().with_shrinkage_factor(0.0);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("shrinkage_factor must be in (0.0, 1.0]"));
+
+        let result = config.with_shrinkage_factor(1.5);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_with_max_iter_validation() {
+        let config = LinearConfig::new();
+
+        // Valid cases
+        assert!(config.clone().with_max_iter(1).is_ok());
+        assert!(config.clone().with_max_iter(10).is_ok());
+        assert!(config.clone().with_max_iter(1000).is_ok());
+
+        // Invalid case
+        let result = config.with_max_iter(0);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("max_iter must be >= 1"));
+    }
+
+    #[test]
+    fn test_with_tol_validation() {
+        let config = LinearConfig::new();
+
+        // Valid cases
+        assert!(config.clone().with_tol(1e-10).is_ok());
+        assert!(config.clone().with_tol(1e-6).is_ok());
+        assert!(config.clone().with_tol(0.1).is_ok());
+
+        // Invalid cases
+        let result = config.clone().with_tol(0.0);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("tol must be > 0.0"));
+
+        let result = config.with_tol(-0.001);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_with_max_weight_validation() {
+        let config = LinearConfig::new();
+
+        // Valid cases
+        assert!(config.clone().with_max_weight(1.0).is_ok());
+        assert!(config.clone().with_max_weight(10.0).is_ok());
+        assert!(config.clone().with_max_weight(1000.0).is_ok());
+
+        // Invalid case
+        let result = config.with_max_weight(0.5);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("max_weight must be >= 1.0"));
+    }
+
+    #[test]
+    fn test_with_extrapolation_damping_validation() {
+        let config = LinearConfig::new();
+
+        // Valid cases
+        assert!(config.clone().with_extrapolation_damping(0.0).is_ok());
+        assert!(config.clone().with_extrapolation_damping(0.5).is_ok());
+        assert!(config.clone().with_extrapolation_damping(1.0).is_ok());
+
+        // Invalid cases
+        let result = config.clone().with_extrapolation_damping(-0.1);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("extrapolation_damping must be in [0, 1]"));
+
+        let result = config.with_extrapolation_damping(1.5);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_with_methods_builder_chain() -> Result<()> {
+        let config = LinearConfig::new()
+            .with_lambda(0.5)?
+            .with_l1_ratio(0.5)?
+            .with_shrinkage_factor(0.3)?
+            .with_max_iter(50)?
+            .with_tol(1e-8)?;
+
+        assert_eq!(config.lambda, 0.5);
+        assert_eq!(config.l1_ratio, 0.5);
+        assert_eq!(config.shrinkage_factor, 0.3);
+        assert_eq!(config.max_iter, 50);
+        assert!(config.tol > 1e-9 && config.tol < 1e-7);
+        Ok(())
+    }
+
+    #[test]
+    fn test_with_methods_error_stops_chain() {
+        let result = LinearConfig::new()
+            .with_lambda(0.5)
+            .and_then(|c| c.with_l1_ratio(1.5)) // Invalid!
+            .and_then(|c| c.with_shrinkage_factor(0.3));
+
+        assert!(result.is_err());
     }
 }
