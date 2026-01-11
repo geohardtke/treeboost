@@ -587,4 +587,112 @@ impl UniversalModel {
             )),
         }
     }
+
+    // =========================================================================
+    // Multi-Label Prediction (LinearThenTree mode with multi-output)
+    // =========================================================================
+
+    /// Multi-label prediction: raw scores
+    ///
+    /// Returns `Vec<Vec<f32>>` where each inner vec contains raw scores for all labels.
+    /// For LinearThenTree mode, combines base + linear + tree predictions per label.
+    pub fn predict_multilabel(&self, dataset: &BinnedDataset) -> Vec<Vec<f32>> {
+        let num_rows = dataset.num_rows();
+
+        // Check if we have multi-output linear boosters (LinearThenTree multi-label mode)
+        if let Some(ref linear_boosters) = self.linear_boosters {
+            let num_outputs = linear_boosters.len();
+
+            // Get base predictions per label
+            let base_preds = self
+                .base_predictions_multi
+                .as_ref()
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+
+            // Get raw features for linear models
+            let raw_features = self
+                .raw_features_for_linear
+                .clone()
+                .unwrap_or_else(|| Self::extract_raw_features(dataset));
+            let num_raw_features = self.num_linear_features.unwrap_or(self.num_features);
+
+            // Combine: base + shrinkage*linear + tree per label
+            let shrinkage = self.config.linear_config.shrinkage_factor;
+            let mut predictions = vec![vec![0.0f32; num_outputs]; num_rows];
+
+            // Get per-label GBDT predictions if available
+            let gbdt_preds: Vec<Vec<f32>> = if let Some(ref per_label) = self.gbdt_per_label {
+                // Predict from each per-label GBDT
+                per_label
+                    .iter()
+                    .map(|m| {
+                        // For residual GBDTs, subtract their base prediction
+                        let preds = m.predict(dataset);
+                        let base = m.base_prediction();
+                        preds.into_iter().map(|p| p - base).collect()
+                    })
+                    .collect()
+            } else {
+                // No per-label GBDTs, return zeros
+                vec![vec![0.0; num_rows]; num_outputs]
+            };
+
+            for i in 0..num_rows {
+                for k in 0..num_outputs {
+                    // Base prediction for this label
+                    let base = base_preds.get(k).copied().unwrap_or(0.0);
+
+                    // Linear contribution (with shrinkage)
+                    let linear_pred = linear_boosters[k].predict_row(&raw_features, num_raw_features, i);
+
+                    // Tree contribution from per-label GBDT
+                    let tree_contrib = gbdt_preds.get(k).and_then(|v| v.get(i)).copied().unwrap_or(0.0);
+
+                    predictions[i][k] = base + shrinkage * linear_pred + tree_contrib;
+                }
+            }
+
+            predictions
+        } else {
+            // Fall back to GBDT-only multi-label
+            self.gbdt_model
+                .as_ref()
+                .map(|m| m.predict_multilabel(dataset))
+                .unwrap_or_else(|| vec![vec![0.0]; num_rows])
+        }
+    }
+
+    /// Multi-label prediction: probabilities
+    ///
+    /// Returns `Vec<Vec<f32>>` where each inner vec contains probabilities in [0, 1] for all labels.
+    /// Applies sigmoid to each label independently (not softmax).
+    pub fn predict_proba_multilabel(&self, dataset: &BinnedDataset) -> Vec<Vec<f32>> {
+        let raw_scores = self.predict_multilabel(dataset);
+
+        // Apply sigmoid to each score
+        raw_scores
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(crate::loss::sigmoid)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Multi-label prediction: boolean labels with threshold 0.5
+    pub fn predict_labels(&self, dataset: &BinnedDataset) -> Vec<Vec<bool>> {
+        self.predict_labels_with_threshold(dataset, 0.5)
+    }
+
+    /// Multi-label prediction: boolean labels with custom threshold
+    pub fn predict_labels_with_threshold(&self, dataset: &BinnedDataset, threshold: f32) -> Vec<Vec<bool>> {
+        let proba = self.predict_proba_multilabel(dataset);
+
+        proba
+            .into_iter()
+            .map(|row| row.into_iter().map(|p| p >= threshold).collect())
+            .collect()
+    }
 }

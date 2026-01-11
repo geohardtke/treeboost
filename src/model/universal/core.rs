@@ -46,15 +46,32 @@ pub struct UniversalModel {
     /// Only populated when using Ridge stacking strategy
     pub(super) stacker_intercept: Option<f32>,
 
-    /// Linear booster (for LinearThenTree mode)
+    /// Linear booster (for single-output LinearThenTree mode)
     pub(super) linear_booster: Option<LinearBooster>,
+
+    /// Linear boosters for multi-output LinearThenTree mode (one per output)
+    ///
+    /// Used when training multi-label or multi-target regression with LinearThenTree.
+    /// Each LinearBooster fits one output dimension independently.
+    pub(super) linear_boosters: Option<Vec<LinearBooster>>,
+
+    /// Per-label GBDT models for multi-output LinearThenTree mode
+    ///
+    /// When training multi-label with LTT, we train K separate GBDTs (one per label)
+    /// on the residuals using MSE loss. Each GBDT predicts residuals for its label.
+    pub(super) gbdt_per_label: Option<Vec<GBDTModel>>,
 
     /// Ensemble of trained trees (for LinearThenTree and RandomForest modes)
     /// Used when NOT using gbdt_model or gbdt_ensemble
     pub(super) trees: Vec<Tree>,
 
-    /// Base prediction (for LinearThenTree and RandomForest modes)
+    /// Base prediction (for single-output LinearThenTree and RandomForest modes)
     pub(super) base_prediction: f32,
+
+    /// Per-label base predictions (for multi-output LinearThenTree mode)
+    ///
+    /// These are the log-odds of each label, used as starting points for prediction.
+    pub(super) base_predictions_multi: Option<Vec<f32>>,
 
     /// Number of features
     pub(super) num_features: usize,
@@ -476,19 +493,41 @@ impl UniversalModel {
         }
     }
 
-    /// Check if model has linear component
+    /// Check if model has linear component (single or multi-output)
     pub fn has_linear(&self) -> bool {
-        self.linear_booster.is_some()
+        self.linear_booster.is_some() || self.linear_boosters.is_some()
     }
 
-    /// Get linear booster reference (if present)
+    /// Get linear booster reference (if present, for single-output mode)
     pub fn linear_booster(&self) -> Option<&LinearBooster> {
         self.linear_booster.as_ref()
     }
 
-    /// Get underlying GBDTModel (for PureTree and LinearThenTree modes)
+    /// Get linear boosters reference (for multi-output mode)
+    pub fn linear_boosters(&self) -> Option<&[LinearBooster]> {
+        self.linear_boosters.as_deref()
+    }
+
+    /// Get number of linear boosters (0 for single-output or no linear, N for multi-output)
+    pub fn num_linear_boosters(&self) -> usize {
+        self.linear_boosters.as_ref().map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// Get underlying GBDTModel (for PureTree and single-output LinearThenTree modes)
     pub fn gbdt_model(&self) -> Option<&GBDTModel> {
         self.gbdt_model.as_ref()
+    }
+
+    /// Get per-label GBDT models (for multi-output LinearThenTree mode)
+    ///
+    /// Returns K GBDTs, one per label. Each GBDT was trained on residuals for its label.
+    pub fn gbdt_per_label(&self) -> Option<&[GBDTModel]> {
+        self.gbdt_per_label.as_deref()
+    }
+
+    /// Get number of per-label GBDTs
+    pub fn num_gbdt_per_label(&self) -> usize {
+        self.gbdt_per_label.as_ref().map(|v| v.len()).unwrap_or(0)
     }
 
     /// Get trees (only for RandomForest mode; PureTree/LinearThenTree use GBDTModel)

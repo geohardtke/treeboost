@@ -20,6 +20,33 @@ use rayon::prelude::*;
 use super::{BoostingMode, ModeSelection, UniversalConfig, UniversalModel};
 
 impl UniversalModel {
+    /// Validate common training configuration parameters
+    ///
+    /// This is called by all train() variants to ensure consistent validation.
+    fn validate_config(config: &UniversalConfig) -> Result<()> {
+        if config.num_rounds == 0 {
+            return Err(crate::TreeBoostError::Config(
+                "UniversalModel configuration error: num_rounds must be greater than 0, got 0. \
+                 Specify at least 1 boosting round."
+                    .to_string(),
+            ));
+        }
+        if config.learning_rate <= 0.0 || config.learning_rate > 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "UniversalModel configuration error: learning_rate must be in (0, 1], got {}. \
+                 Specify a value greater than 0 and at most 1.0.",
+                config.learning_rate
+            )));
+        }
+        if config.subsample <= 0.0 || config.subsample > 1.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "UniversalModel configuration error: subsample must be in (0, 1], got {}. \
+                 Specify a value greater than 0 and at most 1.0.",
+                config.subsample
+            )));
+        }
+        Ok(())
+    }
     /// Train a UniversalModel on binned data
     ///
     /// # Arguments
@@ -55,28 +82,7 @@ impl UniversalModel {
         config: UniversalConfig,
         loss_fn: &dyn LossFunction,
     ) -> Result<Self> {
-        // Validate configuration
-        if config.num_rounds == 0 {
-            return Err(crate::TreeBoostError::Config(
-                "UniversalModel::train() configuration error: num_rounds must be greater than 0, got 0. \
-                 Specify at least 1 boosting round."
-                    .to_string(),
-            ));
-        }
-        if config.learning_rate <= 0.0 || config.learning_rate > 1.0 {
-            return Err(crate::TreeBoostError::Config(format!(
-                "UniversalModel::train() configuration error: learning_rate must be in (0, 1], got {}. \
-                 Specify a value greater than 0 and at most 1.0.",
-                config.learning_rate
-            )));
-        }
-        if config.subsample <= 0.0 || config.subsample > 1.0 {
-            return Err(crate::TreeBoostError::Config(format!(
-                "UniversalModel::train() configuration error: subsample must be in (0, 1], got {}. \
-                 Specify a value greater than 0 and at most 1.0.",
-                config.subsample
-            )));
-        }
+        Self::validate_config(&config)?;
 
         let feature_extractor = config.feature_extractor.clone();
         match config.mode {
@@ -164,28 +170,7 @@ impl UniversalModel {
         config: UniversalConfig,
         loss_fn: &dyn LossFunction,
     ) -> Result<Self> {
-        // Validate configuration
-        if config.num_rounds == 0 {
-            return Err(crate::TreeBoostError::Config(
-                "UniversalModel::train() configuration error: num_rounds must be greater than 0, got 0. \
-                 Specify at least 1 boosting round."
-                    .to_string(),
-            ));
-        }
-        if config.learning_rate <= 0.0 || config.learning_rate > 1.0 {
-            return Err(crate::TreeBoostError::Config(format!(
-                "UniversalModel::train() configuration error: learning_rate must be in (0, 1], got {}. \
-                 Specify a value greater than 0 and at most 1.0.",
-                config.learning_rate
-            )));
-        }
-        if config.subsample <= 0.0 || config.subsample > 1.0 {
-            return Err(crate::TreeBoostError::Config(format!(
-                "UniversalModel::train() configuration error: subsample must be in (0, 1], got {}. \
-                 Specify a value greater than 0 and at most 1.0.",
-                config.subsample
-            )));
-        }
+        Self::validate_config(&config)?;
 
         let feature_extractor = config.feature_extractor.clone();
         match config.mode {
@@ -390,8 +375,11 @@ impl UniversalModel {
             stacker_weights,
             stacker_intercept,
             linear_booster: None,
+            linear_boosters: None,
+            gbdt_per_label: None,
             trees: Vec::new(),
             base_prediction: 0.0, // Not used - GBDTModel handles this
+            base_predictions_multi: None,
             num_features,
             analysis,
             raw_features_for_linear: None,
@@ -566,8 +554,11 @@ impl UniversalModel {
             stacker_weights,
             stacker_intercept,
             linear_booster: Some(linear_booster),
+            linear_boosters: None,
+            gbdt_per_label: None,
             trees: Vec::new(), // Not used - GBDTModel stores trees
             base_prediction,
+            base_predictions_multi: None,
             num_features,
             analysis,
             raw_features_for_linear: Some(raw_features),
@@ -642,14 +633,199 @@ impl UniversalModel {
             stacker_weights: None,
             stacker_intercept: None,
             linear_booster: None,
+            linear_boosters: None,
+            gbdt_per_label: None,
             trees,
             base_prediction,
+            base_predictions_multi: None,
             num_features,
             analysis,
             raw_features_for_linear: None,
             linear_feature_indices: None,
             num_linear_features: None,
             feature_extractor,
+        })
+    }
+
+    // =========================================================================
+    // Multi-Label LinearThenTree Mode
+    // =========================================================================
+
+    /// Train a UniversalModel for multi-label classification
+    ///
+    /// Uses LinearThenTree mode with:
+    /// 1. One LinearBooster per label (independent per-label linear models)
+    /// 2. Multi-label GBDTModel on residuals
+    ///
+    /// # Arguments
+    /// * `dataset` - Multi-output binned dataset (targets are row-wise flattened)
+    /// * `config` - Training configuration (mode should be LinearThenTree)
+    /// * `loss_fn` - Multi-label loss function (e.g., MultiLabelLogLoss)
+    pub fn train_multilabel(
+        dataset: &BinnedDataset,
+        config: UniversalConfig,
+        loss_fn: &dyn LossFunction,
+    ) -> Result<Self> {
+        let num_outputs = dataset.num_target_cols();
+        if num_outputs <= 1 {
+            return Err(crate::TreeBoostError::Config(
+                "train_multilabel requires a multi-output dataset (num_target_cols > 1)".to_string(),
+            ));
+        }
+
+        // Force LinearThenTree mode for multi-label
+        let config = config.with_mode(BoostingMode::LinearThenTree);
+
+        Self::train_multilabel_ltt(dataset, config, loss_fn, num_outputs)
+    }
+
+    /// Internal multi-label LinearThenTree training
+    fn train_multilabel_ltt(
+        dataset: &BinnedDataset,
+        config: UniversalConfig,
+        loss_fn: &dyn LossFunction,
+        num_outputs: usize,
+    ) -> Result<Self> {
+        let targets = dataset.targets();
+        let num_rows = dataset.num_rows();
+        let num_features = dataset.num_features();
+
+        // Validate target dimensions
+        if targets.len() != num_rows * num_outputs {
+            return Err(crate::TreeBoostError::Config(format!(
+                "Target dimension mismatch: expected {} ({}rows × {}outputs), got {}",
+                num_rows * num_outputs,
+                num_rows,
+                num_outputs,
+                targets.len()
+            )));
+        }
+
+        // Extract raw features for linear models
+        let raw_features = Self::extract_raw_features(dataset);
+        let num_raw_features = if num_rows > 0 {
+            raw_features.len() / num_rows
+        } else {
+            num_features
+        };
+
+        // =====================================================================
+        // Phase 1: Fit N LinearBoosters (one per label)
+        // =====================================================================
+
+        // Initialize one LinearBooster per label
+        let mut linear_boosters: Vec<crate::learner::LinearBooster> = (0..num_outputs)
+            .map(|_| crate::learner::LinearBooster::new(num_raw_features, config.linear_config.clone()))
+            .collect();
+
+        // Per-label base predictions (log-odds from loss function)
+        // This is critical: for classification, base predictions are log-odds, not means
+        let base_predictions = loss_fn.initial_predictions_multi(targets, num_outputs);
+
+        // Current predictions per label (start from base)
+        let mut predictions: Vec<f32> = vec![0.0; num_rows * num_outputs];
+        for i in 0..num_rows {
+            for k in 0..num_outputs {
+                predictions[i * num_outputs + k] = base_predictions[k];
+            }
+        }
+
+        // Iteratively fit linear models
+        for _round in 0..config.linear_rounds {
+            for k in 0..num_outputs {
+                // Compute per-label gradients and hessians
+                let mut gradients = vec![0.0f32; num_rows];
+                let mut hessians = vec![0.0f32; num_rows];
+
+                for i in 0..num_rows {
+                    let target = targets[i * num_outputs + k];
+                    let pred = predictions[i * num_outputs + k];
+                    let (g, h) = loss_fn.gradient_hessian(target, pred);
+                    gradients[i] = g;
+                    hessians[i] = h;
+                }
+
+                // Fit this label's linear model on gradients
+                linear_boosters[k].fit_on_gradients(
+                    &raw_features,
+                    num_raw_features,
+                    &gradients,
+                    &hessians,
+                )?;
+
+                // Update predictions for this label
+                let shrinkage = config.linear_config.shrinkage_factor;
+                for i in 0..num_rows {
+                    let linear_pred =
+                        linear_boosters[k].predict_row(&raw_features, num_raw_features, i);
+                    predictions[i * num_outputs + k] += shrinkage * linear_pred;
+                }
+            }
+        }
+
+        // =====================================================================
+        // Phase 2: Train Per-Label GBDTs on Residuals
+        // =====================================================================
+
+        // Create GBDT config for training on residuals
+        // IMPORTANT: Use MSE loss for residuals, not multi-label log loss!
+        // The residuals are continuous values, not binary targets.
+        // For LTT: linear fits gradients of original loss, trees fit residuals with MSE
+        let gbdt_config = crate::booster::GBDTConfig::new()
+            .with_num_rounds(config.num_rounds)
+            .with_learning_rate(config.learning_rate)
+            .with_max_depth(config.tree_config.max_depth)
+            .with_max_leaves(config.tree_config.max_leaves)
+            .with_lambda(config.tree_config.lambda);
+        // MSE is the default loss, which is correct for residual fitting
+
+        // Get the binned features from original dataset (column-major)
+        let features = dataset.features().to_vec();
+        let feature_info = dataset.all_feature_info().to_vec();
+
+        // Train one GBDT per label on residuals
+        let mut gbdt_per_label = Vec::with_capacity(num_outputs);
+
+        for k in 0..num_outputs {
+            // Compute per-label residuals: target - predicted
+            let label_residuals: Vec<f32> = (0..num_rows)
+                .map(|i| {
+                    let target = targets[i * num_outputs + k];
+                    let pred = predictions[i * num_outputs + k];
+                    target - pred
+                })
+                .collect();
+
+            // Create single-output dataset for this label
+            let label_dataset = crate::dataset::BinnedDataset::new(
+                num_rows,
+                features.clone(),
+                label_residuals,
+                feature_info.clone(),
+            );
+
+            let label_gbdt = crate::booster::GBDTModel::train_binned(&label_dataset, gbdt_config.clone())?;
+            gbdt_per_label.push(label_gbdt);
+        }
+
+        Ok(Self {
+            config,
+            gbdt_model: None, // Using per-label GBDTs instead
+            gbdt_ensemble: None,
+            stacker_weights: None,
+            stacker_intercept: None,
+            linear_booster: None,
+            linear_boosters: Some(linear_boosters),
+            gbdt_per_label: Some(gbdt_per_label),
+            trees: Vec::new(),
+            base_prediction: 0.0, // Not used for multi-output
+            base_predictions_multi: Some(base_predictions),
+            num_features,
+            analysis: None,
+            raw_features_for_linear: Some(raw_features),
+            linear_feature_indices: None,
+            num_linear_features: Some(num_raw_features),
+            feature_extractor: None,
         })
     }
 }

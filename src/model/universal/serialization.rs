@@ -10,7 +10,7 @@ use crate::dataset::BinnedDataset;
 use crate::loss::MseLoss;
 use crate::tuner::{ParamValue, TunableModel};
 
-use super::{BoostingMode, IncrementalUpdateReport, UniversalConfig, UniversalModel};
+use super::{BoostingMode, UniversalConfig, UniversalModel};
 
 // =============================================================================
 // TunableModel Implementation
@@ -529,6 +529,7 @@ mod tests {
 
     #[test]
     fn test_incremental_update_report_display() {
+        use crate::model::universal::IncrementalUpdateReport;
         let report = IncrementalUpdateReport {
             rows_trained: 100,
             trees_before: 5,
