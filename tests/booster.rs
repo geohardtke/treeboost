@@ -2,7 +2,7 @@
 
 mod common;
 
-use treeboost::booster::{GBDTConfig, GBDTModel};
+use treeboost::booster::{GBDTConfig, GBDTModel, OutputType};
 use treeboost::inference::ConformalPredictor;
 use treeboost::serialize::{load_model, save_model};
 
@@ -274,5 +274,537 @@ fn test_max_leaves_constraint() {
             "Tree has {} leaves, expected <= 8",
             tree.num_leaves()
         );
+    }
+}
+
+// =============================================================================
+// Phase 3.1: GBDTModel Structure Tests
+// =============================================================================
+
+#[test]
+fn test_model_output_type_regression() {
+    let dataset = create_synthetic_dataset(200, 111);
+
+    let config = GBDTConfig::new()
+        .with_num_rounds(10)
+        .with_max_depth(3);
+
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
+
+    // Verify model structure for regression
+    assert_eq!(model.output_type(), OutputType::Regression);
+    assert_eq!(model.num_outputs(), 1);
+    assert_eq!(model.base_predictions().len(), 1);
+    assert!(!model.is_multiclass());
+    assert!(!model.is_multilabel());
+}
+
+#[test]
+fn test_model_output_type_binary() {
+    let mut dataset = create_synthetic_dataset(200, 222);
+
+    // Convert to binary classification (0/1 targets)
+    for t in dataset.targets_mut() {
+        *t = if *t > 7.5 { 1.0 } else { 0.0 };
+    }
+
+    let config = GBDTConfig::new()
+        .with_num_rounds(10)
+        .with_max_depth(3)
+        .with_binary_logloss();
+
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
+
+    // Verify model structure for binary classification
+    assert_eq!(model.output_type(), OutputType::Binary);
+    assert_eq!(model.num_outputs(), 1);
+    assert_eq!(model.base_predictions().len(), 1);
+    assert!(!model.is_multiclass());
+    assert!(!model.is_multilabel());
+}
+
+#[test]
+fn test_model_num_outputs_accessor() {
+    let dataset = create_synthetic_dataset(200, 333);
+
+    // Regression model
+    let config = GBDTConfig::new().with_num_rounds(5);
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
+
+    assert_eq!(model.num_outputs(), 1);
+    assert_eq!(model.base_predictions().len(), 1);
+
+    // Verify base_prediction() accessor still works for backward compatibility
+    let base = model.base_prediction();
+    assert_eq!(base, model.base_predictions()[0]);
+}
+
+#[test]
+fn test_config_multilabel_logloss() {
+    // Valid configuration
+    let config = GBDTConfig::new()
+        .with_multilabel_logloss(3)
+        .expect("Should accept num_outputs >= 2");
+
+    assert!(config.loss_type.is_multilabel());
+    assert_eq!(config.loss_type.num_outputs(), Some(3));
+    assert_eq!(config.loss_type.output_type(), OutputType::MultiLabel);
+}
+
+#[test]
+fn test_config_multilabel_focal_loss() {
+    // Valid configuration
+    let config = GBDTConfig::new()
+        .with_multilabel_focal_loss(4, 2.0)
+        .expect("Should accept valid focal loss config");
+
+    assert!(config.loss_type.is_multilabel());
+    assert_eq!(config.loss_type.num_outputs(), Some(4));
+    assert_eq!(config.loss_type.output_type(), OutputType::MultiLabel);
+}
+
+#[test]
+fn test_config_multilabel_validation() {
+    // Invalid: num_outputs < 2
+    let result = GBDTConfig::new().with_multilabel_logloss(1);
+    assert!(result.is_err(), "Should reject num_outputs < 2");
+
+    // Invalid: negative gamma
+    let result = GBDTConfig::new().with_multilabel_focal_loss(3, -1.0);
+    assert!(result.is_err(), "Should reject negative gamma");
+
+    // Valid edge cases
+    let config = GBDTConfig::new()
+        .with_multilabel_focal_loss(2, 0.0)
+        .expect("gamma=0 is valid (reduces to logloss)");
+    assert!(config.loss_type.is_multilabel());
+}
+
+#[test]
+fn test_loss_type_output_type_mapping() {
+    use treeboost::booster::LossType;
+
+    // Regression losses
+    assert_eq!(LossType::Mse.output_type(), OutputType::Regression);
+    assert_eq!(
+        LossType::PseudoHuber { delta: 1.0 }.output_type(),
+        OutputType::Regression
+    );
+
+    // Binary classification
+    assert_eq!(LossType::BinaryLogLoss.output_type(), OutputType::Binary);
+
+    // Multi-class
+    assert_eq!(
+        LossType::MultiClassLogLoss { num_classes: 3 }.output_type(),
+        OutputType::MultiClass
+    );
+
+    // Multi-label
+    assert_eq!(
+        LossType::MultiLabelLogLoss { num_outputs: 3 }.output_type(),
+        OutputType::MultiLabel
+    );
+    assert_eq!(
+        LossType::MultiLabelFocalLoss {
+            num_outputs: 3,
+            gamma: 2.0
+        }
+        .output_type(),
+        OutputType::MultiLabel
+    );
+}
+
+// =============================================================================
+// Phase 3.2: Vector Tree Shape Tests
+// =============================================================================
+
+/// Helper to create a multi-output dataset for testing
+fn create_multilabel_dataset(n: usize, num_outputs: usize, seed: u64) -> treeboost::BinnedDataset {
+    use treeboost::dataset::{FeatureInfo, FeatureType};
+
+    // Deterministic pseudo-random using seed
+    let mut state = seed;
+    let mut next_rand = || -> f32 {
+        state = state.wrapping_mul(1103515245).wrapping_add(12345);
+        ((state >> 16) & 0x7FFF) as f32 / 32767.0
+    };
+
+    let num_features = 5;
+    let mut features = Vec::with_capacity(n * num_features);
+
+    // Generate features (column-major)
+    for _f in 0..num_features {
+        for _r in 0..n {
+            features.push((next_rand() * 255.0) as u8);
+        }
+    }
+
+    // Generate multi-output targets (row-wise flattened)
+    // Each output is a binary label based on different feature thresholds
+    let mut targets = Vec::with_capacity(n * num_outputs);
+    for i in 0..n {
+        for k in 0..num_outputs {
+            // Each output depends on a different feature combination
+            let f0 = features[i] as f32 / 255.0;
+            let fk = features[(k % num_features) * n + i] as f32 / 255.0;
+            // Binary target based on feature threshold
+            let threshold = 0.3 + (k as f32) * 0.1;
+            let target = if f0 + fk > threshold { 1.0 } else { 0.0 };
+            targets.push(target);
+        }
+    }
+
+    let feature_info: Vec<FeatureInfo> = (0..num_features)
+        .map(|i| FeatureInfo {
+            name: format!("feature_{}", i),
+            feature_type: FeatureType::Numeric,
+            num_bins: 255,
+            bin_boundaries: vec![],
+        })
+        .collect();
+
+    treeboost::BinnedDataset::new_multioutput(n, features, targets, feature_info, num_outputs)
+}
+
+#[test]
+fn test_multilabel_tree_shape() {
+    // Test that multi-label training produces correct number of trees
+    let num_outputs = 3;
+    let num_rounds = 10;
+    let dataset = create_multilabel_dataset(200, num_outputs, 444);
+
+    let config = GBDTConfig::new()
+        .with_num_rounds(num_rounds)
+        .with_max_depth(3)
+        .with_multilabel_logloss(num_outputs)
+        .expect("Should accept valid config");
+
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
+
+    // Multi-label trains N trees per round (like multi-class)
+    // Total trees = num_rounds * num_outputs
+    assert_eq!(
+        model.num_trees(),
+        num_rounds * num_outputs,
+        "Multi-label should have num_rounds * num_outputs trees"
+    );
+
+    // Verify model structure
+    assert_eq!(model.output_type(), OutputType::MultiLabel);
+    assert_eq!(model.num_outputs(), num_outputs);
+    assert!(model.is_multilabel());
+    assert!(!model.is_multiclass());
+
+    // Base predictions should have one value per output
+    assert_eq!(model.base_predictions().len(), num_outputs);
+}
+
+#[test]
+fn test_multilabel_focal_loss_training() {
+    let num_outputs = 3;
+    let dataset = create_multilabel_dataset(200, num_outputs, 555);
+
+    // Train with focal loss (gamma=2)
+    let config = GBDTConfig::new()
+        .with_num_rounds(10)
+        .with_max_depth(3)
+        .with_multilabel_focal_loss(num_outputs, 2.0)
+        .expect("Should accept valid config");
+
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
+
+    assert_eq!(model.output_type(), OutputType::MultiLabel);
+    assert_eq!(model.num_outputs(), num_outputs);
+    assert_eq!(model.base_predictions().len(), num_outputs);
+}
+
+#[test]
+fn test_multilabel_predictions_shape() {
+    let num_outputs = 3;
+    let num_rows = 100;
+    let dataset = create_multilabel_dataset(num_rows, num_outputs, 666);
+
+    let config = GBDTConfig::new()
+        .with_num_rounds(5)
+        .with_max_depth(3)
+        .with_multilabel_logloss(num_outputs)
+        .expect("Should accept valid config");
+
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
+
+    // Get predictions using existing predict method
+    // For multi-label, predictions are [s0_l0, s0_l1, s0_l2, s1_l0, ...]
+    // But current predict() returns scalar predictions
+    // We need to verify the model structure is correct
+    assert_eq!(model.num_outputs(), num_outputs);
+
+    // The per-label predictions can be computed by simulating
+    // what the multi-label prediction would do
+    let mut predictions = vec![0.0f32; num_rows * num_outputs];
+
+    // Initialize with base predictions
+    for row in 0..num_rows {
+        for k in 0..num_outputs {
+            predictions[row * num_outputs + k] = model.base_predictions()[k];
+        }
+    }
+
+    // Add tree contributions
+    // Trees are stored round-major: [r0_l0, r0_l1, r0_l2, r1_l0, ...]
+    let num_rounds = model.num_trees() / num_outputs;
+    for round in 0..num_rounds {
+        for label_idx in 0..num_outputs {
+            let tree_idx = round * num_outputs + label_idx;
+            let tree = &model.trees()[tree_idx];
+
+            for row in 0..num_rows {
+                let delta = tree.predict(|f| dataset.get_bin(row, f));
+                predictions[row * num_outputs + label_idx] += delta;
+            }
+        }
+    }
+
+    // Verify predictions are in reasonable range (after sigmoid, should be 0-1)
+    use treeboost::loss::sigmoid;
+    for row in 0..num_rows {
+        for k in 0..num_outputs {
+            let raw = predictions[row * num_outputs + k];
+            let prob = sigmoid(raw);
+            assert!(prob >= 0.0 && prob <= 1.0, "Probability out of range: {}", prob);
+        }
+    }
+
+    // Verify some learning happened (predictions should vary)
+    let unique_preds: std::collections::HashSet<u32> = predictions
+        .iter()
+        .map(|&p| (p * 1000.0) as u32)
+        .collect();
+    assert!(unique_preds.len() > 1, "Predictions should vary across samples");
+}
+
+// =============================================================================
+// Phase 3.3: Vector Prediction Shape Tests
+// =============================================================================
+
+#[test]
+fn test_predict_multilabel() {
+    let num_outputs = 3;
+    let num_rows = 50;
+    let dataset = create_multilabel_dataset(num_rows, num_outputs, 777);
+
+    let config = GBDTConfig::new()
+        .with_num_rounds(5)
+        .with_max_depth(3)
+        .with_multilabel_logloss(num_outputs)
+        .expect("Should accept valid config");
+
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
+
+    // Test predict_multilabel returns correct shape
+    let raw_preds = model.predict_multilabel(&dataset);
+    assert_eq!(raw_preds.len(), num_rows, "Should have predictions for all rows");
+    for row_pred in &raw_preds {
+        assert_eq!(row_pred.len(), num_outputs, "Each row should have num_outputs predictions");
+    }
+
+    // Test predict_proba_multilabel returns probabilities in [0, 1]
+    let proba = model.predict_proba_multilabel(&dataset);
+    assert_eq!(proba.len(), num_rows);
+    for row_proba in &proba {
+        assert_eq!(row_proba.len(), num_outputs);
+        for &p in row_proba {
+            assert!(p >= 0.0 && p <= 1.0, "Probability must be in [0, 1], got {}", p);
+        }
+    }
+
+    // Test predict_labels returns boolean predictions
+    let labels = model.predict_labels(&dataset);
+    assert_eq!(labels.len(), num_rows);
+    for row_labels in &labels {
+        assert_eq!(row_labels.len(), num_outputs);
+    }
+}
+
+#[test]
+fn test_predict_labels_with_threshold() {
+    let num_outputs = 2;
+    let num_rows = 100;
+    let dataset = create_multilabel_dataset(num_rows, num_outputs, 888);
+
+    let config = GBDTConfig::new()
+        .with_num_rounds(10)
+        .with_max_depth(4)
+        .with_multilabel_logloss(num_outputs)
+        .expect("Should accept valid config");
+
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
+
+    let proba = model.predict_proba_multilabel(&dataset);
+
+    // Verify probabilities are in valid range [0, 1]
+    for row in &proba {
+        for &p in row {
+            assert!(p >= 0.0 && p <= 1.0, "Probability should be in [0, 1], got {}", p);
+        }
+    }
+
+    // With threshold 0.0, all predictions should be positive
+    let labels_low = model.predict_labels_with_threshold(&dataset, 0.0);
+    let all_positive: bool = labels_low.iter().all(|row| row.iter().all(|&l| l));
+    assert!(all_positive, "All labels should be true with threshold 0.0");
+
+    // With threshold 1.0, all predictions should be negative
+    let labels_high = model.predict_labels_with_threshold(&dataset, 1.0);
+    let all_negative: bool = labels_high.iter().all(|row| row.iter().all(|&l| !l));
+    assert!(all_negative, "All labels should be false with threshold 1.0");
+
+    // With threshold 0.5 (default), should match predict_labels
+    let labels_default = model.predict_labels(&dataset);
+    let labels_half = model.predict_labels_with_threshold(&dataset, 0.5);
+    assert_eq!(labels_default, labels_half, "predict_labels should use threshold 0.5");
+}
+
+#[test]
+fn test_predict_labels_with_thresholds() {
+    let num_outputs = 3;
+    let num_rows = 50;
+    let dataset = create_multilabel_dataset(num_rows, num_outputs, 999);
+
+    let config = GBDTConfig::new()
+        .with_num_rounds(5)
+        .with_max_depth(3)
+        .with_multilabel_logloss(num_outputs)
+        .expect("Should accept valid config");
+
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
+
+    // Per-label thresholds
+    let thresholds = vec![0.3, 0.5, 0.7];
+    let labels = model.predict_labels_with_thresholds(&dataset, &thresholds);
+
+    assert_eq!(labels.len(), num_rows);
+    for row_labels in &labels {
+        assert_eq!(row_labels.len(), num_outputs);
+    }
+
+    // Verify thresholds are applied correctly
+    let proba = model.predict_proba_multilabel(&dataset);
+    for (row_idx, (row_proba, row_labels)) in proba.iter().zip(labels.iter()).enumerate() {
+        for (label_idx, (&p, &l)) in row_proba.iter().zip(row_labels.iter()).enumerate() {
+            let expected = p >= thresholds[label_idx];
+            assert_eq!(l, expected,
+                "Mismatch at row {} label {}: p={}, threshold={}, expected={}, got={}",
+                row_idx, label_idx, p, thresholds[label_idx], expected, l);
+        }
+    }
+}
+
+// =============================================================================
+// Phase 4.1: Multi-Label Serialization Round-Trip Tests
+// =============================================================================
+
+#[test]
+fn test_multilabel_model_serialization_roundtrip() {
+    let num_outputs = 3;
+    let num_rows = 100;
+    let dataset = create_multilabel_dataset(num_rows, num_outputs, 4242);
+
+    let config = GBDTConfig::new()
+        .with_num_rounds(10)
+        .with_max_depth(4)
+        .with_multilabel_logloss(num_outputs)
+        .expect("Should accept valid config");
+
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
+
+    // Get original predictions
+    let original_proba = model.predict_proba_multilabel(&dataset);
+    let original_labels = model.predict_labels(&dataset);
+
+    // Save model
+    let temp_dir = tempfile::tempdir().expect("Should create temp dir");
+    let model_path = temp_dir.path().join("multilabel_model.rkyv");
+
+    save_model(&model, &model_path).expect("Should save multi-label model");
+
+    // Load model
+    let loaded_model: GBDTModel = load_model(&model_path).expect("Should load multi-label model");
+
+    // Verify model structure is preserved
+    assert_eq!(loaded_model.num_trees(), model.num_trees(), "num_trees should match");
+    assert_eq!(loaded_model.num_outputs(), model.num_outputs(), "num_outputs should match");
+    assert_eq!(loaded_model.output_type(), model.output_type(), "output_type should match");
+    assert_eq!(loaded_model.output_type(), OutputType::MultiLabel, "Should be MultiLabel");
+
+    // Verify base_predictions are preserved
+    let orig_base = model.base_predictions();
+    let loaded_base = loaded_model.base_predictions();
+    assert_eq!(orig_base.len(), loaded_base.len(), "base_predictions length should match");
+    for (orig, loaded) in orig_base.iter().zip(loaded_base.iter()) {
+        assert!(
+            (orig - loaded).abs() < 1e-6,
+            "base_predictions should match: {} vs {}",
+            orig,
+            loaded
+        );
+    }
+
+    // Verify predictions match
+    let loaded_proba = loaded_model.predict_proba_multilabel(&dataset);
+    assert_eq!(loaded_proba.len(), original_proba.len());
+    for (orig_row, loaded_row) in original_proba.iter().zip(loaded_proba.iter()) {
+        assert_eq!(orig_row.len(), loaded_row.len());
+        for (orig, loaded) in orig_row.iter().zip(loaded_row.iter()) {
+            assert!(
+                (orig - loaded).abs() < 1e-6,
+                "Probabilities should match after load: {} vs {}",
+                orig,
+                loaded
+            );
+        }
+    }
+
+    // Verify label predictions match
+    let loaded_labels = loaded_model.predict_labels(&dataset);
+    assert_eq!(loaded_labels, original_labels, "Label predictions should match after load");
+}
+
+#[test]
+fn test_multilabel_focal_loss_serialization() {
+    let num_outputs = 2;
+    let num_rows = 50;
+    let dataset = create_multilabel_dataset(num_rows, num_outputs, 5555);
+
+    // Train with focal loss
+    let config = GBDTConfig::new()
+        .with_num_rounds(5)
+        .with_max_depth(3)
+        .with_multilabel_focal_loss(num_outputs, 2.0)
+        .expect("Should accept valid config");
+
+    let model = GBDTModel::train_binned(&dataset, config).expect("Training should succeed");
+    let original_predictions = model.predict_multilabel(&dataset);
+
+    // Save and load
+    let temp_dir = tempfile::tempdir().expect("Should create temp dir");
+    let model_path = temp_dir.path().join("focal_loss_model.rkyv");
+
+    save_model(&model, &model_path).expect("Should save focal loss model");
+    let loaded_model: GBDTModel = load_model(&model_path).expect("Should load focal loss model");
+
+    // Verify output type preserved
+    assert_eq!(loaded_model.output_type(), OutputType::MultiLabel);
+    assert_eq!(loaded_model.num_outputs(), num_outputs);
+
+    // Verify predictions match
+    let loaded_predictions = loaded_model.predict_multilabel(&dataset);
+    for (orig_row, loaded_row) in original_predictions.iter().zip(loaded_predictions.iter()) {
+        for (orig, loaded) in orig_row.iter().zip(loaded_row.iter()) {
+            assert!(
+                (orig - loaded).abs() < 1e-6,
+                "Predictions should match after load"
+            );
+        }
     }
 }
