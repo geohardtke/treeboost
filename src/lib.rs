@@ -676,7 +676,7 @@ mod python;
 pub use backend::{
     BackendConfig, BackendPreset, BackendSelector, BackendType, GpuMode, HistogramBackend,
 };
-pub use booster::{GBDTConfig, GBDTModel, GbdtPreset};
+pub use booster::{GBDTConfig, GBDTModel, GbdtPreset, LossType, OutputType};
 pub use dataset::{BinnedDataset, FeatureInfo, FeatureType, QuantileBinner};
 pub use ensemble::{
     EnsembleBuilder, MultiSeedConfig, SelectionConfig as EnsembleSelectionConfig, StackedEnsemble,
@@ -693,7 +693,8 @@ pub use learner::{
     LinearTreeConfig, TreeBooster, TreeConfig, TreePreset, WeakLearner,
 };
 pub use loss::{
-    sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, PseudoHuberLoss,
+    sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss,
+    MultiLabelFocalLoss, MultiLabelLogLoss, PseudoHuberLoss,
 };
 pub use model::{
     AutoBuilder, AutoConfig, AutoEnsembleConfig, AutoEnsembleMethod, AutoModel,
@@ -890,6 +891,58 @@ pub fn auto_train_with_mode(
     mode: BoostingMode,
 ) -> Result<AutoModel> {
     AutoModel::train_with_mode(df, target_col, mode)
+}
+
+/// Train a multi-label classification model with automatic configuration
+///
+/// This is the recommended entry point for multi-label tasks where each sample
+/// can have multiple binary labels (e.g., multi-tag classification).
+///
+/// # Arguments
+/// * `df` - DataFrame containing features and target columns
+/// * `target_cols` - Names of the binary target columns (each should be 0/1)
+///
+/// # Example
+///
+/// ```ignore
+/// use treeboost::auto_train_multilabel;
+///
+/// // Multi-label: each article can have multiple tags
+/// let model = auto_train_multilabel(&df, &["is_tech", "is_finance", "is_sports"])?;
+/// let predictions = model.predict_multilabel(&test_df)?;
+/// ```
+pub fn auto_train_multilabel(
+    df: &polars::prelude::DataFrame,
+    target_cols: &[&str],
+) -> Result<AutoModel> {
+    AutoModel::train_multilabel(df, target_cols)
+}
+
+/// Train a multi-label model with a specific boosting mode
+///
+/// # Arguments
+/// * `df` - DataFrame containing features and target columns
+/// * `target_cols` - Names of the binary target columns
+/// * `mode` - Boosting mode to use (PureTree or LinearThenTree)
+///
+/// # Example
+///
+/// ```ignore
+/// use treeboost::{auto_train_multilabel_with_mode, BoostingMode};
+///
+/// // Force LinearThenTree mode for better performance on linear data
+/// let model = auto_train_multilabel_with_mode(
+///     &df,
+///     &["label1", "label2"],
+///     BoostingMode::LinearThenTree,
+/// )?;
+/// ```
+pub fn auto_train_multilabel_with_mode(
+    df: &polars::prelude::DataFrame,
+    target_cols: &[&str],
+    mode: BoostingMode,
+) -> Result<AutoModel> {
+    AutoModel::train_multilabel_with_mode(df, target_cols, mode)
 }
 
 // Python module entry point
