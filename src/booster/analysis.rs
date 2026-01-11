@@ -6,19 +6,22 @@
 
 use super::GBDTModel;
 use crate::dataset::{BinnedDataset, ColumnPermutation};
-use crate::tree::Tree;
+use crate::tree::{EnsembleTree, Tree};
 
 impl GBDTModel {
     /// Compute feature importance (gain-based)
+    ///
+    /// Works with both scalar trees (regression/binary/multi-class) and
+    /// vector trees (multi-label with unified splits).
     pub fn feature_importance(&self) -> Vec<f32> {
         let mut importances = vec![0.0f32; self.num_features()];
 
         for tree in &self.trees {
-            for (_, node) in tree.internal_nodes() {
-                // Safe to unwrap: internal_nodes() filters to only internal nodes
-                let (feature_idx, _, _, _, _) = node.split_info().unwrap();
-                // Use hessian as importance weight (proxy for sample weight)
-                importances[feature_idx] += node.sum_hessians;
+            // EnsembleTree.internal_nodes() returns (node_idx, feature_idx, hessian_sum)
+            for (_, feature_idx, hessian_sum) in tree.internal_nodes() {
+                if feature_idx < importances.len() {
+                    importances[feature_idx] += hessian_sum;
+                }
             }
         }
 
@@ -63,18 +66,30 @@ impl GBDTModel {
         }
     }
 
-    /// Append a vector of trees to the model
+    /// Append a vector of scalar trees to the model
     ///
     /// Used for continuing training or ensembling.
     /// Validates that tree count matches multi-class requirements.
     pub fn append_trees(&mut self, new_trees: Vec<Tree>) {
+        self.trees.extend(new_trees.into_iter().map(EnsembleTree::from));
+    }
+
+    /// Append ensemble trees directly to the model
+    ///
+    /// Use this when you have pre-wrapped EnsembleTree instances.
+    pub fn append_ensemble_trees(&mut self, new_trees: Vec<EnsembleTree>) {
         self.trees.extend(new_trees);
     }
 
-    /// Append a single tree to the model
+    /// Append a single scalar tree to the model
     ///
     /// Useful for incremental training scenarios.
     pub fn append_tree(&mut self, tree: Tree) {
+        self.trees.push(EnsembleTree::from(tree));
+    }
+
+    /// Append a single ensemble tree to the model
+    pub fn append_ensemble_tree(&mut self, tree: EnsembleTree) {
         self.trees.push(tree);
     }
 
@@ -114,7 +129,7 @@ impl GBDTModel {
     /// Get mutable reference to tree vector for advanced use cases
     ///
     /// Use with caution - modifying trees directly can break invariants.
-    pub fn trees_mut(&mut self) -> &mut Vec<Tree> {
+    pub fn trees_mut(&mut self) -> &mut Vec<EnsembleTree> {
         &mut self.trees
     }
 
@@ -200,7 +215,7 @@ mod tests {
         let model2 = GBDTModel::train_binned(&dataset, config2).unwrap();
         let new_trees = model2.trees().to_vec();
 
-        model.append_trees(new_trees);
+        model.append_ensemble_trees(new_trees);
         assert_eq!(model.num_trees(), original_trees + 2);
     }
 
@@ -216,7 +231,7 @@ mod tests {
             let config2 = GBDTConfig::new().with_num_rounds(1);
             let new_model = GBDTModel::train_binned(&dataset, config2).unwrap();
             let new_trees = new_model.trees().to_vec();
-            model_ensemble.append_trees(new_trees);
+            model_ensemble.append_ensemble_trees(new_trees);
         }
 
         assert_eq!(model_ensemble.num_trees(), 5);
@@ -235,7 +250,7 @@ mod tests {
         let model2 = GBDTModel::train_binned(&dataset, config2).unwrap();
         let tree = model2.trees()[0].clone();
 
-        model.append_tree(tree);
+        model.append_ensemble_tree(tree);
         assert_eq!(model.num_trees(), 6);
     }
 

@@ -10,7 +10,7 @@ use crate::dataset::{
     split_holdout, BinnedDataset, ColumnPermutation, FeatureInfo, FeatureType, QuantileBinner,
 };
 use crate::loss::{softmax, MultiClassLogLoss};
-use crate::tree::{InteractionConstraints, Tree, TreeGrower};
+use crate::tree::{EnsembleTree, InteractionConstraints, Tree, TreeGrower, VectorTreeGrower};
 use crate::tuner::ModelFormat;
 use crate::{Result, TreeBoostError};
 use rand::seq::SliceRandom;
@@ -821,10 +821,13 @@ impl GBDTModel {
         // Determine output type from loss configuration
         let output_type = config.loss_type.output_type();
 
+        // Convert scalar trees to EnsembleTree
+        let ensemble_trees: Vec<EnsembleTree> = trees.iter().cloned().map(EnsembleTree::from).collect();
+
         Ok(Self {
             config,
             base_predictions: vec![base_prediction],
-            trees: trees.clone(),
+            trees: ensemble_trees,
             num_outputs: 1,
             output_type,
             conformal_q,
@@ -988,9 +991,12 @@ impl GBDTModel {
             trees.truncate(keep_rounds * num_classes);
         }
 
+        // Convert scalar trees to EnsembleTree
+        let ensemble_trees: Vec<EnsembleTree> = trees.into_iter().map(EnsembleTree::from).collect();
+
         // Compute column permutation if enabled
-        let column_permutation = if config.column_reordering && !trees.is_empty() {
-            let importances = Self::compute_importances_from_trees(&trees, dataset.num_features());
+        let column_permutation = if config.column_reordering && !ensemble_trees.is_empty() {
+            let importances = Self::compute_importances_from_ensemble_trees(&ensemble_trees, dataset.num_features());
             Some(ColumnPermutation::from_importances(&importances))
         } else {
             None
@@ -999,7 +1005,7 @@ impl GBDTModel {
         Ok(Self {
             config,
             base_predictions: base_predictions.clone(),
-            trees,
+            trees: ensemble_trees,
             num_outputs: num_classes,
             output_type: crate::booster::OutputType::MultiClass,
             conformal_q: None, // Conformal not supported for multi-class yet
@@ -1025,6 +1031,11 @@ impl GBDTModel {
     /// * `dataset` - Multi-output binned dataset (targets row-wise flattened)
     /// * `config` - Training configuration with multi-label loss
     /// * `num_outputs` - Number of labels/outputs
+    /// Train multi-label model using unified Vector Trees
+    ///
+    /// Uses `VectorTreeGrower` to produce one `VectorTree` per round where each leaf
+    /// contains a Vec<f32> of predictions (one per label). This is more efficient than
+    /// the legacy Binary Relevance approach (N scalar trees per round).
     fn train_binned_multilabel(
         dataset: &BinnedDataset,
         config: GBDTConfig,
@@ -1075,39 +1086,23 @@ impl GBDTModel {
             predictions.extend_from_slice(&base_predictions);
         }
 
-        // Gradient and hessian buffers (per sample, used for one label at a time)
-        let mut gradients = vec![0.0f32; num_rows];
-        let mut hessians = vec![0.0f32; num_rows];
+        // Gradient and hessian buffers for ALL outputs
+        // Layout: [s0_o0, s0_o1, ..., s0_oK, s1_o0, s1_o1, ..., s1_oK, ...]
+        let mut gradients = vec![0.0f32; num_rows * num_outputs];
+        let mut hessians = vec![0.0f32; num_rows * num_outputs];
 
-        // Build interaction constraints
-        let interaction_constraints = if config.interaction_groups.is_empty() {
-            InteractionConstraints::new()
-        } else {
-            InteractionConstraints::from_groups(
-                config.interaction_groups.clone(),
-                dataset.num_features(),
-            )
-        };
-
-        // Create tree grower
-        let tree_grower = TreeGrower::new()
+        // Create vector tree grower (one tree per round with vector leaves)
+        let tree_grower = VectorTreeGrower::new(num_outputs)
             .with_max_depth(config.max_depth)
             .with_max_leaves(config.max_leaves)
             .with_lambda(config.lambda)
             .with_min_samples_leaf(config.min_samples_leaf)
             .with_min_hessian_leaf(config.min_hessian_leaf)
-            .with_entropy_weight(config.entropy_weight)
             .with_min_gain(config.min_gain)
-            .with_learning_rate(config.learning_rate)
-            .with_colsample(config.colsample)
-            .with_monotonic_constraints(config.monotonic_constraints.clone())
-            .with_interaction_constraints(interaction_constraints)
-            .with_backend(config.backend_type)
-            .with_gpu_subgroups(config.use_gpu_subgroups)
-            .with_era_splitting(config.era_splitting);
+            .with_learning_rate(config.learning_rate);
 
-        // Trees stored as: [round0_label0, round0_label1, ..., round0_labelN, round1_label0, ...]
-        let mut trees = Vec::with_capacity(config.num_rounds * num_outputs);
+        // VectorTrees: one per round (each leaf has Vec<f32> values)
+        let mut trees: Vec<EnsembleTree> = Vec::with_capacity(config.num_rounds);
 
         // Early stopping state
         let early_stopping_enabled =
@@ -1117,34 +1112,33 @@ impl GBDTModel {
         let mut best_num_rounds = 0;
 
         for round in 0..config.num_rounds {
-            // Train N trees for this round (one per label)
-            for label_idx in 0..num_outputs {
-                // Compute gradients and hessians for this label
-                // For multi-label, each label is independent binary classification
-                for &idx in &train_indices {
+            // Compute gradients and hessians for ALL labels simultaneously
+            for &idx in &train_indices {
+                for label_idx in 0..num_outputs {
                     let target = targets[idx * num_outputs + label_idx];
                     let pred = predictions[idx * num_outputs + label_idx];
                     let (g, h) = loss_fn.gradient_hessian(target, pred);
-                    gradients[idx] = g;
-                    hessians[idx] = h;
+                    gradients[idx * num_outputs + label_idx] = g;
+                    hessians[idx * num_outputs + label_idx] = h;
                 }
-
-                // Grow tree for this label
-                let tree = tree_grower.grow_with_indices(
-                    dataset,
-                    &gradients,
-                    &hessians,
-                    &train_indices,
-                )?;
-
-                // Update predictions for this label
-                for idx in 0..num_rows {
-                    let delta = tree.predict(|f| dataset.get_bin(idx, f));
-                    predictions[idx * num_outputs + label_idx] += delta;
-                }
-
-                trees.push(tree);
             }
+
+            // Grow ONE vector tree for this round (optimizes all labels jointly)
+            let tree = tree_grower.grow_with_indices(
+                dataset,
+                &gradients,
+                &hessians,
+                &train_indices,
+            )?;
+
+            // Update predictions for ALL labels using vector tree
+            tree.predict_batch_add(
+                |sample_idx, feature_idx| dataset.get_bin(sample_idx, feature_idx),
+                num_rows,
+                &mut predictions,
+            );
+
+            trees.push(EnsembleTree::from(tree));
 
             // Early stopping check on validation set
             if early_stopping_enabled {
@@ -1173,9 +1167,9 @@ impl GBDTModel {
                     ) {
                         let keep_rounds = early_stop_keep_count(
                             best_num_rounds,
-                            config.min_early_stopping_trees / num_outputs.max(1),
+                            config.min_early_stopping_trees,
                         );
-                        trees.truncate(keep_rounds * num_outputs);
+                        trees.truncate(keep_rounds);
                         break;
                     }
                 }
@@ -1185,18 +1179,18 @@ impl GBDTModel {
         // Truncate if early stopping finished all rounds but best was earlier
         if early_stopping_enabled
             && best_num_rounds > 0
-            && best_num_rounds * num_outputs < trees.len()
+            && best_num_rounds < trees.len()
         {
             let keep_rounds = early_stop_keep_count(
                 best_num_rounds,
-                config.min_early_stopping_trees / num_outputs.max(1),
+                config.min_early_stopping_trees,
             );
-            trees.truncate(keep_rounds * num_outputs);
+            trees.truncate(keep_rounds);
         }
 
         // Compute column permutation if enabled
         let column_permutation = if config.column_reordering && !trees.is_empty() {
-            let importances = Self::compute_importances_from_trees(&trees, dataset.num_features());
+            let importances = Self::compute_importances_from_ensemble_trees(&trees, dataset.num_features());
             Some(ColumnPermutation::from_importances(&importances))
         } else {
             None
@@ -1214,7 +1208,22 @@ impl GBDTModel {
         })
     }
 
-    /// Compute feature importances from a collection of trees (internal helper)
+    /// Compute feature importances from ensemble trees (handles both scalar and vector)
+    fn compute_importances_from_ensemble_trees(trees: &[EnsembleTree], num_features: usize) -> Vec<f32> {
+        let mut importances = vec![0.0f32; num_features];
+
+        for tree in trees {
+            for (_, feature_idx, hessian_sum) in tree.internal_nodes() {
+                if feature_idx < num_features {
+                    importances[feature_idx] += hessian_sum;
+                }
+            }
+        }
+
+        importances
+    }
+
+    /// Compute feature importances from a collection of scalar trees (internal helper)
     fn compute_importances_from_trees(trees: &[Tree], num_features: usize) -> Vec<f32> {
         let mut importances = vec![0.0f32; num_features];
 

@@ -12,7 +12,7 @@ use std::path::Path;
 
 use crate::booster::GBDTConfig;
 use crate::dataset::{BinnedDataset, ColumnPermutation, FeatureInfo};
-use crate::tree::Tree;
+use crate::tree::{EnsembleTree, Tree, VectorTree};
 use crate::tuner::{ParamValue, TunableModel};
 use crate::Result;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -43,18 +43,19 @@ pub struct GBDTModel {
     ///
     /// ## Storage Order
     ///
-    /// **Regression/Binary**: One tree per round, stored sequentially.
-    /// - `trees[round]` = tree for round `round`
+    /// **Regression/Binary**: One scalar tree per round, stored sequentially.
+    /// - `trees[round]` = `EnsembleTree::Scalar(tree)` for round `round`
     ///
-    /// **Multi-class (K classes)**: K trees per round (one per class), stored round-major.
+    /// **Multi-class (K classes)**: K scalar trees per round (one per class), stored round-major.
     /// - `trees[round * K + class_idx]` = tree for round `round`, class `class_idx`
     /// - Example with 3 classes, 2 rounds: `[r0_c0, r0_c1, r0_c2, r1_c0, r1_c1, r1_c2]`
     ///
-    /// **Multi-label**: One tree per round with vector leaf values.
-    /// - `trees[round]` = tree for round `round` (leaf values are vectors of length N)
+    /// **Multi-label (Unified Vector Tree)**: One vector tree per round.
+    /// - `trees[round]` = `EnsembleTree::Vector(tree)` for round `round`
+    /// - Each leaf contains Vec<f32> of length N (one value per label)
     ///
     /// Total trees = `num_rounds` (regression/binary/multi-label) or `num_rounds * K` (multi-class)
-    pub(super) trees: Vec<Tree>,
+    pub(super) trees: Vec<EnsembleTree>,
 
     /// Number of output dimensions
     ///
@@ -102,8 +103,27 @@ impl GBDTModel {
     }
 
     /// Get trees
-    pub fn trees(&self) -> &[Tree] {
+    pub fn trees(&self) -> &[EnsembleTree] {
         &self.trees
+    }
+
+    /// Get scalar trees (panics if any tree is a vector tree)
+    ///
+    /// For safe access, use `trees()` and check types with `EnsembleTree::is_scalar()`
+    pub fn scalar_trees(&self) -> Vec<&Tree> {
+        self.trees.iter().map(|t| t.as_scalar()).collect()
+    }
+
+    /// Get vector trees (panics if any tree is a scalar tree)
+    ///
+    /// For safe access, use `trees()` and check types with `EnsembleTree::is_vector()`
+    pub fn vector_trees(&self) -> Vec<&VectorTree> {
+        self.trees.iter().map(|t| t.as_vector()).collect()
+    }
+
+    /// Check if this model uses vector trees (unified multi-label)
+    pub fn uses_vector_trees(&self) -> bool {
+        self.trees.first().is_some_and(|t| t.is_vector())
     }
 
     /// Get feature info (for consistent binning during prediction)
@@ -135,7 +155,7 @@ impl GBDTModel {
         self.output_type
     }
 
-    /// Create a GBDTModel from pre-trained components
+    /// Create a GBDTModel from pre-trained scalar trees
     ///
     /// This is useful for combining separately trained models (e.g., per-label
     /// models in LinearThenTree multi-output mode).
@@ -143,7 +163,7 @@ impl GBDTModel {
     /// # Arguments
     /// * `config` - Training configuration
     /// * `base_predictions` - Base predictions per output dimension
-    /// * `trees` - Pre-trained trees
+    /// * `trees` - Pre-trained scalar trees
     /// * `num_outputs` - Number of output dimensions
     /// * `output_type` - Type of output (Regression, Binary, MultiClass, MultiLabel)
     /// * `feature_info` - Feature metadata from training
@@ -155,12 +175,63 @@ impl GBDTModel {
         output_type: OutputType,
         feature_info: Vec<FeatureInfo>,
     ) -> Self {
+        // Convert scalar trees to EnsembleTree
+        let ensemble_trees: Vec<EnsembleTree> = trees.into_iter().map(EnsembleTree::from).collect();
+
+        Self {
+            config,
+            base_predictions,
+            trees: ensemble_trees,
+            num_outputs,
+            output_type,
+            conformal_q: None,
+            feature_info,
+            column_permutation: None,
+        }
+    }
+
+    /// Create a GBDTModel from pre-trained ensemble trees
+    ///
+    /// Use this when you have a mix of scalar and vector trees, or when
+    /// working with the unified multi-label approach (VectorTree per round).
+    pub fn from_ensemble_trees(
+        config: GBDTConfig,
+        base_predictions: Vec<f32>,
+        trees: Vec<EnsembleTree>,
+        num_outputs: usize,
+        output_type: OutputType,
+        feature_info: Vec<FeatureInfo>,
+    ) -> Self {
         Self {
             config,
             base_predictions,
             trees,
             num_outputs,
             output_type,
+            conformal_q: None,
+            feature_info,
+            column_permutation: None,
+        }
+    }
+
+    /// Create a GBDTModel from vector trees (unified multi-label)
+    ///
+    /// Each vector tree has leaves with Vec<f32> values (one per label).
+    pub fn from_vector_trees(
+        config: GBDTConfig,
+        base_predictions: Vec<f32>,
+        trees: Vec<VectorTree>,
+        num_outputs: usize,
+        feature_info: Vec<FeatureInfo>,
+    ) -> Self {
+        let ensemble_trees: Vec<EnsembleTree> = trees.into_iter().map(EnsembleTree::from).collect();
+
+        Self {
+            config,
+            base_predictions,
+            trees: ensemble_trees,
+            num_outputs,
+            output_type: OutputType::MultiLabel,
             conformal_q: None,
             feature_info,
             column_permutation: None,

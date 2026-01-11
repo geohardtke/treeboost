@@ -16,7 +16,7 @@ impl GBDTModel {
     pub fn predict_row(&self, dataset: &BinnedDataset, row_idx: usize) -> f32 {
         let mut pred = self.base_predictions[0];
         for tree in &self.trees {
-            pred += tree.predict_row(dataset, row_idx);
+            pred += tree.as_scalar().predict_row(dataset, row_idx);
         }
         pred
     }
@@ -47,7 +47,7 @@ impl GBDTModel {
 
         // Tree-wise: traverse each tree for all rows
         for tree in &self.trees {
-            tree.predict_batch_add(dataset, &mut predictions);
+            tree.as_scalar().predict_batch_add(dataset, &mut predictions);
         }
 
         predictions
@@ -81,9 +81,10 @@ impl GBDTModel {
 
                 // For each tree, process this chunk of rows
                 for tree in &self.trees {
+                    let scalar_tree = tree.as_scalar();
                     for (i, pred) in chunk.iter_mut().enumerate() {
                         let row_idx = start_row + i;
-                        *pred += tree.predict(|f| dataset.get_bin(row_idx, f));
+                        *pred += scalar_tree.predict(|f| dataset.get_bin(row_idx, f));
                     }
                 }
             });
@@ -109,7 +110,7 @@ impl GBDTModel {
             // Traverse all trees with cached bins
             let mut pred = self.base_predictions[0];
             for tree in &self.trees {
-                pred += tree.predict(|f| row_bins[f]);
+                pred += tree.as_scalar().predict(|f| row_bins[f]);
             }
             predictions.push(pred);
         }
@@ -197,8 +198,9 @@ impl GBDTModel {
 
     /// Predict raw scores for multi-label classification
     ///
-    /// Returns raw predictions for each label (before sigmoid).
-    /// Trees are stored round-major: `[r0_l0, r0_l1, ..., r0_lN, r1_l0, ...]`
+    /// Supports two storage modes:
+    /// - **Vector Trees (new)**: One VectorTree per round, each leaf has Vec<f32> values
+    /// - **Scalar Trees (legacy)**: N scalar trees per round, stored round-major
     ///
     /// # Returns
     /// Vector of vectors: `result[sample][label]`
@@ -208,6 +210,46 @@ impl GBDTModel {
             return self.predict(dataset).into_iter().map(|p| vec![p]).collect();
         }
 
+        // Check if we're using unified vector trees or legacy scalar trees
+        if self.uses_vector_trees() {
+            self.predict_multilabel_vector(dataset)
+        } else {
+            self.predict_multilabel_scalar(dataset)
+        }
+    }
+
+    /// Predict using unified vector trees (new approach)
+    ///
+    /// Each tree contributes to all labels simultaneously.
+    fn predict_multilabel_vector(&self, dataset: &BinnedDataset) -> Vec<Vec<f32>> {
+        let num_rows = dataset.num_rows();
+        let num_outputs = self.num_outputs();
+
+        // Initialize with base predictions (flat layout: row-major)
+        let mut raw_preds: Vec<f32> = Vec::with_capacity(num_rows * num_outputs);
+        for _ in 0..num_rows {
+            raw_preds.extend_from_slice(&self.base_predictions);
+        }
+
+        // Add vector tree contributions
+        for tree in &self.trees {
+            let vector_tree = tree.as_vector();
+            vector_tree.predict_batch_add(
+                |sample_idx, feature_idx| dataset.get_bin(sample_idx, feature_idx),
+                num_rows,
+                &mut raw_preds,
+            );
+        }
+
+        // Convert to Vec<Vec<f32>>
+        raw_preds
+            .chunks_exact(num_outputs)
+            .map(|chunk| chunk.to_vec())
+            .collect()
+    }
+
+    /// Predict using legacy scalar trees (one tree per label per round)
+    fn predict_multilabel_scalar(&self, dataset: &BinnedDataset) -> Vec<Vec<f32>> {
         let num_rows = dataset.num_rows();
         let num_outputs = self.num_outputs();
         let num_rounds = self.trees.len() / num_outputs;
@@ -222,7 +264,7 @@ impl GBDTModel {
         for round in 0..num_rounds {
             for label_idx in 0..num_outputs {
                 let tree_idx = round * num_outputs + label_idx;
-                let tree = &self.trees[tree_idx];
+                let tree = self.trees[tree_idx].as_scalar();
 
                 for row_idx in 0..num_rows {
                     let delta = tree.predict(|f| dataset.get_bin(row_idx, f));
@@ -232,13 +274,10 @@ impl GBDTModel {
         }
 
         // Convert to Vec<Vec<f32>>
-        let mut result = Vec::with_capacity(num_rows);
-        for row_idx in 0..num_rows {
-            let row_preds = &raw_preds[row_idx * num_outputs..(row_idx + 1) * num_outputs];
-            result.push(row_preds.to_vec());
-        }
-
-        result
+        raw_preds
+            .chunks_exact(num_outputs)
+            .map(|chunk| chunk.to_vec())
+            .collect()
     }
 
     /// Predict probabilities for multi-label classification
@@ -332,6 +371,45 @@ impl GBDTModel {
             return self.predict_raw(features).into_iter().map(|p| vec![p]).collect();
         }
 
+        // Check if we're using unified vector trees or legacy scalar trees
+        if self.uses_vector_trees() {
+            self.predict_multilabel_vector_raw(features)
+        } else {
+            self.predict_multilabel_scalar_raw(features)
+        }
+    }
+
+    /// Predict using unified vector trees with raw features
+    fn predict_multilabel_vector_raw(&self, features: &[f64]) -> Vec<Vec<f32>> {
+        let num_features = self.num_features();
+        if num_features == 0 {
+            return vec![];
+        }
+
+        let num_rows = features.len() / num_features;
+        let num_outputs = self.num_outputs();
+
+        // Initialize with base predictions
+        let mut raw_preds: Vec<f32> = Vec::with_capacity(num_rows * num_outputs);
+        for _ in 0..num_rows {
+            raw_preds.extend_from_slice(&self.base_predictions);
+        }
+
+        // Add vector tree contributions
+        for tree in &self.trees {
+            let vector_tree = tree.as_vector();
+            vector_tree.predict_batch_add_raw(features, num_features, &mut raw_preds);
+        }
+
+        // Convert to Vec<Vec<f32>>
+        raw_preds
+            .chunks_exact(num_outputs)
+            .map(|chunk| chunk.to_vec())
+            .collect()
+    }
+
+    /// Predict using legacy scalar trees with raw features
+    fn predict_multilabel_scalar_raw(&self, features: &[f64]) -> Vec<Vec<f32>> {
         let num_features = self.num_features();
         if num_features == 0 {
             return vec![];
@@ -351,7 +429,7 @@ impl GBDTModel {
         for round in 0..num_rounds {
             for label_idx in 0..num_outputs {
                 let tree_idx = round * num_outputs + label_idx;
-                let tree = &self.trees[tree_idx];
+                let tree = self.trees[tree_idx].as_scalar();
 
                 for row_idx in 0..num_rows {
                     let row_offset = row_idx * num_features;
@@ -362,13 +440,10 @@ impl GBDTModel {
         }
 
         // Convert to Vec<Vec<f32>>
-        let mut result = Vec::with_capacity(num_rows);
-        for row_idx in 0..num_rows {
-            let row_preds = &raw_preds[row_idx * num_outputs..(row_idx + 1) * num_outputs];
-            result.push(row_preds.to_vec());
-        }
-
-        result
+        raw_preds
+            .chunks_exact(num_outputs)
+            .map(|chunk| chunk.to_vec())
+            .collect()
     }
 
     /// Predict probabilities from raw features for multi-label classification
