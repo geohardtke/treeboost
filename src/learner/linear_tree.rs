@@ -60,11 +60,16 @@ impl Default for LinearTreeConfig {
         Self {
             tree_config: TreeConfig::default()
                 .with_max_depth(linear_tree_defaults::LINEAR_TREE_MAX_DEPTH) // Shallower trees since leaves are more expressive
+                .expect("valid max_depth")
                 .with_max_leaves(linear_tree_defaults::LINEAR_TREE_MAX_LEAVES)
-                .with_min_samples_leaf(linear_tree_defaults::LINEAR_TREE_MIN_SAMPLES_LEAF), // Need enough samples for linear fit
+                .expect("valid max_leaves")
+                .with_min_samples_leaf(linear_tree_defaults::LINEAR_TREE_MIN_SAMPLES_LEAF) // Need enough samples for linear fit
+                .expect("valid min_samples_leaf"),
             linear_config: LinearConfig::default()
                 .with_lambda(linear_tree_defaults::LINEAR_TREE_LAMBDA)
-                .with_max_iter(linear_tree_defaults::LINEAR_TREE_MAX_ITER),
+                .expect("valid lambda")
+                .with_max_iter(linear_tree_defaults::LINEAR_TREE_MAX_ITER)
+                .expect("valid max_iter"),
             min_samples_for_linear: linear_tree_defaults::MIN_SAMPLES_FOR_LINEAR,
         }
     }
@@ -649,7 +654,7 @@ mod tests {
     fn test_linear_tree_config_builder() {
         let config = LinearTreeConfig::new()
             .with_min_samples_for_linear(20)
-            .with_tree_config(TreeConfig::default().with_max_depth(3));
+            .with_tree_config(TreeConfig::default().with_max_depth(3).expect("valid max_depth"));
 
         assert_eq!(config.min_samples_for_linear, 20);
         assert_eq!(config.tree_config.max_depth, 3);

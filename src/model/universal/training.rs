@@ -588,7 +588,7 @@ impl UniversalModel {
         let base_prediction = loss_fn.initial_prediction(targets);
 
         // RF uses learning_rate = 1.0 (each tree contributes fully)
-        let tree_config = config.tree_config.clone().with_learning_rate(1.0);
+        let tree_config = config.tree_config.clone().with_learning_rate(1.0)?;
 
         // Train trees in parallel with bootstrap samples
         let trees: Vec<Tree> = (0..config.num_rounds)

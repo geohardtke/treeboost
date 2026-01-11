@@ -465,15 +465,15 @@ mod tests {
     }
 
     #[test]
-    fn test_booster_linear_fit_predict() {
+    fn test_booster_linear_fit_predict() -> Result<()> {
         let features = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let gradients = vec![-3.0, -5.0, -7.0, -9.0, -11.0];
         let hessians = vec![1.0; 5];
 
         let config = LinearConfig::default()
-            .with_lambda(0.01)
-            .with_shrinkage_factor(0.5)
-            .with_max_iter(100);
+            .with_lambda(0.01)?
+            .with_shrinkage_factor(0.5)?
+            .with_max_iter(100)?;
 
         let mut booster = Booster::linear(1, config);
         booster
@@ -483,6 +483,7 @@ mod tests {
         let predictions = booster.predict_linear(&features, 1);
         assert_eq!(predictions.len(), 5);
         assert!(predictions.iter().all(|p| p.is_finite()));
+        Ok(())
     }
 
     #[test]

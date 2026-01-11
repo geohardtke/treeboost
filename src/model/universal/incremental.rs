@@ -202,7 +202,7 @@ impl UniversalModel {
         let targets = dataset.targets();
 
         // RF trees are trained on bootstrap samples from base prediction
-        let tree_config = self.config.tree_config.clone().with_learning_rate(1.0);
+        let tree_config = self.config.tree_config.clone().with_learning_rate(1.0)?;
 
         // Use next seed offset based on current tree count
         let seed_offset_start = self.trees.len() as u64;

@@ -47,10 +47,10 @@ pub(super) fn tune_hyperparameters(
                 // Use stronger regularization for stability
                 let linear_config = LinearConfig::default()
                     .with_preset(crate::learner::LinearPreset::Ridge)
-                    .with_lambda(1.0)
-                    .with_shrinkage_factor(0.5)
-                    .with_max_iter(200);
-                let tree_config = TreeConfig::default().with_max_depth(3);
+                    .with_lambda(1.0)?
+                    .with_shrinkage_factor(0.5)?
+                    .with_max_iter(200)?;
+                let tree_config = TreeConfig::default().with_max_depth(3)?;
                 let univ_config = UniversalConfig::default()
                     .with_mode(mode)
                     .with_linear_config(linear_config)
@@ -169,11 +169,14 @@ fn tune_tree_model(
             .with_min_samples_leaf(5)
             .with_seed(42)
             .with_backend(backend_type),
-        TaskType::MultiClassification { num_classes } => GBDTConfig::new()
-            .with_multiclass_logloss(*num_classes)?
-            .with_min_samples_leaf(5)
-            .with_seed(42)
-            .with_backend(backend_type),
+        TaskType::MultiClassification { num_classes } => {
+            let cfg = GBDTConfig::new()
+                .with_multiclass_logloss(*num_classes)?
+                .with_min_samples_leaf(5)
+                .with_seed(42)
+                .with_backend(backend_type);
+            cfg
+        }
     };
 
     // Determine task type:
@@ -246,8 +249,8 @@ fn tune_tree_model(
 
     // Convert GBDT config to UniversalConfig
     let tree_config = TreeConfig::default()
-        .with_max_depth(best_gbdt_config.max_depth)
-        .with_lambda(best_gbdt_config.lambda)
+        .with_max_depth(best_gbdt_config.max_depth)?
+        .with_lambda(best_gbdt_config.lambda)?
         .with_entropy_weight(best_gbdt_config.entropy_weight);
 
     let universal_config = UniversalConfig::default()
@@ -333,7 +336,7 @@ fn tune_ltt(
     let result = tuner.tune(&features, num_features, &targets)?;
 
     // Build UniversalConfig from tuning result
-    let tree_config = TreeConfig::default().with_max_depth(result.tree_params.max_depth as usize);
+    let tree_config = TreeConfig::default().with_max_depth(result.tree_params.max_depth as usize)?;
 
     let univ_config = UniversalConfig::default()
         .with_mode(BoostingMode::LinearThenTree)
@@ -403,7 +406,9 @@ pub(super) fn create_config_for_mode(
         TuningLevel::None => (100, 0.1, 6),
     };
 
-    let tree_config = TreeConfig::default().with_max_depth(max_depth);
+    let tree_config = TreeConfig::default()
+        .with_max_depth(max_depth)
+        .expect("hardcoded max_depth values are valid");
 
     UniversalConfig::default()
         .with_mode(mode)

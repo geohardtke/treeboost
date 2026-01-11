@@ -79,10 +79,10 @@ pub fn run_linear_probe(
 
     // Configure linear booster for quick probe
     let linear_config = LinearConfig::default()
-        .with_lambda(1.0) // Ridge regularization
-        .with_l1_ratio(0.0) // Pure L2
-        .with_max_iter(max_iter)
-        .with_tol(1e-4);
+        .with_lambda(1.0)? // Ridge regularization
+        .with_l1_ratio(0.0)? // Pure L2
+        .with_max_iter(max_iter)?
+        .with_tol(1e-4)?;
 
     let mut linear = LinearBooster::new(num_features, linear_config);
 
@@ -172,10 +172,10 @@ pub fn run_tree_probe(
 
     // Configure shallow tree
     let tree_config = TreeConfig::default()
-        .with_max_depth(max_depth)
-        .with_max_leaves(2_usize.pow(max_depth as u32))
-        .with_learning_rate(1.0) // Full step for probe
-        .with_lambda(1.0);
+        .with_max_depth(max_depth)?
+        .with_max_leaves(2_usize.pow(max_depth as u32))?
+        .with_learning_rate(1.0)? // Full step for probe
+        .with_lambda(1.0)?;
 
     let mut tree_booster = TreeBooster::new(tree_config);
 

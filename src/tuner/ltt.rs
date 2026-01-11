@@ -92,9 +92,13 @@ impl LinearHyperparams {
     pub fn to_config(&self) -> LinearConfig {
         LinearConfig::default()
             .with_lambda(self.lambda)
+            .expect("tuned lambda is valid")
             .with_l1_ratio(self.l1_ratio)
+            .expect("tuned l1_ratio is valid")
             .with_shrinkage_factor(self.shrinkage_factor)
+            .expect("tuned shrinkage_factor is valid")
             .with_extrapolation_damping(self.extrapolation_damping)
+            .expect("tuned extrapolation_damping is valid")
     }
 
     /// Apply a preset configuration.
@@ -756,8 +760,8 @@ impl LttTuner {
         for &lambda in &self.config.lambda_values {
             for &l1_ratio in &self.config.l1_ratio_values {
                 let config = LinearConfig::default()
-                    .with_lambda(lambda)
-                    .with_l1_ratio(l1_ratio);
+                    .with_lambda(lambda)?
+                    .with_l1_ratio(l1_ratio)?;
 
                 let eval_result = Self::evaluate_linear_config(config, split)?;
 
@@ -1101,10 +1105,10 @@ impl LttTuner {
 
         for &damping in &self.config.extrapolation_damping_values {
             let config = LinearConfig::default()
-                .with_lambda(linear_params.lambda)
-                .with_l1_ratio(linear_params.l1_ratio)
-                .with_shrinkage_factor(linear_params.shrinkage_factor)
-                .with_extrapolation_damping(damping);
+                .with_lambda(linear_params.lambda)?
+                .with_l1_ratio(linear_params.l1_ratio)?
+                .with_shrinkage_factor(linear_params.shrinkage_factor)?
+                .with_extrapolation_damping(damping)?;
 
             let eval_result = Self::evaluate_linear_config(config, split)?;
 
