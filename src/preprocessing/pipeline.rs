@@ -332,9 +332,19 @@ impl Preprocessor {
                 inst.fit_numerical(data, num_features)?;
                 self.sync_custom_state()
             }
-            _ => Err(TreeBoostError::Config(
-                "fit_numerical not supported for categorical encoders".into(),
-            )),
+            _ => {
+                let preprocessor_name = match self {
+                    Preprocessor::Frequency(_) => "FrequencyEncoder",
+                    Preprocessor::Label(_) => "LabelEncoder",
+                    Preprocessor::OneHot(_) => "OneHotEncoder",
+                    _ => "unknown preprocessor",
+                };
+                Err(TreeBoostError::Config(format!(
+                    "Cannot call fit_numerical() on {}. Categorical encoders require fit_categorical() instead. \
+                     Use fit_categorical() for string/category data, or fit_numerical() for numerical scalers.",
+                    preprocessor_name
+                )))
+            }
         }
     }
 
@@ -361,9 +371,19 @@ impl Preprocessor {
                 })?;
                 inst.transform_numerical(data, num_features)
             }
-            _ => Err(TreeBoostError::Config(
-                "transform_numerical not supported for categorical encoders".into(),
-            )),
+            _ => {
+                let preprocessor_name = match self {
+                    Preprocessor::Frequency(_) => "FrequencyEncoder",
+                    Preprocessor::Label(_) => "LabelEncoder",
+                    Preprocessor::OneHot(_) => "OneHotEncoder",
+                    _ => "unknown preprocessor",
+                };
+                Err(TreeBoostError::Config(format!(
+                    "Cannot call transform_numerical() on {}. Categorical encoders require transform_categorical() instead. \
+                     Use transform_categorical() for string/category data, or transform_numerical() for numerical scalers.",
+                    preprocessor_name
+                )))
+            }
         }
     }
 
@@ -411,9 +431,21 @@ impl Preprocessor {
                 inst.fit_categorical(&cats)?;
                 self.sync_custom_state()
             }
-            _ => Err(TreeBoostError::Config(
-                "fit_categorical not supported for numerical scalers".into(),
-            )),
+            _ => {
+                let preprocessor_name = match self {
+                    Preprocessor::Standard(_) => "StandardScaler",
+                    Preprocessor::MinMax(_) => "MinMaxScaler",
+                    Preprocessor::Robust(_) => "RobustScaler",
+                    Preprocessor::Imputer(_) => "SimpleImputer",
+                    Preprocessor::YeoJohnson(_) => "YeoJohnsonTransform",
+                    _ => "unknown preprocessor",
+                };
+                Err(TreeBoostError::Config(format!(
+                    "Cannot call fit_categorical() on {}. Numerical preprocessors require fit_numerical() instead. \
+                     Use fit_numerical() for numerical data, or fit_categorical() for categorical encoders.",
+                    preprocessor_name
+                )))
+            }
         }
     }
 
@@ -438,9 +470,21 @@ impl Preprocessor {
                 let cats: Vec<&str> = categories.iter().map(|s| s.as_ref()).collect();
                 inst.transform_categorical(&cats)
             }
-            _ => Err(TreeBoostError::Config(
-                "transform_categorical not supported for numerical scalers".into(),
-            )),
+            _ => {
+                let preprocessor_name = match self {
+                    Preprocessor::Standard(_) => "StandardScaler",
+                    Preprocessor::MinMax(_) => "MinMaxScaler",
+                    Preprocessor::Robust(_) => "RobustScaler",
+                    Preprocessor::Imputer(_) => "SimpleImputer",
+                    Preprocessor::YeoJohnson(_) => "YeoJohnsonTransform",
+                    _ => "unknown preprocessor",
+                };
+                Err(TreeBoostError::Config(format!(
+                    "Cannot call transform_categorical() on {}. Numerical preprocessors require transform_numerical() instead. \
+                     Use transform_numerical() for numerical data, or transform_categorical() for categorical encoders.",
+                    preprocessor_name
+                )))
+            }
         }
     }
 
@@ -855,7 +899,10 @@ mod tests {
 
         fn fit_numerical(&mut self, data: &[f32], _num_features: usize) -> crate::Result<()> {
             if data.is_empty() {
-                return Err(crate::TreeBoostError::Config("Empty data".into()));
+                return Err(crate::TreeBoostError::Config(
+                    "DummyPreprocessor::fit_numerical() received empty data. Provide at least 1 data point."
+                        .into(),
+                ));
             }
             self.mean = data.iter().sum::<f32>() / data.len() as f32;
             self.fitted = true;
@@ -864,7 +911,10 @@ mod tests {
 
         fn transform_numerical(&self, data: &mut [f32], _num_features: usize) -> crate::Result<()> {
             if !self.fitted {
-                return Err(crate::TreeBoostError::Config("Not fitted".into()));
+                return Err(crate::TreeBoostError::Config(
+                    "DummyPreprocessor not fitted. Call fit_numerical() first to learn mean."
+                        .into(),
+                ));
             }
             for x in data.iter_mut() {
                 *x -= self.mean;
@@ -882,15 +932,22 @@ mod tests {
 
         fn deserialize_state(&mut self, data: &[u8]) -> crate::Result<()> {
             let s = std::str::from_utf8(data)
-                .map_err(|e| crate::TreeBoostError::Serialization(e.to_string()))?;
+                .map_err(|e| crate::TreeBoostError::Serialization(format!(
+                    "DummyPreprocessor::deserialize_state() failed to decode UTF-8: {}",
+                    e
+                )))?;
             let parts: Vec<&str> = s.split('|').collect();
             if parts.len() != 2 {
-                return Err(crate::TreeBoostError::Serialization(
-                    "Invalid format".into(),
-                ));
+                return Err(crate::TreeBoostError::Serialization(format!(
+                    "DummyPreprocessor::deserialize_state() invalid format: expected 'mean|fitted', got {} parts",
+                    parts.len()
+                )));
             }
             self.mean = parts[0].parse().map_err(|e: std::num::ParseFloatError| {
-                crate::TreeBoostError::Serialization(e.to_string())
+                crate::TreeBoostError::Serialization(format!(
+                    "DummyPreprocessor::deserialize_state() failed to parse mean: {}",
+                    e
+                ))
             })?;
             self.fitted = parts[1] == "true";
             Ok(())

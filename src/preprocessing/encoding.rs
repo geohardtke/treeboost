@@ -148,7 +148,8 @@ impl FrequencyEncoder {
     pub fn transform(&self, categories: &[impl AsRef<str>]) -> Result<Vec<f32>> {
         if !self.fitted {
             return Err(TreeBoostError::Data(
-                "FrequencyEncoder not fitted. Call fit() first.".into(),
+                "FrequencyEncoder::transform() called before fitting. Call fit() first to learn category frequencies."
+                    .into(),
             ));
         }
 
@@ -159,7 +160,10 @@ impl FrequencyEncoder {
                 Some(value) => result.push(value),
                 None => {
                     return Err(TreeBoostError::Data(format!(
-                        "Unknown category '{}' at index {} and no unknown_value set",
+                        "FrequencyEncoder::transform() encountered unknown category '{}' at index {}. \
+                         This category was not seen during fit(). Either: \
+                         (1) Ensure all categories are present in training data, or \
+                         (2) Use with_unknown_value() to specify a default frequency for unseen categories.",
                         cat.as_ref(),
                         i
                     )));
@@ -310,7 +314,8 @@ impl LabelEncoder {
     pub fn transform(&self, categories: &[impl AsRef<str>]) -> Result<Vec<u32>> {
         if !self.fitted {
             return Err(TreeBoostError::Data(
-                "LabelEncoder not fitted. Call fit() first.".into(),
+                "LabelEncoder::transform() called before fitting. Call fit() first to learn category mappings."
+                    .into(),
             ));
         }
 
@@ -321,7 +326,10 @@ impl LabelEncoder {
                 Some(label) => result.push(label),
                 None => {
                     return Err(TreeBoostError::Data(format!(
-                        "Unknown category '{}' at index {} and no unknown_label set",
+                        "LabelEncoder::transform() encountered unknown category '{}' at index {}. \
+                         This category was not seen during fit(). Either: \
+                         (1) Ensure all categories are present in training data, or \
+                         (2) Use with_unknown_label() to specify a default label for unseen categories.",
                         cat.as_ref(),
                         i
                     )));
@@ -348,7 +356,8 @@ impl LabelEncoder {
     pub fn inverse_transform(&self, labels: &[u32]) -> Result<Vec<String>> {
         if !self.fitted {
             return Err(TreeBoostError::Data(
-                "LabelEncoder not fitted. Call fit() first.".into(),
+                "LabelEncoder::inverse_transform() called before fitting. Call fit() first to learn category mappings."
+                    .into(),
             ));
         }
 
@@ -359,8 +368,9 @@ impl LabelEncoder {
                 result.push(self.inverse_mapping[label as usize].clone());
             } else {
                 return Err(TreeBoostError::Data(format!(
-                    "Unknown label {} at index {}",
-                    label, i
+                    "LabelEncoder::inverse_transform() encountered invalid label {} at index {}. \
+                     Valid label range is [0, {}). This indicates a data corruption or mismatch.",
+                    label, i, self.inverse_mapping.len()
                 )));
             }
         }
@@ -573,7 +583,8 @@ impl OneHotEncoder {
     pub fn transform_single(&self, category: &str) -> Result<Vec<f32>> {
         if !self.fitted {
             return Err(TreeBoostError::Data(
-                "OneHotEncoder not fitted. Call fit() first.".into(),
+                "OneHotEncoder::transform_single() called before fitting. Call fit() first to learn category mappings."
+                    .into(),
             ));
         }
 
@@ -600,7 +611,10 @@ impl OneHotEncoder {
                     }
                     UnknownStrategy::Error => {
                         return Err(TreeBoostError::Data(format!(
-                            "Unknown category '{}'",
+                            "OneHotEncoder::transform_single() encountered unknown category '{}'. \
+                             This category was not seen during fit(). Either: \
+                             (1) Ensure all categories are present in training data, or \
+                             (2) Use .with_unknown_strategy(UnknownStrategy::AllZeros) to encode unknown categories as zeros.",
                             category
                         )));
                     }
@@ -617,7 +631,8 @@ impl OneHotEncoder {
     pub fn transform(&self, categories: &[impl AsRef<str>]) -> Result<Vec<f32>> {
         if !self.fitted {
             return Err(TreeBoostError::Data(
-                "OneHotEncoder not fitted. Call fit() first.".into(),
+                "OneHotEncoder::transform() called before fitting. Call fit() first to learn category mappings."
+                    .into(),
             ));
         }
 

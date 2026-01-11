@@ -110,13 +110,17 @@ impl SimpleImputer {
     /// Data is in row-major format: `data[row * num_features + col]`
     pub fn fit(&mut self, data: &[f32], num_features: usize) -> Result<()> {
         if data.is_empty() {
-            return Err(TreeBoostError::Data("Cannot fit on empty data".into()));
+            return Err(TreeBoostError::Data(
+                "SimpleImputer::fit() received empty data. Provide at least 1 data point."
+                    .into(),
+            ));
         }
 
         let num_rows = data.len() / num_features;
         if data.len() != num_rows * num_features {
             return Err(TreeBoostError::Data(format!(
-                "Data length {} is not divisible by num_features {}",
+                "SimpleImputer::fit() received invalid data layout: {} elements not divisible by {} features. \
+                 Ensure data is row-major: num_rows × num_features.",
                 data.len(),
                 num_features
             )));
@@ -156,13 +160,15 @@ impl SimpleImputer {
     pub fn transform(&self, data: &mut [f32], num_features: usize) -> Result<()> {
         if !self.fitted {
             return Err(TreeBoostError::Config(
-                "SimpleImputer not fitted. Call fit() first.".into(),
+                "SimpleImputer::transform() called before fitting. Call fit() first to learn fill values."
+                    .into(),
             ));
         }
 
         if self.fill_values.len() != num_features {
             return Err(TreeBoostError::Config(format!(
-                "Feature count mismatch: fitted with {} features, got {}",
+                "SimpleImputer::transform() feature count mismatch: fitted with {} features, but transform() called with {} features. \
+                 Ensure transform data has same feature count as training data.",
                 self.fill_values.len(),
                 num_features
             )));
@@ -521,7 +527,12 @@ mod tests {
 
         let result = imputer.transform(&mut data, 2);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not fitted"));
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("fit") && err_msg.contains("SimpleImputer"),
+            "Expected error message to mention fitting and component name, got: {}",
+            err_msg
+        );
     }
 
     #[test]
