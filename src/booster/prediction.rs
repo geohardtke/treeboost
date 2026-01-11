@@ -14,7 +14,7 @@ use rayon::prelude::*;
 impl GBDTModel {
     /// Predict for a single row
     pub fn predict_row(&self, dataset: &BinnedDataset, row_idx: usize) -> f32 {
-        let mut pred = self.base_prediction;
+        let mut pred = self.base_predictions[0];
         for tree in &self.trees {
             pred += tree.predict_row(dataset, row_idx);
         }
@@ -43,7 +43,7 @@ impl GBDTModel {
         let num_rows = dataset.num_rows();
 
         // Initialize predictions with base value
-        let mut predictions = vec![self.base_prediction; num_rows];
+        let mut predictions = vec![self.base_predictions[0]; num_rows];
 
         // Tree-wise: traverse each tree for all rows
         for tree in &self.trees {
@@ -66,7 +66,7 @@ impl GBDTModel {
         }
 
         // Initialize predictions with base value
-        let mut predictions = vec![self.base_prediction; num_rows];
+        let mut predictions = vec![self.base_predictions[0]; num_rows];
 
         // Determine chunk size for parallelism (target ~4 chunks per thread)
         let num_threads = rayon::current_num_threads();
@@ -107,7 +107,7 @@ impl GBDTModel {
             }
 
             // Traverse all trees with cached bins
-            let mut pred = self.base_prediction;
+            let mut pred = self.base_predictions[0];
             for tree in &self.trees {
                 pred += tree.predict(|f| row_bins[f]);
             }
@@ -173,10 +173,8 @@ impl GBDTModel {
     // ============================================================================
 
     /// Check if this is a multi-class model
-    #[allow(deprecated)]
     pub fn is_multiclass(&self) -> bool {
         matches!(self.output_type(), crate::booster::OutputType::MultiClass)
-            || self.num_classes > 0
     }
 
     /// Check if this is a multi-label model
@@ -185,12 +183,11 @@ impl GBDTModel {
     }
 
     /// Get number of classes (0 for regression/binary/multi-label)
-    #[allow(deprecated)]
     pub fn get_num_classes(&self) -> usize {
         if matches!(self.output_type(), crate::booster::OutputType::MultiClass) {
             self.num_outputs()
         } else {
-            self.num_classes
+            0
         }
     }
 
@@ -409,7 +406,7 @@ impl GBDTModel {
     /// # Returns
     /// Vector of probability vectors: `result[sample][class]`
     pub fn predict_proba_multiclass(&self, dataset: &BinnedDataset) -> Vec<Vec<f32>> {
-        if self.num_classes == 0 {
+        if !matches!(self.output_type(), crate::booster::OutputType::MultiClass) {
             // Not a multi-class model, fall back to binary
             return self
                 .predict_proba(dataset)
@@ -419,13 +416,13 @@ impl GBDTModel {
         }
 
         let num_rows = dataset.num_rows();
-        let num_classes = self.num_classes;
+        let num_classes = self.num_outputs();
         let num_rounds = self.trees.len() / num_classes;
 
         // Initialize raw predictions with base values
         let mut raw_preds: Vec<f32> = Vec::with_capacity(num_rows * num_classes);
         for _ in 0..num_rows {
-            raw_preds.extend_from_slice(&self.base_predictions_multiclass);
+            raw_preds.extend_from_slice(&self.base_predictions);
         }
 
         // Add tree predictions
@@ -478,19 +475,19 @@ impl GBDTModel {
     /// Returns raw predictions for each class (not probabilities).
     /// Shape: `result[sample][class]`
     pub fn predict_raw_multiclass(&self, dataset: &BinnedDataset) -> Vec<Vec<f32>> {
-        if self.num_classes == 0 {
+        if !matches!(self.output_type(), crate::booster::OutputType::MultiClass) {
             // Not a multi-class model
             return self.predict(dataset).into_iter().map(|p| vec![p]).collect();
         }
 
         let num_rows = dataset.num_rows();
-        let num_classes = self.num_classes;
+        let num_classes = self.num_outputs();
         let num_rounds = self.trees.len() / num_classes;
 
         // Initialize raw predictions with base values
         let mut raw_preds: Vec<f32> = Vec::with_capacity(num_rows * num_classes);
         for _ in 0..num_rows {
-            raw_preds.extend_from_slice(&self.base_predictions_multiclass);
+            raw_preds.extend_from_slice(&self.base_predictions);
         }
 
         // Add tree predictions
@@ -553,7 +550,7 @@ impl GBDTModel {
         let num_rows = features.len() / num_features;
 
         // Initialize predictions with base value
-        let mut predictions = vec![self.base_prediction; num_rows];
+        let mut predictions = vec![self.base_predictions[0]; num_rows];
 
         // Tree-wise: traverse each tree for all rows
         for tree in &self.trees {
@@ -573,7 +570,7 @@ impl GBDTModel {
         }
 
         // Initialize predictions with base value
-        let mut predictions = vec![self.base_prediction; num_rows];
+        let mut predictions = vec![self.base_predictions[0]; num_rows];
 
         // Determine chunk size for parallelism
         let num_threads = rayon::current_num_threads();
@@ -649,7 +646,7 @@ impl GBDTModel {
     /// # Returns
     /// Vector of probability vectors: `result[sample][class]`
     pub fn predict_proba_multiclass_raw(&self, features: &[f64]) -> Vec<Vec<f32>> {
-        if self.num_classes == 0 {
+        if !matches!(self.output_type(), crate::booster::OutputType::MultiClass) {
             // Not a multi-class model, fall back to binary
             return self
                 .predict_proba_raw(features)
@@ -664,13 +661,13 @@ impl GBDTModel {
         }
 
         let num_rows = features.len() / num_features;
-        let num_classes = self.num_classes;
+        let num_classes = self.num_outputs();
         let num_rounds = self.trees.len() / num_classes;
 
         // Initialize raw predictions with base values
         let mut raw_preds: Vec<f32> = Vec::with_capacity(num_rows * num_classes);
         for _ in 0..num_rows {
-            raw_preds.extend_from_slice(&self.base_predictions_multiclass);
+            raw_preds.extend_from_slice(&self.base_predictions);
         }
 
         // Add tree predictions
@@ -732,7 +729,7 @@ impl GBDTModel {
     /// # Returns
     /// Vector of raw score vectors: `result[sample][class]`
     pub fn predict_raw_multiclass_raw(&self, features: &[f64]) -> Vec<Vec<f32>> {
-        if self.num_classes == 0 {
+        if !matches!(self.output_type(), crate::booster::OutputType::MultiClass) {
             // Not a multi-class model
             return self
                 .predict_raw(features)
@@ -747,13 +744,13 @@ impl GBDTModel {
         }
 
         let num_rows = features.len() / num_features;
-        let num_classes = self.num_classes;
+        let num_classes = self.num_outputs();
         let num_rounds = self.trees.len() / num_classes;
 
         // Initialize raw predictions with base values
         let mut raw_preds: Vec<f32> = Vec::with_capacity(num_rows * num_classes);
         for _ in 0..num_rows {
-            raw_preds.extend_from_slice(&self.base_predictions_multiclass);
+            raw_preds.extend_from_slice(&self.base_predictions);
         }
 
         // Add tree predictions

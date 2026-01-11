@@ -821,10 +821,8 @@ impl GBDTModel {
         // Determine output type from loss configuration
         let output_type = config.loss_type.output_type();
 
-        #[allow(deprecated)]
         Ok(Self {
             config,
-            // New unified fields
             base_predictions: vec![base_prediction],
             trees: trees.clone(),
             num_outputs: 1,
@@ -832,10 +830,6 @@ impl GBDTModel {
             conformal_q,
             feature_info: train_dataset.all_feature_info().to_vec(),
             column_permutation,
-            // Legacy fields (for backward compatibility)
-            base_prediction,
-            base_predictions_multiclass: Vec::new(),
-            num_classes: 0,
         })
     }
 
@@ -1002,10 +996,8 @@ impl GBDTModel {
             None
         };
 
-        #[allow(deprecated)]
         Ok(Self {
             config,
-            // New unified fields
             base_predictions: base_predictions.clone(),
             trees,
             num_outputs: num_classes,
@@ -1013,10 +1005,6 @@ impl GBDTModel {
             conformal_q: None, // Conformal not supported for multi-class yet
             feature_info: dataset.all_feature_info().to_vec(),
             column_permutation,
-            // Legacy fields (for backward compatibility)
-            base_prediction: 0.0,
-            base_predictions_multiclass: base_predictions,
-            num_classes,
         })
     }
 
@@ -1214,10 +1202,8 @@ impl GBDTModel {
             None
         };
 
-        #[allow(deprecated)]
         Ok(Self {
             config,
-            // New unified fields
             base_predictions: base_predictions.clone(),
             trees,
             num_outputs,
@@ -1225,10 +1211,6 @@ impl GBDTModel {
             conformal_q: None, // Conformal not supported for multi-label yet
             feature_info: dataset.all_feature_info().to_vec(),
             column_permutation,
-            // Legacy fields (for backward compatibility)
-            base_prediction: 0.0,
-            base_predictions_multiclass: base_predictions,
-            num_classes: 0, // Not multi-class
         })
     }
 

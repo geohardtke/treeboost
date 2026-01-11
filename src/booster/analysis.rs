@@ -56,8 +56,8 @@ impl GBDTModel {
 
     /// Get number of boosting rounds (trees per class for multi-class, trees for others)
     pub fn num_rounds(&self) -> usize {
-        if self.num_classes > 0 {
-            self.trees.len() / self.num_classes
+        if matches!(self.output_type(), crate::booster::OutputType::MultiClass) {
+            self.trees.len() / self.num_outputs()
         } else {
             self.trees.len()
         }
@@ -123,9 +123,9 @@ impl GBDTModel {
     /// Useful for early stopping, model compression, or finding optimal ensemble size.
     /// For multi-class models, truncates to N complete rounds (N * num_classes trees).
     pub fn truncate_to_rounds(&mut self, num_rounds: usize) {
-        if self.num_classes > 0 {
-            // Multi-class: truncate to num_rounds * num_classes trees
-            let target_trees = num_rounds * self.num_classes;
+        if matches!(self.output_type(), crate::booster::OutputType::MultiClass) {
+            // Multi-class: truncate to num_rounds * num_outputs trees
+            let target_trees = num_rounds * self.num_outputs();
             self.trees.truncate(target_trees);
         } else {
             // Binary/regression: num_rounds = num_trees

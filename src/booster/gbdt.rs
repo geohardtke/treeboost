@@ -72,17 +72,6 @@ pub struct GBDTModel {
     pub(super) feature_info: Vec<FeatureInfo>,
     /// Column permutation for cache-optimized prediction (if enabled)
     pub(super) column_permutation: Option<ColumnPermutation>,
-
-    // --- Legacy fields for backward compatibility (deprecated, will be removed in v2.0) ---
-    /// Legacy: Base prediction for regression/binary (now use base_predictions[0])
-    #[deprecated(note = "Use base_predictions instead")]
-    pub(super) base_prediction: f32,
-    /// Legacy: Base predictions for multi-class (now use base_predictions)
-    #[deprecated(note = "Use base_predictions instead")]
-    pub(super) base_predictions_multiclass: Vec<f32>,
-    /// Legacy: Number of classes (now use num_outputs with output_type == MultiClass)
-    #[deprecated(note = "Use num_outputs and output_type instead")]
-    pub(super) num_classes: usize,
 }
 
 impl GBDTModel {
@@ -108,14 +97,8 @@ impl GBDTModel {
     /// Get base prediction (for scalar outputs: regression/binary)
     ///
     /// For multi-output models, use `base_predictions()` instead.
-    #[allow(deprecated)]
     pub fn base_prediction(&self) -> f32 {
-        // Prefer unified field, fall back to legacy
-        if !self.base_predictions.is_empty() {
-            self.base_predictions[0]
-        } else {
-            self.base_prediction
-        }
+        self.base_predictions[0]
     }
 
     /// Get trees
@@ -143,33 +126,13 @@ impl GBDTModel {
     /// - Regression/Binary: 1
     /// - Multi-class: number of classes
     /// - Multi-label: number of labels
-    #[allow(deprecated)]
     pub fn num_outputs(&self) -> usize {
-        if self.num_outputs > 0 {
-            self.num_outputs
-        } else if self.num_classes > 0 {
-            // Legacy multi-class
-            self.num_classes
-        } else {
-            // Legacy scalar
-            1
-        }
+        self.num_outputs
     }
 
     /// Get output type
-    #[allow(deprecated)]
     pub fn output_type(&self) -> OutputType {
-        // If new field is set, use it
-        if self.num_outputs > 0 {
-            self.output_type
-        } else if self.num_classes > 0 {
-            // Legacy multi-class detection
-            OutputType::MultiClass
-        } else if matches!(self.config.loss_type, crate::booster::LossType::BinaryLogLoss) {
-            OutputType::Binary
-        } else {
-            OutputType::Regression
-        }
+        self.output_type
     }
 
     /// Create a GBDTModel from pre-trained components
@@ -184,7 +147,6 @@ impl GBDTModel {
     /// * `num_outputs` - Number of output dimensions
     /// * `output_type` - Type of output (Regression, Binary, MultiClass, MultiLabel)
     /// * `feature_info` - Feature metadata from training
-    #[allow(deprecated)]
     pub fn from_components(
         config: GBDTConfig,
         base_predictions: Vec<f32>,
@@ -193,8 +155,6 @@ impl GBDTModel {
         output_type: OutputType,
         feature_info: Vec<FeatureInfo>,
     ) -> Self {
-        let base_prediction = base_predictions.first().copied().unwrap_or(0.0);
-
         Self {
             config,
             base_predictions,
@@ -204,10 +164,6 @@ impl GBDTModel {
             conformal_q: None,
             feature_info,
             column_permutation: None,
-            // Legacy fields
-            base_prediction,
-            base_predictions_multiclass: Vec::new(),
-            num_classes: 0,
         }
     }
 }
