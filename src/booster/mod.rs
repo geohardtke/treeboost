@@ -19,5 +19,5 @@ mod gbdt;
 pub mod prediction;
 pub mod training;
 
-pub use config::{GBDTConfig, GbdtPreset, LossType};
+pub use config::{GBDTConfig, GbdtPreset, LossType, OutputType};
 pub use gbdt::GBDTModel;

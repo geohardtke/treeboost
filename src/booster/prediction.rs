@@ -173,13 +173,232 @@ impl GBDTModel {
     // ============================================================================
 
     /// Check if this is a multi-class model
+    #[allow(deprecated)]
     pub fn is_multiclass(&self) -> bool {
-        self.num_classes > 0
+        matches!(self.output_type(), crate::booster::OutputType::MultiClass)
+            || self.num_classes > 0
     }
 
-    /// Get number of classes (0 for regression/binary)
+    /// Check if this is a multi-label model
+    pub fn is_multilabel(&self) -> bool {
+        matches!(self.output_type(), crate::booster::OutputType::MultiLabel)
+    }
+
+    /// Get number of classes (0 for regression/binary/multi-label)
+    #[allow(deprecated)]
     pub fn get_num_classes(&self) -> usize {
-        self.num_classes
+        if matches!(self.output_type(), crate::booster::OutputType::MultiClass) {
+            self.num_outputs()
+        } else {
+            self.num_classes
+        }
+    }
+
+    // ============================================================================
+    // Multi-label classification prediction methods
+    // ============================================================================
+
+    /// Predict raw scores for multi-label classification
+    ///
+    /// Returns raw predictions for each label (before sigmoid).
+    /// Trees are stored round-major: `[r0_l0, r0_l1, ..., r0_lN, r1_l0, ...]`
+    ///
+    /// # Returns
+    /// Vector of vectors: `result[sample][label]`
+    pub fn predict_multilabel(&self, dataset: &BinnedDataset) -> Vec<Vec<f32>> {
+        if !self.is_multilabel() {
+            // Fall back to single-output prediction wrapped in Vec
+            return self.predict(dataset).into_iter().map(|p| vec![p]).collect();
+        }
+
+        let num_rows = dataset.num_rows();
+        let num_outputs = self.num_outputs();
+        let num_rounds = self.trees.len() / num_outputs;
+
+        // Initialize with base predictions
+        let mut raw_preds: Vec<f32> = Vec::with_capacity(num_rows * num_outputs);
+        for _ in 0..num_rows {
+            raw_preds.extend_from_slice(&self.base_predictions);
+        }
+
+        // Add tree contributions (trees stored round-major)
+        for round in 0..num_rounds {
+            for label_idx in 0..num_outputs {
+                let tree_idx = round * num_outputs + label_idx;
+                let tree = &self.trees[tree_idx];
+
+                for row_idx in 0..num_rows {
+                    let delta = tree.predict(|f| dataset.get_bin(row_idx, f));
+                    raw_preds[row_idx * num_outputs + label_idx] += delta;
+                }
+            }
+        }
+
+        // Convert to Vec<Vec<f32>>
+        let mut result = Vec::with_capacity(num_rows);
+        for row_idx in 0..num_rows {
+            let row_preds = &raw_preds[row_idx * num_outputs..(row_idx + 1) * num_outputs];
+            result.push(row_preds.to_vec());
+        }
+
+        result
+    }
+
+    /// Predict probabilities for multi-label classification
+    ///
+    /// Applies sigmoid to raw predictions to get probabilities for each label.
+    /// Only meaningful when trained with `with_multilabel_logloss()` or `with_multilabel_focal_loss()`.
+    ///
+    /// # Returns
+    /// Vector of probability vectors: `result[sample][label]` where each value is in [0, 1]
+    pub fn predict_proba_multilabel(&self, dataset: &BinnedDataset) -> Vec<Vec<f32>> {
+        let raw = self.predict_multilabel(dataset);
+        raw.into_iter()
+            .map(|row| row.into_iter().map(sigmoid).collect())
+            .collect()
+    }
+
+    /// Predict binary labels for multi-label classification using default threshold
+    ///
+    /// Uses threshold 0.5 for all labels.
+    ///
+    /// # Returns
+    /// Vector of boolean vectors: `result[sample][label]`
+    pub fn predict_labels(&self, dataset: &BinnedDataset) -> Vec<Vec<bool>> {
+        self.predict_labels_with_threshold(dataset, 0.5)
+    }
+
+    /// Predict binary labels for multi-label classification with custom threshold
+    ///
+    /// # Arguments
+    /// * `dataset` - Input data
+    /// * `threshold` - Probability threshold for positive class (same for all labels)
+    ///
+    /// # Returns
+    /// Vector of boolean vectors: `result[sample][label]`
+    pub fn predict_labels_with_threshold(
+        &self,
+        dataset: &BinnedDataset,
+        threshold: f32,
+    ) -> Vec<Vec<bool>> {
+        let proba = self.predict_proba_multilabel(dataset);
+        proba
+            .into_iter()
+            .map(|row| row.into_iter().map(|p| p >= threshold).collect())
+            .collect()
+    }
+
+    /// Predict binary labels using per-label thresholds
+    ///
+    /// # Arguments
+    /// * `dataset` - Input data
+    /// * `thresholds` - Probability threshold per label (must match num_outputs)
+    ///
+    /// # Returns
+    /// Vector of boolean vectors: `result[sample][label]`
+    pub fn predict_labels_with_thresholds(
+        &self,
+        dataset: &BinnedDataset,
+        thresholds: &[f32],
+    ) -> Vec<Vec<bool>> {
+        debug_assert_eq!(
+            thresholds.len(),
+            self.num_outputs(),
+            "thresholds length must match num_outputs"
+        );
+
+        let proba = self.predict_proba_multilabel(dataset);
+        proba
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .zip(thresholds.iter())
+                    .map(|(p, &t)| p >= t)
+                    .collect()
+            })
+            .collect()
+    }
+
+    // ============================================================================
+    // Multi-label raw prediction methods (from raw features, no binning needed)
+    // ============================================================================
+
+    /// Predict raw scores from raw features for multi-label classification
+    ///
+    /// # Arguments
+    /// * `features` - Row-major feature matrix: `features[row * num_features + feature]`
+    ///
+    /// # Returns
+    /// Vector of vectors: `result[sample][label]`
+    pub fn predict_multilabel_raw(&self, features: &[f64]) -> Vec<Vec<f32>> {
+        if !self.is_multilabel() {
+            return self.predict_raw(features).into_iter().map(|p| vec![p]).collect();
+        }
+
+        let num_features = self.num_features();
+        if num_features == 0 {
+            return vec![];
+        }
+
+        let num_rows = features.len() / num_features;
+        let num_outputs = self.num_outputs();
+        let num_rounds = self.trees.len() / num_outputs;
+
+        // Initialize with base predictions
+        let mut raw_preds: Vec<f32> = Vec::with_capacity(num_rows * num_outputs);
+        for _ in 0..num_rows {
+            raw_preds.extend_from_slice(&self.base_predictions);
+        }
+
+        // Add tree contributions
+        for round in 0..num_rounds {
+            for label_idx in 0..num_outputs {
+                let tree_idx = round * num_outputs + label_idx;
+                let tree = &self.trees[tree_idx];
+
+                for row_idx in 0..num_rows {
+                    let row_offset = row_idx * num_features;
+                    let delta = tree.predict_raw(|f| features[row_offset + f]);
+                    raw_preds[row_idx * num_outputs + label_idx] += delta;
+                }
+            }
+        }
+
+        // Convert to Vec<Vec<f32>>
+        let mut result = Vec::with_capacity(num_rows);
+        for row_idx in 0..num_rows {
+            let row_preds = &raw_preds[row_idx * num_outputs..(row_idx + 1) * num_outputs];
+            result.push(row_preds.to_vec());
+        }
+
+        result
+    }
+
+    /// Predict probabilities from raw features for multi-label classification
+    ///
+    /// # Returns
+    /// Vector of probability vectors: `result[sample][label]`
+    pub fn predict_proba_multilabel_raw(&self, features: &[f64]) -> Vec<Vec<f32>> {
+        let raw = self.predict_multilabel_raw(features);
+        raw.into_iter()
+            .map(|row| row.into_iter().map(sigmoid).collect())
+            .collect()
+    }
+
+    /// Predict binary labels from raw features for multi-label classification
+    ///
+    /// Uses threshold 0.5 for all labels.
+    pub fn predict_labels_raw(&self, features: &[f64]) -> Vec<Vec<bool>> {
+        self.predict_labels_with_threshold_raw(features, 0.5)
+    }
+
+    /// Predict binary labels from raw features with custom threshold
+    pub fn predict_labels_with_threshold_raw(&self, features: &[f64], threshold: f32) -> Vec<Vec<bool>> {
+        let proba = self.predict_proba_multilabel_raw(features);
+        proba
+            .into_iter()
+            .map(|row| row.into_iter().map(|p| p >= threshold).collect())
+            .collect()
     }
 
     /// Predict class probabilities for multi-class classification

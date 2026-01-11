@@ -10,6 +10,46 @@ use crate::loss::{BinaryLogLoss, LossFunction, MseLoss, PseudoHuberLoss};
 use crate::tree::MonotonicConstraint;
 use rkyv::{Archive, Deserialize, Serialize};
 
+/// Output type for the model (used during prediction)
+///
+/// This determines how raw tree outputs are transformed and structured.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Archive,
+    Serialize,
+    Deserialize,
+    serde::Serialize,
+    serde::Deserialize,
+    Default,
+)]
+pub enum OutputType {
+    /// Single regression output (raw value)
+    #[default]
+    Regression,
+    /// Single binary classification output (sigmoid)
+    Binary,
+    /// Multi-class classification (softmax over K classes)
+    MultiClass,
+    /// Multi-label classification (sigmoid per label, independent)
+    MultiLabel,
+}
+
+impl OutputType {
+    /// Returns true if this is a classification output type
+    pub fn is_classification(&self) -> bool {
+        !matches!(self, OutputType::Regression)
+    }
+
+    /// Returns true if this is a multi-output type
+    pub fn is_multi_output(&self) -> bool {
+        matches!(self, OutputType::MultiClass | OutputType::MultiLabel)
+    }
+}
+
 /// Loss function type for serialization
 #[derive(
     Debug,
@@ -33,10 +73,14 @@ pub enum LossType {
     BinaryLogLoss,
     /// Multi-class Log Loss / Softmax Cross-Entropy (multi-class classification)
     MultiClassLogLoss { num_classes: usize },
+    /// Multi-label Log Loss (sigmoid per label, independent binary per output)
+    MultiLabelLogLoss { num_outputs: usize },
+    /// Multi-label Focal Loss (sigmoid per label with focusing parameter)
+    MultiLabelFocalLoss { num_outputs: usize, gamma: f32 },
 }
 
 impl LossType {
-    /// Create a boxed loss function for regression and binary classification
+    /// Create a boxed loss function for regression, binary, and multi-label losses
     ///
     /// # Panics
     /// Panics if called with `MultiClassLogLoss` - multi-class has a separate
@@ -52,6 +96,29 @@ impl LossType {
                      Use train_binned_multiclass() which handles multi-class gradients directly."
                 )
             }
+            LossType::MultiLabelLogLoss { .. } => {
+                Box::new(crate::loss::MultiLabelLogLoss::new())
+            }
+            LossType::MultiLabelFocalLoss { gamma, .. } => {
+                Box::new(crate::loss::MultiLabelFocalLoss::new(*gamma))
+            }
+        }
+    }
+
+    /// Create a loss function for multi-label training with configurable alpha
+    pub fn create_multilabel(&self, alpha: Option<f32>) -> Box<dyn LossFunction> {
+        match self {
+            LossType::MultiLabelLogLoss { .. } => {
+                Box::new(crate::loss::MultiLabelLogLoss::new())
+            }
+            LossType::MultiLabelFocalLoss { gamma, .. } => {
+                let mut loss = crate::loss::MultiLabelFocalLoss::new(*gamma);
+                if let Some(a) = alpha {
+                    loss = loss.with_alpha(a);
+                }
+                Box::new(loss)
+            }
+            _ => self.create(),
         }
     }
 
@@ -59,7 +126,10 @@ impl LossType {
     pub fn is_classification(&self) -> bool {
         matches!(
             self,
-            LossType::BinaryLogLoss | LossType::MultiClassLogLoss { .. }
+            LossType::BinaryLogLoss
+                | LossType::MultiClassLogLoss { .. }
+                | LossType::MultiLabelLogLoss { .. }
+                | LossType::MultiLabelFocalLoss { .. }
         )
     }
 
@@ -68,11 +138,41 @@ impl LossType {
         matches!(self, LossType::MultiClassLogLoss { .. })
     }
 
+    /// Returns true if this is a multi-label classification loss
+    pub fn is_multilabel(&self) -> bool {
+        matches!(
+            self,
+            LossType::MultiLabelLogLoss { .. } | LossType::MultiLabelFocalLoss { .. }
+        )
+    }
+
     /// Get number of classes (for multi-class classification)
     pub fn num_classes(&self) -> Option<usize> {
         match self {
             LossType::MultiClassLogLoss { num_classes } => Some(*num_classes),
             _ => None,
+        }
+    }
+
+    /// Get number of outputs (for multi-label classification)
+    pub fn num_outputs(&self) -> Option<usize> {
+        match self {
+            LossType::MultiLabelLogLoss { num_outputs } => Some(*num_outputs),
+            LossType::MultiLabelFocalLoss { num_outputs, .. } => Some(*num_outputs),
+            LossType::MultiClassLogLoss { num_classes } => Some(*num_classes),
+            _ => Some(1), // Regression and binary have 1 output
+        }
+    }
+
+    /// Get the corresponding OutputType for this loss
+    pub fn output_type(&self) -> OutputType {
+        match self {
+            LossType::Mse | LossType::PseudoHuber { .. } => OutputType::Regression,
+            LossType::BinaryLogLoss => OutputType::Binary,
+            LossType::MultiClassLogLoss { .. } => OutputType::MultiClass,
+            LossType::MultiLabelLogLoss { .. } | LossType::MultiLabelFocalLoss { .. } => {
+                OutputType::MultiLabel
+            }
         }
     }
 }
@@ -412,6 +512,58 @@ impl GBDTConfig {
             )));
         }
         self.loss_type = LossType::MultiClassLogLoss { num_classes };
+        Ok(self)
+    }
+
+    /// Set loss function to Multi-label Log Loss (for multi-label classification)
+    ///
+    /// Uses sigmoid activation per label (independent binary classification per output).
+    /// Targets should be binary (0/1) for each label, stored row-wise flattened:
+    /// `[row0_label0, row0_label1, ..., row1_label0, ...]`
+    ///
+    /// This trains trees with vector leaf values that predict all labels simultaneously.
+    ///
+    /// # Arguments
+    /// * `num_outputs` - Number of labels/outputs
+    pub fn with_multilabel_logloss(mut self, num_outputs: usize) -> crate::Result<Self> {
+        if num_outputs < 2 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "num_outputs must be >= 2 for multi-label, got {}",
+                num_outputs
+            )));
+        }
+        self.loss_type = LossType::MultiLabelLogLoss { num_outputs };
+        Ok(self)
+    }
+
+    /// Set loss function to Multi-label Focal Loss (for imbalanced multi-label classification)
+    ///
+    /// Focal loss down-weights easy examples to focus training on hard examples.
+    /// Uses sigmoid activation per label (independent binary classification per output).
+    ///
+    /// # Arguments
+    /// * `num_outputs` - Number of labels/outputs
+    /// * `gamma` - Focusing parameter (typical values: 1-5, higher = more focusing)
+    ///   - gamma=0 is equivalent to standard log loss
+    ///   - gamma=2 is a common choice
+    pub fn with_multilabel_focal_loss(
+        mut self,
+        num_outputs: usize,
+        gamma: f32,
+    ) -> crate::Result<Self> {
+        if num_outputs < 2 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "num_outputs must be >= 2 for multi-label, got {}",
+                num_outputs
+            )));
+        }
+        if gamma < 0.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "gamma must be >= 0, got {}",
+                gamma
+            )));
+        }
+        self.loss_type = LossType::MultiLabelFocalLoss { num_outputs, gamma };
         Ok(self)
     }
 

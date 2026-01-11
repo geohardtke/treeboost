@@ -390,6 +390,13 @@ impl GBDTModel {
             return Self::train_binned_multiclass(dataset, config, num_classes);
         }
 
+        // Dispatch to multi-label training if using multi-label loss
+        if config.loss_type.is_multilabel() {
+            if let Some(num_outputs) = config.loss_type.num_outputs() {
+                return Self::train_binned_multilabel(dataset, config, num_outputs);
+            }
+        }
+
         config.validate().map_err(TreeBoostError::Config)?;
 
         // CRITICAL: Resolve BackendType::Auto to concrete backend ONCE based on full dataset
@@ -811,15 +818,24 @@ impl GBDTModel {
             None
         };
 
+        // Determine output type from loss configuration
+        let output_type = config.loss_type.output_type();
+
+        #[allow(deprecated)]
         Ok(Self {
             config,
-            base_prediction,
-            base_predictions_multiclass: Vec::new(),
+            // New unified fields
+            base_predictions: vec![base_prediction],
             trees: trees.clone(),
-            num_classes: 0,
+            num_outputs: 1,
+            output_type,
             conformal_q,
             feature_info: train_dataset.all_feature_info().to_vec(),
             column_permutation,
+            // Legacy fields (for backward compatibility)
+            base_prediction,
+            base_predictions_multiclass: Vec::new(),
+            num_classes: 0,
         })
     }
 
@@ -986,15 +1002,233 @@ impl GBDTModel {
             None
         };
 
+        #[allow(deprecated)]
         Ok(Self {
             config,
-            base_prediction: 0.0, // Not used for multi-class
-            base_predictions_multiclass: base_predictions,
+            // New unified fields
+            base_predictions: base_predictions.clone(),
             trees,
-            num_classes,
+            num_outputs: num_classes,
+            output_type: crate::booster::OutputType::MultiClass,
             conformal_q: None, // Conformal not supported for multi-class yet
             feature_info: dataset.all_feature_info().to_vec(),
             column_permutation,
+            // Legacy fields (for backward compatibility)
+            base_prediction: 0.0,
+            base_predictions_multiclass: base_predictions,
+            num_classes,
+        })
+    }
+
+    /// Train a multi-label classification model from pre-binned data
+    ///
+    /// Multi-label differs from multi-class in that each sample can belong to
+    /// multiple labels simultaneously. Uses sigmoid per label (not softmax).
+    ///
+    /// # Architecture
+    ///
+    /// This follows the same K-trees-per-round pattern as multi-class training:
+    /// - Trains N trees per round (one per label)
+    /// - Trees stored as: `[round0_label0, round0_label1, ..., roundR_labelN]`
+    /// - Each tree produces scalar predictions for its specific label
+    /// - Final prediction: sigmoid applied per label for probabilities
+    ///
+    /// # Arguments
+    /// * `dataset` - Multi-output binned dataset (targets row-wise flattened)
+    /// * `config` - Training configuration with multi-label loss
+    /// * `num_outputs` - Number of labels/outputs
+    fn train_binned_multilabel(
+        dataset: &BinnedDataset,
+        config: GBDTConfig,
+        num_outputs: usize,
+    ) -> Result<Self> {
+        config.validate().map_err(TreeBoostError::Config)?;
+
+        let targets = dataset.targets();
+        let num_rows = dataset.num_rows();
+
+        // Verify dataset has correct target dimensions
+        if targets.len() != num_rows * num_outputs {
+            return Err(TreeBoostError::Config(format!(
+                "Dataset targets length {} doesn't match num_rows * num_outputs ({} * {} = {}). \
+                 Use BinnedDataset::new_multioutput() for multi-label data.",
+                targets.len(),
+                num_rows,
+                num_outputs,
+                num_rows * num_outputs
+            )));
+        }
+
+        // Create the loss function
+        let loss_fn = config.loss_type.create();
+
+        // Split data for validation and calibration
+        let split = split_holdout(
+            num_rows,
+            config.validation_ratio,
+            config.calibration_ratio,
+            config.seed,
+        );
+        let (train_indices, validation_indices, _calibration_indices) =
+            (split.train, split.validation, split.calibration);
+
+        // Compute initial predictions per label from training data
+        let train_targets: Vec<f32> = train_indices
+            .iter()
+            .flat_map(|&i| {
+                (0..num_outputs).map(move |k| targets[i * num_outputs + k])
+            })
+            .collect();
+        let base_predictions = loss_fn.initial_predictions_multi(&train_targets, num_outputs);
+
+        // Initialize predictions for all rows: predictions[row * num_outputs + label]
+        let mut predictions: Vec<f32> = Vec::with_capacity(num_rows * num_outputs);
+        for _ in 0..num_rows {
+            predictions.extend_from_slice(&base_predictions);
+        }
+
+        // Gradient and hessian buffers (per sample, used for one label at a time)
+        let mut gradients = vec![0.0f32; num_rows];
+        let mut hessians = vec![0.0f32; num_rows];
+
+        // Build interaction constraints
+        let interaction_constraints = if config.interaction_groups.is_empty() {
+            InteractionConstraints::new()
+        } else {
+            InteractionConstraints::from_groups(
+                config.interaction_groups.clone(),
+                dataset.num_features(),
+            )
+        };
+
+        // Create tree grower
+        let tree_grower = TreeGrower::new()
+            .with_max_depth(config.max_depth)
+            .with_max_leaves(config.max_leaves)
+            .with_lambda(config.lambda)
+            .with_min_samples_leaf(config.min_samples_leaf)
+            .with_min_hessian_leaf(config.min_hessian_leaf)
+            .with_entropy_weight(config.entropy_weight)
+            .with_min_gain(config.min_gain)
+            .with_learning_rate(config.learning_rate)
+            .with_colsample(config.colsample)
+            .with_monotonic_constraints(config.monotonic_constraints.clone())
+            .with_interaction_constraints(interaction_constraints)
+            .with_backend(config.backend_type)
+            .with_gpu_subgroups(config.use_gpu_subgroups)
+            .with_era_splitting(config.era_splitting);
+
+        // Trees stored as: [round0_label0, round0_label1, ..., round0_labelN, round1_label0, ...]
+        let mut trees = Vec::with_capacity(config.num_rounds * num_outputs);
+
+        // Early stopping state
+        let early_stopping_enabled =
+            config.early_stopping_rounds > 0 && !validation_indices.is_empty();
+        let mut best_val_loss = f32::MAX;
+        let mut rounds_without_improvement = 0;
+        let mut best_num_rounds = 0;
+
+        for round in 0..config.num_rounds {
+            // Train N trees for this round (one per label)
+            for label_idx in 0..num_outputs {
+                // Compute gradients and hessians for this label
+                // For multi-label, each label is independent binary classification
+                for &idx in &train_indices {
+                    let target = targets[idx * num_outputs + label_idx];
+                    let pred = predictions[idx * num_outputs + label_idx];
+                    let (g, h) = loss_fn.gradient_hessian(target, pred);
+                    gradients[idx] = g;
+                    hessians[idx] = h;
+                }
+
+                // Grow tree for this label
+                let tree = tree_grower.grow_with_indices(
+                    dataset,
+                    &gradients,
+                    &hessians,
+                    &train_indices,
+                )?;
+
+                // Update predictions for this label
+                for idx in 0..num_rows {
+                    let delta = tree.predict(|f| dataset.get_bin(idx, f));
+                    predictions[idx * num_outputs + label_idx] += delta;
+                }
+
+                trees.push(tree);
+            }
+
+            // Early stopping check on validation set
+            if early_stopping_enabled {
+                // Compute multi-label loss on validation set (sum of per-label losses)
+                let mut val_loss = 0.0f32;
+                for &idx in &validation_indices {
+                    for label_idx in 0..num_outputs {
+                        let target = targets[idx * num_outputs + label_idx];
+                        let pred = predictions[idx * num_outputs + label_idx];
+                        val_loss += loss_fn.loss(target, pred);
+                    }
+                }
+                val_loss /= (validation_indices.len() * num_outputs) as f32;
+
+                if val_loss < best_val_loss {
+                    best_val_loss = val_loss;
+                    best_num_rounds = round + 1;
+                    rounds_without_improvement = 0;
+                } else {
+                    rounds_without_improvement += 1;
+                    if should_early_stop(
+                        rounds_without_improvement,
+                        trees.len(),
+                        config.early_stopping_rounds,
+                        config.min_early_stopping_trees,
+                    ) {
+                        let keep_rounds = early_stop_keep_count(
+                            best_num_rounds,
+                            config.min_early_stopping_trees / num_outputs.max(1),
+                        );
+                        trees.truncate(keep_rounds * num_outputs);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Truncate if early stopping finished all rounds but best was earlier
+        if early_stopping_enabled
+            && best_num_rounds > 0
+            && best_num_rounds * num_outputs < trees.len()
+        {
+            let keep_rounds = early_stop_keep_count(
+                best_num_rounds,
+                config.min_early_stopping_trees / num_outputs.max(1),
+            );
+            trees.truncate(keep_rounds * num_outputs);
+        }
+
+        // Compute column permutation if enabled
+        let column_permutation = if config.column_reordering && !trees.is_empty() {
+            let importances = Self::compute_importances_from_trees(&trees, dataset.num_features());
+            Some(ColumnPermutation::from_importances(&importances))
+        } else {
+            None
+        };
+
+        #[allow(deprecated)]
+        Ok(Self {
+            config,
+            // New unified fields
+            base_predictions: base_predictions.clone(),
+            trees,
+            num_outputs,
+            output_type: crate::booster::OutputType::MultiLabel,
+            conformal_q: None, // Conformal not supported for multi-label yet
+            feature_info: dataset.all_feature_info().to_vec(),
+            column_permutation,
+            // Legacy fields (for backward compatibility)
+            base_prediction: 0.0,
+            base_predictions_multiclass: base_predictions,
+            num_classes: 0, // Not multi-class
         })
     }
 
