@@ -32,6 +32,7 @@ use super::sparse::SparseColumn;
 /// - Features stored column-major as contiguous u8 arrays
 /// - Each feature column is `num_rows` bytes
 /// - Total feature memory: `num_rows * num_features` bytes
+/// - Multi-output targets stored row-wise: `targets[row * num_target_cols + label]`
 ///
 /// Sparse features are additionally stored in CSR-like format for efficient
 /// histogram building on sparse data.
@@ -44,7 +45,10 @@ pub struct BinnedDataset {
     /// Feature data in column-major order: features[feature_idx * num_rows + row_idx]
     features: Vec<u8>,
     /// Target values (original scale, not binned)
+    /// For multi-output: row-wise layout `targets[row * num_target_cols + label]`
     targets: Vec<f32>,
+    /// Number of target columns (1 for scalar targets, >1 for multi-output)
+    num_target_cols: usize,
     /// Feature metadata
     feature_info: Vec<FeatureInfo>,
     /// Sparse representations for sparse features (None if dense)
@@ -70,6 +74,7 @@ impl std::fmt::Debug for BinnedDataset {
         f.debug_struct("BinnedDataset")
             .field("num_rows", &self.num_rows)
             .field("num_features", &self.num_features())
+            .field("num_target_cols", &self.num_target_cols)
             .field("features_len", &self.features.len())
             .field("sparse_features", &self.num_sparse_features())
             .field("max_bins", &self.max_bins())
@@ -91,6 +96,7 @@ impl Clone for BinnedDataset {
             num_rows: self.num_rows,
             features: self.features.clone(),
             targets: self.targets.clone(),
+            num_target_cols: self.num_target_cols,
             feature_info: self.feature_info.clone(),
             sparse_columns: self.sparse_columns.clone(),
             era_indices: self.era_indices.clone(),
@@ -103,9 +109,10 @@ impl Clone for BinnedDataset {
 }
 
 impl BinnedDataset {
-    /// Create a new binned dataset
+    /// Create a new binned dataset with scalar targets
     ///
     /// Automatically detects sparse features and creates sparse representations.
+    /// For multi-output targets, use `new_multioutput()` instead.
     pub fn new(
         num_rows: usize,
         features: Vec<u8>,
@@ -136,6 +143,66 @@ impl BinnedDataset {
             num_rows,
             features,
             targets,
+            num_target_cols: 1, // Scalar targets
+            feature_info,
+            sparse_columns,
+            era_indices: None,
+            num_eras: 0,
+            row_major_cache: OnceLock::new(),
+            row_major_4bit_cache: OnceLock::new(),
+        }
+    }
+
+    /// Create a new binned dataset with multi-output targets
+    ///
+    /// # Arguments
+    /// * `num_rows` - Number of samples
+    /// * `features` - Column-major feature data
+    /// * `targets` - Row-wise flattened targets: `[row0_label0, row0_label1, ..., row1_label0, ...]`
+    /// * `feature_info` - Feature metadata
+    /// * `num_target_cols` - Number of target columns (labels/outputs)
+    ///
+    /// # Panics
+    /// Panics if `targets.len() != num_rows * num_target_cols`
+    pub fn new_multioutput(
+        num_rows: usize,
+        features: Vec<u8>,
+        targets: Vec<f32>,
+        feature_info: Vec<FeatureInfo>,
+        num_target_cols: usize,
+    ) -> Self {
+        assert_eq!(
+            targets.len(),
+            num_rows * num_target_cols,
+            "targets length ({}) must equal num_rows ({}) * num_target_cols ({})",
+            targets.len(),
+            num_rows,
+            num_target_cols
+        );
+        debug_assert_eq!(features.len(), num_rows * feature_info.len());
+
+        let num_features = feature_info.len();
+
+        // Detect sparse features and create sparse representations
+        let sparse_columns: Vec<Option<SparseColumn>> = (0..num_features)
+            .map(|f| {
+                let start = f * num_rows;
+                let column = &features[start..start + num_rows];
+                let sparse = SparseColumn::from_dense(column, DEFAULT_BIN);
+
+                if sparse.is_sparse() {
+                    Some(sparse)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Self {
+            num_rows,
+            features,
+            targets,
+            num_target_cols,
             feature_info,
             sparse_columns,
             era_indices: None,
@@ -153,7 +220,7 @@ impl BinnedDataset {
     /// # Arguments
     /// * `num_rows` - Number of samples
     /// * `features` - Column-major feature data
-    /// * `targets` - Target values
+    /// * `targets` - Target values (scalar)
     /// * `feature_info` - Feature metadata
     /// * `era_indices` - Era index for each sample (u16, supports up to 65536 eras)
     pub fn new_with_eras(
@@ -196,6 +263,7 @@ impl BinnedDataset {
             num_rows,
             features,
             targets,
+            num_target_cols: 1, // Scalar targets
             feature_info,
             sparse_columns,
             era_indices: Some(era_indices),
@@ -289,6 +357,15 @@ impl BinnedDataset {
         &self.features[start..start + self.num_rows]
     }
 
+    /// Get all binned features (column-major layout)
+    ///
+    /// Returns the raw feature array in column-major order:
+    /// `features[feature_idx * num_rows + row_idx]`
+    #[inline]
+    pub fn features(&self) -> &[u8] {
+        &self.features
+    }
+
     // =========================================================================
     // Sparse Feature Access
     // =========================================================================
@@ -319,13 +396,49 @@ impl BinnedDataset {
     // Target Access
     // =========================================================================
 
-    /// Get target value for a row
+    /// Number of target columns (1 for scalar, >1 for multi-output)
+    #[inline]
+    pub fn num_target_cols(&self) -> usize {
+        self.num_target_cols
+    }
+
+    /// Check if this is a multi-output dataset
+    #[inline]
+    pub fn is_multioutput(&self) -> bool {
+        self.num_target_cols > 1
+    }
+
+    /// Get target value for a row (scalar targets only)
+    ///
+    /// For multi-output datasets, use `get_target(row, label_idx)` instead.
     #[inline]
     pub fn target(&self, row_idx: usize) -> f32 {
+        debug_assert_eq!(self.num_target_cols, 1, "Use get_target() for multi-output");
         self.targets[row_idx]
     }
 
-    /// Get all targets
+    /// Get target value for a specific row and output index
+    ///
+    /// Works for both scalar and multi-output datasets.
+    #[inline]
+    pub fn get_target(&self, row_idx: usize, label_idx: usize) -> f32 {
+        debug_assert!(label_idx < self.num_target_cols);
+        self.targets[row_idx * self.num_target_cols + label_idx]
+    }
+
+    /// Get all target values for a row (for multi-output)
+    ///
+    /// Returns a slice of length `num_target_cols`.
+    #[inline]
+    pub fn get_targets_row(&self, row_idx: usize) -> &[f32] {
+        let start = row_idx * self.num_target_cols;
+        &self.targets[start..start + self.num_target_cols]
+    }
+
+    /// Get all targets (raw buffer)
+    ///
+    /// For scalar targets: `targets[row_idx]`
+    /// For multi-output: `targets[row * num_target_cols + label]`
     #[inline]
     pub fn targets(&self) -> &[f32] {
         &self.targets
@@ -337,7 +450,7 @@ impl BinnedDataset {
         &mut self.targets
     }
 
-    /// Create a new dataset with replaced targets, sharing feature data
+    /// Create a new dataset with replaced scalar targets, sharing feature data
     ///
     /// This is more efficient than `clone()` followed by target modification
     /// because it avoids cloning the targets vector only to overwrite it.
@@ -360,6 +473,39 @@ impl BinnedDataset {
             num_rows: self.num_rows,
             features: self.features.clone(),
             targets: new_targets, // Use provided targets directly, no clone
+            num_target_cols: 1,   // Scalar targets
+            feature_info: self.feature_info.clone(),
+            sparse_columns: self.sparse_columns.clone(),
+            era_indices: self.era_indices.clone(),
+            num_eras: self.num_eras,
+            row_major_cache: OnceLock::new(),
+            row_major_4bit_cache: OnceLock::new(),
+        }
+    }
+
+    /// Create a new dataset with replaced multi-output targets, sharing feature data
+    ///
+    /// # Arguments
+    /// * `new_targets` - New target values, row-wise layout
+    /// * `num_target_cols` - Number of target columns
+    ///
+    /// # Panics
+    /// Panics if `new_targets.len() != self.num_rows * num_target_cols`
+    pub fn with_targets_multioutput(&self, new_targets: Vec<f32>, num_target_cols: usize) -> Self {
+        assert_eq!(
+            new_targets.len(),
+            self.num_rows * num_target_cols,
+            "new_targets length ({}) must match num_rows ({}) * num_target_cols ({})",
+            new_targets.len(),
+            self.num_rows,
+            num_target_cols
+        );
+
+        Self {
+            num_rows: self.num_rows,
+            features: self.features.clone(),
+            targets: new_targets,
+            num_target_cols,
             feature_info: self.feature_info.clone(),
             sparse_columns: self.sparse_columns.clone(),
             era_indices: self.era_indices.clone(),
@@ -574,6 +720,8 @@ impl BinnedDataset {
     /// This is used for proper K-fold cross-validation where training must
     /// be performed on a subset of the data (the training fold).
     ///
+    /// Preserves multi-output structure (num_target_cols).
+    ///
     /// # Arguments
     /// * `indices` - Row indices to include in the subset (must be valid)
     ///
@@ -585,6 +733,7 @@ impl BinnedDataset {
     pub fn subset_by_indices(&self, indices: &[usize]) -> Self {
         let new_num_rows = indices.len();
         let num_features = self.num_features();
+        let num_target_cols = self.num_target_cols;
 
         // Validate indices
         for &idx in indices {
@@ -605,8 +754,12 @@ impl BinnedDataset {
             }
         }
 
-        // Extract targets for the selected rows
-        let new_targets: Vec<f32> = indices.iter().map(|&idx| self.targets[idx]).collect();
+        // Extract targets for the selected rows (preserving multi-output layout)
+        let mut new_targets = Vec::with_capacity(new_num_rows * num_target_cols);
+        for &idx in indices {
+            let start = idx * num_target_cols;
+            new_targets.extend_from_slice(&self.targets[start..start + num_target_cols]);
+        }
 
         // Extract era indices if present
         let new_era_indices = self
@@ -640,6 +793,7 @@ impl BinnedDataset {
             num_rows: new_num_rows,
             features: new_features,
             targets: new_targets,
+            num_target_cols,
             feature_info: self.feature_info.clone(),
             sparse_columns,
             era_indices: new_era_indices,
