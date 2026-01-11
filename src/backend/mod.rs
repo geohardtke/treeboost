@@ -18,6 +18,9 @@ mod hybrid;
 pub mod scalar;
 mod traits;
 
+// Re-export scalar kernel for use by GPU backends
+pub use scalar::kernel;
+
 #[cfg(feature = "gpu")]
 pub mod wgpu;
 

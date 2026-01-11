@@ -674,7 +674,7 @@ mod python;
 
 // Re-exports for convenience
 pub use backend::{
-    BackendConfig, BackendPreset, BackendSelector, BackendType, GpuMode, HistogramBackend,
+    BackendConfig, BackendPreset, BackendSelector, BackendType, GpuMode, HistogramBackend, kernel,
 };
 pub use booster::{GBDTConfig, GBDTModel, GbdtPreset, LossType, OutputType};
 pub use dataset::{BinnedDataset, FeatureInfo, FeatureType, QuantileBinner};

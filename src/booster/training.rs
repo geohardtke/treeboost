@@ -4,7 +4,7 @@
 
 use super::GBDTModel;
 #[cfg(any(feature = "cuda", feature = "gpu"))]
-use crate::backend::GpuMode;
+use crate::backend::{BackendType, GpuMode};
 use crate::booster::GBDTConfig;
 use crate::dataset::{
     split_holdout, BinnedDataset, ColumnPermutation, FeatureInfo, FeatureType, QuantileBinner,
