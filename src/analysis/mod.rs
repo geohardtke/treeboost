@@ -53,6 +53,7 @@ mod probes;
 pub mod profiler;
 mod report;
 mod stats;
+pub mod thresholds;
 
 pub use analyzer::{
     AnalysisConfig, AnalysisPreset, Confidence, DatasetAnalysis, ModeScores, Recommendation,
@@ -66,3 +67,4 @@ pub use stats::{
     compute_correlation, compute_correlation_mixed, compute_mean, compute_mse, compute_r2,
     compute_range, compute_std, compute_variance,
 };
+pub use thresholds::{ThresholdTuner, ThresholdTunerConfig, TuneResult};
