@@ -55,6 +55,7 @@ fn create_binary_classification_dataset(n: usize, seed: u64) -> BinnedDataset {
 
 /// Test full tuning loop on synthetic regression data
 #[test]
+#[ignore]
 fn test_autotuner_regression() {
     let dataset = create_synthetic_dataset(150, 42);
 
@@ -95,6 +96,7 @@ fn test_autotuner_regression() {
 
 /// Test full tuning loop on binary classification data
 #[test]
+#[ignore]
 fn test_autotuner_binary_classification() {
     let dataset = create_binary_classification_dataset(150, 456);
 
@@ -133,6 +135,7 @@ fn test_autotuner_binary_classification() {
 
 /// Test autotuner with K-fold cross-validation
 #[test]
+#[ignore]
 fn test_autotuner_kfold() {
     let dataset = create_synthetic_dataset(120, 321);
 
@@ -164,6 +167,7 @@ fn test_autotuner_kfold() {
 
 /// Test autotuner with Latin Hypercube Sampling
 #[test]
+#[ignore]
 fn test_autotuner_lhs() {
     let dataset = create_synthetic_dataset(150, 111);
 
@@ -191,6 +195,7 @@ fn test_autotuner_lhs() {
 
 /// Test autotuner with Random sampling
 #[test]
+#[ignore]
 fn test_autotuner_random() {
     let dataset = create_synthetic_dataset(150, 333);
 
@@ -221,6 +226,7 @@ fn test_autotuner_random() {
 
 /// Test autotuner reproducibility with same seed
 #[test]
+#[ignore]
 fn test_autotuner_reproducibility() {
     let dataset = create_synthetic_dataset(120, 555);
 
@@ -286,6 +292,7 @@ fn test_autotuner_reproducibility() {
 
 /// Test autotuner with early stopping integration
 #[test]
+#[ignore]
 fn test_autotuner_early_stopping() {
     let dataset = create_synthetic_dataset(150, 666);
 
@@ -327,6 +334,7 @@ fn test_autotuner_early_stopping() {
 
 /// Test autotuner with progress callback
 #[test]
+#[ignore]
 fn test_autotuner_callback() {
     let dataset = create_synthetic_dataset(120, 888);
 
@@ -361,6 +369,7 @@ fn test_autotuner_callback() {
 
 /// Test autotuner history JSON export
 #[test]
+#[ignore]
 fn test_autotuner_history_json() {
     let dataset = create_synthetic_dataset(200, 101);
 

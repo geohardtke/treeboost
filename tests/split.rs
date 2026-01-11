@@ -1,6 +1,6 @@
 //! Split finding tests for multi-output vector gain computation
 //!
-//! Tests for Phase 0.2: Split Gain Vector Summation (2D Multi-Label Support)
+//! Split Gain Vector Summation (2D Multi-Label Support)
 
 use treeboost::histogram::{VectorHistogram, VectorNodeHistograms};
 use treeboost::tree::{VectorSplitFinder, VectorSplitInfo};
@@ -249,5 +249,8 @@ fn test_find_best_split_all_features() {
 
     assert!(best.is_valid(), "should find a valid split");
     assert_eq!(best.feature_idx, 1, "feature 1 should have the best gain");
-    assert_eq!(best.bin_threshold, 50, "should split at bin 50 for feature 1");
+    assert_eq!(
+        best.bin_threshold, 50,
+        "should split at bin 50 for feature 1"
+    );
 }

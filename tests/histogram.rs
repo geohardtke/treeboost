@@ -1,6 +1,4 @@
 //! Histogram tests for multi-output vector accumulation
-//!
-//! Tests for Phase 0.1: Histogram Vector Accumulation (2D Multi-Label Support)
 
 use treeboost::histogram::{VectorHistogram, VectorNodeHistograms};
 

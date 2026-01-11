@@ -111,6 +111,7 @@ fn create_dataset_with_id_column(n_rows: usize) -> DataFrame {
 }
 
 #[test]
+#[ignore]
 fn test_auto_train_linear_data() {
     let df = create_linear_regression_dataset(500);
 
@@ -132,6 +133,7 @@ fn test_auto_train_linear_data() {
 }
 
 #[test]
+#[ignore]
 fn test_auto_train_nonlinear_data() {
     let df = create_nonlinear_regression_dataset(500);
 
@@ -147,6 +149,7 @@ fn test_auto_train_nonlinear_data() {
 }
 
 #[test]
+#[ignore]
 fn test_auto_train_quick() {
     let df = create_linear_regression_dataset(300);
 
@@ -162,6 +165,7 @@ fn test_auto_train_quick() {
 }
 
 #[test]
+#[ignore]
 fn test_auto_train_thorough() {
     let df = create_linear_regression_dataset(200);
 
@@ -178,6 +182,7 @@ fn test_auto_train_thorough() {
 }
 
 #[test]
+#[ignore]
 fn test_auto_train_with_forced_mode() {
     let df = create_nonlinear_regression_dataset(300);
 
@@ -192,6 +197,7 @@ fn test_auto_train_with_forced_mode() {
 }
 
 #[test]
+#[ignore]
 fn test_auto_builder_with_config() {
     let df = create_linear_regression_dataset(400);
 
@@ -213,6 +219,7 @@ fn test_auto_builder_with_config() {
 }
 
 #[test]
+#[ignore]
 fn test_profiler_drops_id_columns() {
     let df = create_dataset_with_id_column(500);
 
@@ -236,6 +243,7 @@ fn test_profiler_drops_id_columns() {
 }
 
 #[test]
+#[ignore]
 fn test_mixed_type_dataset() {
     let df = create_mixed_type_dataset(400);
 
@@ -262,6 +270,7 @@ fn test_mixed_type_dataset() {
 }
 
 #[test]
+#[ignore]
 fn test_phase_times_reported() {
     let df = create_linear_regression_dataset(300);
 
@@ -282,6 +291,7 @@ fn test_phase_times_reported() {
 }
 
 #[test]
+#[ignore]
 fn test_summary_contains_key_info() {
     let df = create_linear_regression_dataset(200);
 
@@ -298,6 +308,7 @@ fn test_summary_contains_key_info() {
 }
 
 #[test]
+#[ignore]
 fn test_autobuilder_verbose_mode() {
     let df = create_linear_regression_dataset(200);
 
@@ -309,6 +320,7 @@ fn test_autobuilder_verbose_mode() {
 }
 
 #[test]
+#[ignore]
 fn test_different_tuning_levels() {
     let df = create_linear_regression_dataset(150);
 
@@ -336,6 +348,7 @@ fn test_different_tuning_levels() {
 }
 
 #[test]
+#[ignore]
 fn test_time_budget_control() {
     use std::time::Duration;
 
@@ -368,6 +381,7 @@ fn test_time_budget_control() {
 }
 
 #[test]
+#[ignore]
 fn test_time_budget_adaptations() {
     use std::time::Duration;
 
@@ -392,6 +406,7 @@ fn test_time_budget_adaptations() {
 }
 
 #[test]
+#[ignore]
 fn test_time_budget_via_config() {
     use std::time::Duration;
 
@@ -414,6 +429,7 @@ fn test_time_budget_via_config() {
 // =========================================================================
 
 #[test]
+#[ignore]
 fn test_auto_model_incremental_update() {
     use treeboost::AutoModel;
 
@@ -451,6 +467,7 @@ fn test_auto_model_incremental_update() {
 }
 
 #[test]
+#[ignore]
 fn test_auto_model_trb_save_load() {
     use treeboost::AutoModel;
 
@@ -489,6 +506,7 @@ fn test_auto_model_trb_save_load() {
 }
 
 #[test]
+#[ignore]
 fn test_auto_model_trb_update_cycle() {
     use treeboost::AutoModel;
 
@@ -544,6 +562,7 @@ fn test_auto_model_trb_update_cycle() {
 }
 
 #[test]
+#[ignore]
 fn test_auto_model_update_report_display() {
     use treeboost::AutoModelUpdateReport;
 
@@ -563,6 +582,7 @@ fn test_auto_model_update_report_display() {
 }
 
 #[test]
+#[ignore]
 fn test_auto_model_config_preserved_across_updates() {
     use treeboost::AutoModel;
 

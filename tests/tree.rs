@@ -1,6 +1,6 @@
 //! Tree tests for multi-output vector leaf storage
 //!
-//! Tests for Phase 0.3: Tree Node Vector Storage (2D Multi-Label Support)
+//! Tree Node Vector Storage (2D Multi-Label Support)
 
 use treeboost::tree::{VectorNode, VectorNodeType, VectorTree};
 
@@ -28,13 +28,13 @@ fn test_tree_node_vector_storage() {
 
     // Create an internal node
     let internal = VectorNode::internal(
-        5,        // feature_idx
-        128,      // bin_threshold
-        5.5,      // split_value
-        1,        // left_child
-        2,        // right_child
-        1,        // depth
-        200,      // num_samples
+        5,                      // feature_idx
+        128,                    // bin_threshold
+        5.5,                    // split_value
+        1,                      // left_child
+        2,                      // right_child
+        1,                      // depth
+        200,                    // num_samples
         vec![15.0, 25.0, 35.0], // sum_grads
         vec![8.0, 12.0, 16.0],  // sum_hess
     );
@@ -67,9 +67,21 @@ fn test_vector_leaf_weight_computation() {
     // weight_0 = -(-10) / (20 + 1) = 10/21 ≈ 0.476
     // weight_1 = -(-20) / (40 + 1) = 20/41 ≈ 0.488
     // weight_2 = -(-30) / (60 + 1) = 30/61 ≈ 0.492
-    assert!((weights[0] - 10.0 / 21.0).abs() < 1e-6, "weight_0 = {}", weights[0]);
-    assert!((weights[1] - 20.0 / 41.0).abs() < 1e-6, "weight_1 = {}", weights[1]);
-    assert!((weights[2] - 30.0 / 61.0).abs() < 1e-6, "weight_2 = {}", weights[2]);
+    assert!(
+        (weights[0] - 10.0 / 21.0).abs() < 1e-6,
+        "weight_0 = {}",
+        weights[0]
+    );
+    assert!(
+        (weights[1] - 20.0 / 41.0).abs() < 1e-6,
+        "weight_1 = {}",
+        weights[1]
+    );
+    assert!(
+        (weights[2] - 30.0 / 61.0).abs() < 1e-6,
+        "weight_2 = {}",
+        weights[2]
+    );
 }
 
 /// Test VectorTree creation and prediction
@@ -86,30 +98,15 @@ fn test_vector_tree_predict() {
     let tree = VectorTree::from_nodes(
         vec![
             // Root: internal node, split on feature 0 at bin 5
-            VectorNode::internal(
-                0, 5, 5.0, 1, 2, 0, 100,
-                vec![0.0, 0.0], vec![100.0, 100.0],
-            ),
+            VectorNode::internal(0, 5, 5.0, 1, 2, 0, 100, vec![0.0, 0.0], vec![100.0, 100.0]),
             // Left child: leaf with values [1.0, 2.0]
-            VectorNode::leaf(
-                vec![1.0, 2.0], 1, 50,
-                vec![0.0, 0.0], vec![50.0, 50.0],
-            ),
+            VectorNode::leaf(vec![1.0, 2.0], 1, 50, vec![0.0, 0.0], vec![50.0, 50.0]),
             // Right child: internal node, split on feature 1 at bin 10
-            VectorNode::internal(
-                1, 10, 10.0, 3, 4, 1, 50,
-                vec![0.0, 0.0], vec![50.0, 50.0],
-            ),
+            VectorNode::internal(1, 10, 10.0, 3, 4, 1, 50, vec![0.0, 0.0], vec![50.0, 50.0]),
             // Right-left: leaf with values [3.0, 4.0]
-            VectorNode::leaf(
-                vec![3.0, 4.0], 2, 25,
-                vec![0.0, 0.0], vec![25.0, 25.0],
-            ),
+            VectorNode::leaf(vec![3.0, 4.0], 2, 25, vec![0.0, 0.0], vec![25.0, 25.0]),
             // Right-right: leaf with values [5.0, 6.0]
-            VectorNode::leaf(
-                vec![5.0, 6.0], 2, 25,
-                vec![0.0, 0.0], vec![25.0, 25.0],
-            ),
+            VectorNode::leaf(vec![5.0, 6.0], 2, 25, vec![0.0, 0.0], vec![25.0, 25.0]),
         ],
         num_outputs,
     );
@@ -141,8 +138,11 @@ fn test_vector_tree_batch_predict() {
     // Simple tree: all samples go to same leaf
     let tree = VectorTree::from_nodes(
         vec![VectorNode::leaf(
-            vec![1.5, 2.5], 0, 100,
-            vec![0.0, 0.0], vec![100.0, 100.0],
+            vec![1.5, 2.5],
+            0,
+            100,
+            vec![0.0, 0.0],
+            vec![100.0, 100.0],
         )],
         num_outputs,
     );
@@ -189,17 +189,18 @@ fn test_vector_tree_predict_raw() {
     let tree = VectorTree::from_nodes(
         vec![
             VectorNode::internal(
-                0, 127, 5.0, 1, 2, 0, 100,
-                vec![0.0, 0.0], vec![100.0, 100.0],
+                0,
+                127,
+                5.0,
+                1,
+                2,
+                0,
+                100,
+                vec![0.0, 0.0],
+                vec![100.0, 100.0],
             ),
-            VectorNode::leaf(
-                vec![1.0, 2.0], 1, 50,
-                vec![0.0, 0.0], vec![50.0, 50.0],
-            ),
-            VectorNode::leaf(
-                vec![3.0, 4.0], 1, 50,
-                vec![0.0, 0.0], vec![50.0, 50.0],
-            ),
+            VectorNode::leaf(vec![1.0, 2.0], 1, 50, vec![0.0, 0.0], vec![50.0, 50.0]),
+            VectorNode::leaf(vec![3.0, 4.0], 1, 50, vec![0.0, 0.0], vec![50.0, 50.0]),
         ],
         num_outputs,
     );

@@ -1,4 +1,4 @@
-//! Tests for AutoML multi-label support (Phase 6.1)
+//! Tests for AutoML multi-label support
 //!
 //! These tests verify that AutoML correctly handles multi-label classification tasks.
 
@@ -41,7 +41,7 @@ fn create_multilabel_dataframe(n_rows: usize, n_labels: usize, seed: u64) -> Dat
 }
 
 // =============================================================================
-// Phase 6.1: AutoML 2D Detection Tests
+//  AutoML 2D Detection Tests
 // =============================================================================
 
 #[test]
@@ -50,22 +50,28 @@ fn test_automl_multilabel_training() {
     let df = create_multilabel_dataframe(200, n_labels, 4242);
 
     // Get target column names
-    let target_cols: Vec<&str> = (0..n_labels).map(|k| {
-        // Get the column name from the DataFrame
-        match k {
-            0 => "label_0",
-            1 => "label_1",
-            2 => "label_2",
-            _ => panic!("Unexpected label index"),
-        }
-    }).collect();
+    let target_cols: Vec<&str> = (0..n_labels)
+        .map(|k| {
+            // Get the column name from the DataFrame
+            match k {
+                0 => "label_0",
+                1 => "label_1",
+                2 => "label_2",
+                _ => panic!("Unexpected label index"),
+            }
+        })
+        .collect();
 
     // Train with multi-label API
     let model = AutoModel::train_multilabel(&df, &target_cols)
         .expect("Multi-label training should succeed");
 
     // Verify model structure
-    assert_eq!(model.num_labels(), n_labels, "Should have correct number of labels");
+    assert_eq!(
+        model.num_labels(),
+        n_labels,
+        "Should have correct number of labels"
+    );
 }
 
 #[test]
@@ -75,16 +81,20 @@ fn test_automl_multilabel_prediction_shape() {
     let df = create_multilabel_dataframe(n_rows, n_labels, 5353);
     let target_cols = vec!["label_0", "label_1"];
 
-    let model = AutoModel::train_multilabel(&df, &target_cols)
-        .expect("Training should succeed");
+    let model = AutoModel::train_multilabel(&df, &target_cols).expect("Training should succeed");
 
     // Predict on the same data (just for shape testing)
-    let predictions = model.predict_multilabel(&df)
+    let predictions = model
+        .predict_multilabel(&df)
         .expect("Prediction should succeed");
 
     assert_eq!(predictions.len(), n_rows, "Should have one row per sample");
     for row in &predictions {
-        assert_eq!(row.len(), n_labels, "Each row should have predictions for all labels");
+        assert_eq!(
+            row.len(),
+            n_labels,
+            "Each row should have predictions for all labels"
+        );
     }
 }
 
@@ -95,11 +105,11 @@ fn test_automl_multilabel_correctness() {
     let df = create_multilabel_dataframe(n_rows, n_labels, 6464);
     let target_cols = vec!["label_0", "label_1", "label_2"];
 
-    let model = AutoModel::train_multilabel(&df, &target_cols)
-        .expect("Training should succeed");
+    let model = AutoModel::train_multilabel(&df, &target_cols).expect("Training should succeed");
 
     // Get predictions
-    let proba = model.predict_proba_multilabel(&df)
+    let proba = model
+        .predict_proba_multilabel(&df)
         .expect("Prediction should succeed");
 
     // Compute accuracy per label
@@ -140,18 +150,15 @@ fn test_automl_multilabel_with_mode() {
     let target_cols = vec!["label_0", "label_1"];
 
     // Force LinearThenTree mode for multi-label
-    let model = AutoModel::train_multilabel_with_mode(
-        &df,
-        &target_cols,
-        BoostingMode::LinearThenTree,
-    )
-    .expect("Training should succeed");
+    let model =
+        AutoModel::train_multilabel_with_mode(&df, &target_cols, BoostingMode::LinearThenTree)
+            .expect("Training should succeed");
 
     assert_eq!(model.mode(), BoostingMode::LinearThenTree);
 }
 
 // =============================================================================
-// Phase 6.2: Threshold Tuning Tests
+// Threshold Tuning Tests
 // =============================================================================
 
 #[test]
@@ -165,14 +172,18 @@ fn test_threshold_tuning() {
     let target_cols = vec!["label_0", "label_1", "label_2"];
 
     // Train model
-    let mut model = AutoModel::train_multilabel(&train_df, &target_cols)
-        .expect("Training should succeed");
+    let mut model =
+        AutoModel::train_multilabel(&train_df, &target_cols).expect("Training should succeed");
 
     // Initially no tuned thresholds
-    assert!(model.tuned_thresholds().is_none(), "Should have no tuned thresholds initially");
+    assert!(
+        model.tuned_thresholds().is_none(),
+        "Should have no tuned thresholds initially"
+    );
 
     // Tune thresholds on validation set
-    let tune_result = model.tune_thresholds(&val_df, &target_cols)
+    let tune_result = model
+        .tune_thresholds(&val_df, &target_cols)
         .expect("Threshold tuning should succeed");
 
     // Should have thresholds for all labels
@@ -181,15 +192,22 @@ fn test_threshold_tuning() {
 
     // Thresholds should be in valid range
     for &threshold in &tune_result.thresholds {
-        assert!(threshold >= 0.01 && threshold <= 0.99,
-            "Threshold {} should be in [0.01, 0.99]", threshold);
+        assert!(
+            threshold >= 0.01 && threshold <= 0.99,
+            "Threshold {} should be in [0.01, 0.99]",
+            threshold
+        );
     }
 
     // Model should now have tuned thresholds
-    assert!(model.tuned_thresholds().is_some(), "Should have tuned thresholds after tuning");
+    assert!(
+        model.tuned_thresholds().is_some(),
+        "Should have tuned thresholds after tuning"
+    );
 
     // predict_labels_tuned should use tuned thresholds
-    let labels = model.predict_labels_tuned(&val_df)
+    let labels = model
+        .predict_labels_tuned(&val_df)
         .expect("Prediction should succeed");
 
     assert_eq!(labels.len(), val_df.height());
@@ -209,11 +227,12 @@ fn test_threshold_tuning_improves_f1() {
     let target_cols = vec!["label_0", "label_1"];
 
     // Train model
-    let mut model = AutoModel::train_multilabel(&train_df, &target_cols)
-        .expect("Training should succeed");
+    let mut model =
+        AutoModel::train_multilabel(&train_df, &target_cols).expect("Training should succeed");
 
     // Get predictions with default 0.5 threshold
-    let proba = model.predict_proba_multilabel(&val_df)
+    let proba = model
+        .predict_proba_multilabel(&val_df)
         .expect("Prediction should succeed");
 
     let _labels_default: Vec<Vec<bool>> = proba
@@ -222,16 +241,22 @@ fn test_threshold_tuning_improves_f1() {
         .collect();
 
     // Tune thresholds
-    let tune_result = model.tune_thresholds(&val_df, &target_cols)
+    let tune_result = model
+        .tune_thresholds(&val_df, &target_cols)
         .expect("Threshold tuning should succeed");
 
     // Get predictions with tuned thresholds
-    let _labels_tuned = model.predict_labels_tuned(&val_df)
+    let _labels_tuned = model
+        .predict_labels_tuned(&val_df)
         .expect("Prediction should succeed");
 
     // Tuned thresholds should give reasonable F1 scores
     for &f1 in &tune_result.f1_scores {
-        assert!(f1 >= 0.0 && f1 <= 1.0, "F1 score {} should be in [0, 1]", f1);
+        assert!(
+            f1 >= 0.0 && f1 <= 1.0,
+            "F1 score {} should be in [0, 1]",
+            f1
+        );
     }
 }
 
@@ -253,11 +278,12 @@ fn test_multilabel_end_to_end_workflow() {
     let target_cols = vec!["label_0", "label_1", "label_2"];
 
     // 2. Train multi-label model
-    let mut model = AutoModel::train_multilabel(&train_df, &target_cols)
-        .expect("Training should succeed");
+    let mut model =
+        AutoModel::train_multilabel(&train_df, &target_cols).expect("Training should succeed");
 
     // 3. Tune thresholds on a validation split (use test_df for simplicity)
-    let tune_result = model.tune_thresholds(&test_df, &target_cols)
+    let tune_result = model
+        .tune_thresholds(&test_df, &target_cols)
         .expect("Threshold tuning should succeed");
 
     // Verify tuning produced valid results
@@ -267,9 +293,11 @@ fn test_multilabel_end_to_end_workflow() {
     }
 
     // 4. Make predictions with tuned thresholds
-    let proba = model.predict_proba_multilabel(&test_df)
+    let proba = model
+        .predict_proba_multilabel(&test_df)
         .expect("Proba prediction should succeed");
-    let labels = model.predict_labels_tuned(&test_df)
+    let labels = model
+        .predict_labels_tuned(&test_df)
         .expect("Label prediction should succeed");
 
     // Verify prediction shapes
@@ -281,7 +309,11 @@ fn test_multilabel_end_to_end_workflow() {
 
         // Probabilities should be in [0, 1]
         for &prob in p {
-            assert!(prob >= 0.0 && prob <= 1.0, "Probability {} out of range", prob);
+            assert!(
+                prob >= 0.0 && prob <= 1.0,
+                "Probability {} out of range",
+                prob
+            );
         }
     }
 
@@ -298,7 +330,8 @@ fn test_multilabel_end_to_end_workflow() {
             .into_no_null_iter()
             .collect();
 
-        let correct: usize = labels.iter()
+        let correct: usize = labels
+            .iter()
             .zip(targets.iter())
             .filter(|(pred, &target)| {
                 let p = if pred[k] { 1.0 } else { 0.0 };
@@ -310,7 +343,8 @@ fn test_multilabel_end_to_end_workflow() {
         assert!(
             accuracy > 0.5,
             "Label {} accuracy {:.2} should be better than random",
-            k, accuracy
+            k,
+            accuracy
         );
     }
 
@@ -319,19 +353,28 @@ fn test_multilabel_end_to_end_workflow() {
 
     // Save the inner UniversalModel
     let inner_model = model.inner();
-    inner_model.save(&temp_path)
+    inner_model
+        .save(&temp_path)
         .expect("Model save should succeed");
 
     // Load it back
-    let loaded = treeboost::model::UniversalModel::load(&temp_path)
-        .expect("Model load should succeed");
+    let loaded =
+        treeboost::model::UniversalModel::load(&temp_path).expect("Model load should succeed");
 
     // Verify loaded model has same structure
-    assert_eq!(loaded.mode(), inner_model.mode(), "Loaded model should have same mode");
+    assert_eq!(
+        loaded.mode(),
+        inner_model.mode(),
+        "Loaded model should have same mode"
+    );
 
     // For LinearThenTree multi-label, check per-label GBDTs were saved
     if let Some(gbdt_per_label) = loaded.gbdt_per_label() {
-        assert_eq!(gbdt_per_label.len(), n_labels, "Loaded model should have same number of per-label GBDTs");
+        assert_eq!(
+            gbdt_per_label.len(),
+            n_labels,
+            "Loaded model should have same number of per-label GBDTs"
+        );
     }
 
     // Clean up
@@ -345,18 +388,15 @@ fn test_multilabel_pure_tree_mode() {
     let df = create_multilabel_dataframe(200, n_labels, 3333);
     let target_cols = vec!["label_0", "label_1"];
 
-    let model = AutoModel::train_multilabel_with_mode(
-        &df,
-        &target_cols,
-        BoostingMode::PureTree,
-    )
-    .expect("PureTree multi-label training should succeed");
+    let model = AutoModel::train_multilabel_with_mode(&df, &target_cols, BoostingMode::PureTree)
+        .expect("PureTree multi-label training should succeed");
 
     assert_eq!(model.mode(), BoostingMode::PureTree);
     assert_eq!(model.num_labels(), n_labels);
 
     // Predictions should work
-    let proba = model.predict_proba_multilabel(&df)
+    let proba = model
+        .predict_proba_multilabel(&df)
         .expect("Prediction should succeed");
     assert_eq!(proba.len(), df.height());
 }
@@ -381,13 +421,7 @@ fn create_imbalanced_multilabel_dataframe(n_rows: usize, n_labels: usize, seed: 
         let label: Vec<i32> = x1
             .iter()
             .zip(x2.iter())
-            .map(|(&a, &b)| {
-                if a + b * 0.5 > high_threshold {
-                    1
-                } else {
-                    0
-                }
-            })
+            .map(|(&a, &b)| if a + b * 0.5 > high_threshold { 1 } else { 0 })
             .collect();
         columns.push(Column::new(format!("label_{}", k).into(), label));
     }

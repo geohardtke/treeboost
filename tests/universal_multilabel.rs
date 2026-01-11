@@ -1,4 +1,4 @@
-//! Tests for UniversalModel multi-label support (Phase 5.1)
+//! Tests for UniversalModel multi-label support
 
 use treeboost::dataset::{BinnedDataset, FeatureInfo, FeatureType};
 use treeboost::learner::LinearConfig;
@@ -50,10 +50,6 @@ fn create_multilabel_dataset(n: usize, num_outputs: usize, seed: u64) -> BinnedD
 
     BinnedDataset::new_multioutput(n, features, targets, feature_info, num_outputs)
 }
-
-// =============================================================================
-// Phase 5.1: LinearThenTree Multi-Label Tests
-// =============================================================================
 
 #[test]
 fn test_ltt_multilabel_training() {
@@ -108,9 +104,17 @@ fn test_ltt_multilabel_prediction_shape() {
 
     // Test predict_multilabel returns correct shape
     let predictions = model.predict_multilabel(&dataset);
-    assert_eq!(predictions.len(), num_rows, "Should have row for each sample");
+    assert_eq!(
+        predictions.len(),
+        num_rows,
+        "Should have row for each sample"
+    );
     for row in &predictions {
-        assert_eq!(row.len(), num_outputs, "Each row should have num_outputs predictions");
+        assert_eq!(
+            row.len(),
+            num_outputs,
+            "Each row should have num_outputs predictions"
+        );
     }
 
     // Test predict_proba_multilabel returns probabilities in [0, 1]

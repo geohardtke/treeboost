@@ -1,6 +1,4 @@
 //! Dataset tests for multi-output 2D target ingestion
-//!
-//! Tests for Phase 1.1: Dataset 2D Ingestion (2D Multi-Label Support)
 
 use treeboost::dataset::{BinnedDataset, FeatureInfo, FeatureType};
 
@@ -46,13 +44,8 @@ fn test_dataset_2d_ingestion() {
         create_test_feature_info("f1", 14),
     ];
 
-    let dataset = BinnedDataset::new_multioutput(
-        num_rows,
-        features,
-        targets,
-        feature_info,
-        num_target_cols,
-    );
+    let dataset =
+        BinnedDataset::new_multioutput(num_rows, features, targets, feature_info, num_target_cols);
 
     // Verify basic properties
     assert_eq!(dataset.num_rows(), num_rows);
@@ -125,7 +118,8 @@ fn test_dataset_targets_validation() {
     let feature_info = vec![create_test_feature_info("f0", 4)];
 
     // This should panic
-    let _ = BinnedDataset::new_multioutput(num_rows, features, targets, feature_info, num_target_cols);
+    let _ =
+        BinnedDataset::new_multioutput(num_rows, features, targets, feature_info, num_target_cols);
 }
 
 /// Test subset_by_indices preserves multi-output structure
@@ -146,7 +140,8 @@ fn test_dataset_subset_multioutput() {
         create_test_feature_info("f1", 14),
     ];
 
-    let dataset = BinnedDataset::new_multioutput(num_rows, features, targets, feature_info, num_target_cols);
+    let dataset =
+        BinnedDataset::new_multioutput(num_rows, features, targets, feature_info, num_target_cols);
 
     // Take indices [1, 3]
     let subset = dataset.subset_by_indices(&[1, 3]);
@@ -173,7 +168,8 @@ fn test_dataset_with_targets_multioutput() {
     let targets = vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
     let feature_info = vec![create_test_feature_info("f0", 3)];
 
-    let dataset = BinnedDataset::new_multioutput(num_rows, features, targets, feature_info, num_target_cols);
+    let dataset =
+        BinnedDataset::new_multioutput(num_rows, features, targets, feature_info, num_target_cols);
 
     // Replace with new targets
     let new_targets = vec![0.0, 1.0, 1.0, 0.0, 0.5, 0.5];
@@ -200,17 +196,14 @@ fn test_dataset_targets_column_access() {
     ];
     let feature_info = vec![create_test_feature_info("f0", 3)];
 
-    let dataset = BinnedDataset::new_multioutput(num_rows, features, targets, feature_info, num_target_cols);
+    let dataset =
+        BinnedDataset::new_multioutput(num_rows, features, targets, feature_info, num_target_cols);
 
     // Get all values for label 0
-    let col0: Vec<f32> = (0..num_rows)
-        .map(|r| dataset.get_target(r, 0))
-        .collect();
+    let col0: Vec<f32> = (0..num_rows).map(|r| dataset.get_target(r, 0)).collect();
     assert_eq!(col0, vec![1.0, 0.0, 1.0]);
 
     // Get all values for label 1
-    let col1: Vec<f32> = (0..num_rows)
-        .map(|r| dataset.get_target(r, 1))
-        .collect();
+    let col1: Vec<f32> = (0..num_rows).map(|r| dataset.get_target(r, 1)).collect();
     assert_eq!(col1, vec![0.0, 1.0, 1.0]);
 }

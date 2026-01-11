@@ -1,11 +1,6 @@
 //! Loss function tests for multi-output (multi-label) support
-//!
-//! Tests for Phase 2: Loss Functions (2D Multi-Label Support)
-//! - Phase 2.1: Multi-Label Log Loss
-//! - Phase 2.2: Multi-Label Focal Loss
-//! - Phase 2.3: Loss Trait Update
 
-use treeboost::loss::{sigmoid, LossFunction, MultiLabelFocalLoss, MultiLabelLogLoss, MseLoss};
+use treeboost::loss::{sigmoid, LossFunction, MseLoss, MultiLabelFocalLoss, MultiLabelLogLoss};
 
 /// Test multi-label log loss gradients
 ///
@@ -66,29 +61,71 @@ fn test_multilabel_batch_gradients() {
     let mut gradients = vec![0.0; num_rows * num_outputs];
     let mut hessians = vec![0.0; num_rows * num_outputs];
 
-    loss.compute_gradients_multi(&targets, &predictions, &mut gradients, &mut hessians, num_outputs);
+    loss.compute_gradients_multi(
+        &targets,
+        &predictions,
+        &mut gradients,
+        &mut hessians,
+        num_outputs,
+    );
 
     // Verify row 0
     let p00 = sigmoid(2.0);
     let p01 = sigmoid(-2.0);
     let p02 = sigmoid(0.0);
 
-    assert!((gradients[0] - (p00 - 1.0)).abs() < 1e-5, "g[0] = {}", gradients[0]);
-    assert!((gradients[1] - (p01 - 0.0)).abs() < 1e-5, "g[1] = {}", gradients[1]);
-    assert!((gradients[2] - (p02 - 1.0)).abs() < 1e-5, "g[2] = {}", gradients[2]);
+    assert!(
+        (gradients[0] - (p00 - 1.0)).abs() < 1e-5,
+        "g[0] = {}",
+        gradients[0]
+    );
+    assert!(
+        (gradients[1] - (p01 - 0.0)).abs() < 1e-5,
+        "g[1] = {}",
+        gradients[1]
+    );
+    assert!(
+        (gradients[2] - (p02 - 1.0)).abs() < 1e-5,
+        "g[2] = {}",
+        gradients[2]
+    );
 
-    assert!((hessians[0] - p00 * (1.0 - p00)).abs() < 1e-5, "h[0] = {}", hessians[0]);
-    assert!((hessians[1] - p01 * (1.0 - p01)).abs() < 1e-5, "h[1] = {}", hessians[1]);
-    assert!((hessians[2] - p02 * (1.0 - p02)).abs() < 1e-5, "h[2] = {}", hessians[2]);
+    assert!(
+        (hessians[0] - p00 * (1.0 - p00)).abs() < 1e-5,
+        "h[0] = {}",
+        hessians[0]
+    );
+    assert!(
+        (hessians[1] - p01 * (1.0 - p01)).abs() < 1e-5,
+        "h[1] = {}",
+        hessians[1]
+    );
+    assert!(
+        (hessians[2] - p02 * (1.0 - p02)).abs() < 1e-5,
+        "h[2] = {}",
+        hessians[2]
+    );
 
     // Verify row 1
     let p10 = sigmoid(-1.0);
     let p11 = sigmoid(1.0);
     let p12 = sigmoid(0.5);
 
-    assert!((gradients[3] - (p10 - 0.0)).abs() < 1e-5, "g[3] = {}", gradients[3]);
-    assert!((gradients[4] - (p11 - 1.0)).abs() < 1e-5, "g[4] = {}", gradients[4]);
-    assert!((gradients[5] - (p12 - 0.0)).abs() < 1e-5, "g[5] = {}", gradients[5]);
+    assert!(
+        (gradients[3] - (p10 - 0.0)).abs() < 1e-5,
+        "g[3] = {}",
+        gradients[3]
+    );
+    assert!(
+        (gradients[4] - (p11 - 1.0)).abs() < 1e-5,
+        "g[4] = {}",
+        gradients[4]
+    );
+    assert!(
+        (gradients[5] - (p12 - 0.0)).abs() < 1e-5,
+        "g[5] = {}",
+        gradients[5]
+    );
 }
 
 /// Test initial predictions for multi-label (per-label log-odds)
@@ -115,7 +152,11 @@ fn test_multilabel_initial_predictions() {
     let initial = loss.initial_predictions(&targets, num_outputs);
 
     assert_eq!(initial.len(), num_outputs);
-    assert!((initial[0] - 3.0_f32.ln()).abs() < 1e-5, "init[0] = {}", initial[0]);
+    assert!(
+        (initial[0] - 3.0_f32.ln()).abs() < 1e-5,
+        "init[0] = {}",
+        initial[0]
+    );
     assert!(initial[1].abs() < 1e-5, "init[1] = {}", initial[1]); // log(1) = 0
 }
 
@@ -163,7 +204,7 @@ fn test_multilabel_to_probabilities() {
     // Row-wise predictions
     let predictions = vec![
         0.0, 10.0, -10.0, // row 0
-        -5.0, 5.0, 0.0,   // row 1
+        -5.0, 5.0, 0.0, // row 1
     ];
 
     let probs = loss.to_probabilities(&predictions, num_outputs);
@@ -180,10 +221,6 @@ fn test_multilabel_to_probabilities() {
     assert!(probs[4] > 0.99);
     assert!((probs[5] - 0.5).abs() < 1e-6);
 }
-
-// =============================================================================
-// Phase 2.2: Multi-Label Focal Loss Tests
-// =============================================================================
 
 /// Test multi-label focal loss gradients and focusing behavior
 ///
@@ -298,7 +335,13 @@ fn test_focal_batch_gradients() {
     let mut gradients = vec![0.0; 4];
     let mut hessians = vec![0.0; 4];
 
-    focal.compute_gradients_multi(&targets, &predictions, &mut gradients, &mut hessians, num_outputs);
+    focal.compute_gradients_multi(
+        &targets,
+        &predictions,
+        &mut gradients,
+        &mut hessians,
+        num_outputs,
+    );
 
     // Row 0: easy examples (correct predictions)
     // Row 1: hard examples (wrong predictions)
@@ -388,10 +431,6 @@ fn test_focal_reduces_to_logloss() {
     }
 }
 
-// =============================================================================
-// Phase 2.3: Loss Trait Update Tests
-// =============================================================================
-
 /// Test that multi-output losses can be used via the LossFunction trait
 #[test]
 fn test_loss_trait_multi_output_interface() {
@@ -420,7 +459,13 @@ fn test_trait_compute_gradients_multi() {
     let mut gradients = vec![0.0; 4];
     let mut hessians = vec![0.0; 4];
 
-    loss.compute_gradients_multi(&targets, &predictions, &mut gradients, &mut hessians, num_outputs);
+    loss.compute_gradients_multi(
+        &targets,
+        &predictions,
+        &mut gradients,
+        &mut hessians,
+        num_outputs,
+    );
 
     // Verify gradients are computed correctly
     for g in &gradients {
