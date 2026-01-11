@@ -112,7 +112,7 @@ impl UniversalModel {
         let new_model = GBDTModel::train_binned(&residual_dataset, gbdt_config)?;
 
         // Append new trees
-        gbdt.append_trees(new_model.trees().to_vec());
+        gbdt.append_ensemble_trees(new_model.trees().to_vec());
 
         Ok(())
     }
@@ -183,7 +183,7 @@ impl UniversalModel {
             let gbdt_config = Self::to_gbdt_config(&update_config, loss_fn)?;
             let new_model = GBDTModel::train_binned(&residual_dataset, gbdt_config)?;
 
-            gbdt.append_trees(new_model.trees().to_vec());
+            gbdt.append_ensemble_trees(new_model.trees().to_vec());
         }
 
         Ok(())

@@ -73,7 +73,7 @@ pub use config::{StackingStrategy, UniversalConfig, UniversalPreset};
 pub use mode::{BoostingMode, ModeSelection};
 
 // Implementation Note:
-// Phase 2 split: UniversalModel implementation is now organized into logical modules:
+// UniversalModel implementation is now organized into logical modules:
 // - core.rs: Struct definition (~640 lines) + basic accessors + helpers
 // - training.rs: All train*() methods (~500 lines)
 // - prediction.rs: All predict*() and analysis methods (~700 lines)
