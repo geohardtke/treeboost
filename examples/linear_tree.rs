@@ -122,13 +122,18 @@ fn main() {
         .with_tree_config(
             TreeConfig::default()
                 .with_max_depth(3) // Shallow tree - let linear models do the work
+                .expect("valid max_depth")
                 .with_max_leaves(8)
-                .with_min_samples_leaf(50),
+                .expect("valid max_leaves")
+                .with_min_samples_leaf(50)
+                .expect("valid min_samples_leaf"),
         )
         .with_linear_config(
             LinearConfig::default()
                 .with_lambda(0.1) // Light regularization
-                .with_max_iter(100),
+                .expect("valid lambda")
+                .with_max_iter(100)
+                .expect("valid max_iter"),
         )
         .with_min_samples_for_linear(20);
 

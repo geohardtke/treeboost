@@ -23,10 +23,15 @@ fn test_shrinkage_factor_applied() {
         let linear_config = LinearConfig::default()
             .with_preset(treeboost::LinearPreset::Ridge)
             .with_lambda(0.01)
+            .expect("valid lambda")
             .with_shrinkage_factor(shrinkage)
-            .with_max_iter(500);
+            .expect("valid shrinkage_factor")
+            .with_max_iter(500)
+            .expect("valid max_iter");
 
-        let tree_config = TreeConfig::default().with_max_depth(3);
+        let tree_config = TreeConfig::default()
+            .with_max_depth(3)
+            .expect("valid max_depth");
 
         let univ_config = UniversalConfig::default()
             .with_mode(BoostingMode::LinearThenTree)
@@ -81,12 +86,17 @@ fn test_ltt_pure_linear_data() {
     let linear_config = LinearConfig::default()
         .with_preset(treeboost::LinearPreset::Ridge)
         .with_lambda(0.01) // Very light regularization for pure linear data
+        .expect("valid lambda")
         .with_shrinkage_factor(1.0) // Full step size
-        .with_max_iter(500); // Many iterations for convergence
+        .expect("valid shrinkage_factor")
+        .with_max_iter(500) // Many iterations for convergence
+        .expect("valid max_iter");
 
     let tree_config = TreeConfig::default()
         .with_max_depth(3)
-        .with_min_samples_leaf(5); // No auto-stopping, train completely
+        .expect("valid max_depth")
+        .with_min_samples_leaf(5) // No auto-stopping, train completely
+        .expect("valid min_samples_leaf");
 
     let univ_config = UniversalConfig::default()
         .with_mode(BoostingMode::LinearThenTree)
@@ -156,11 +166,16 @@ fn test_ltt_linear_plus_residual() {
     let linear_config = LinearConfig::default()
         .with_preset(treeboost::LinearPreset::Ridge)
         .with_lambda(0.01)
+        .expect("valid lambda")
         .with_shrinkage_factor(1.0)
-        .with_max_iter(500);
+        .expect("valid shrinkage_factor")
+        .with_max_iter(500)
+        .expect("valid max_iter");
 
     // Trees need to fit sin(x) residual - use appropriate depth
-    let tree_config = TreeConfig::default().with_max_depth(6);
+    let tree_config = TreeConfig::default()
+        .with_max_depth(6)
+        .expect("valid max_depth");
 
     let univ_config = UniversalConfig::default()
         .with_mode(BoostingMode::LinearThenTree)
@@ -292,10 +307,15 @@ fn test_ltt_with_id_like_columns() {
     let linear_config = LinearConfig::default()
         .with_preset(treeboost::LinearPreset::Ridge)
         .with_lambda(0.01)
+        .expect("valid lambda")
         .with_shrinkage_factor(1.0)
-        .with_max_iter(500);
+        .expect("valid shrinkage_factor")
+        .with_max_iter(500)
+        .expect("valid max_iter");
 
-    let tree_config = TreeConfig::default().with_max_depth(3);
+    let tree_config = TreeConfig::default()
+        .with_max_depth(3)
+        .expect("valid max_depth");
 
     let univ_config = UniversalConfig::default()
         .with_mode(BoostingMode::LinearThenTree)
@@ -476,10 +496,15 @@ fn test_ltt_with_pipeline_encoded_categoricals() {
     let linear_config = LinearConfig::default()
         .with_preset(treeboost::LinearPreset::Ridge)
         .with_lambda(0.01)
+        .expect("valid lambda")
         .with_shrinkage_factor(1.0)
-        .with_max_iter(100);
+        .expect("valid shrinkage_factor")
+        .with_max_iter(100)
+        .expect("valid max_iter");
 
-    let tree_config = TreeConfig::default().with_max_depth(6);
+    let tree_config = TreeConfig::default()
+        .with_max_depth(6)
+        .expect("valid max_depth");
 
     let univ_config = UniversalConfig::default()
         .with_mode(BoostingMode::LinearThenTree)
