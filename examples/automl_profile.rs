@@ -120,7 +120,7 @@ fn run_profile(num_rows: usize) -> Result<()> {
     );
 
     // =========================================================================
-    // PHASE 4: Analysis Phase (THE BOTTLENECK!)
+    // PHASE 4: Analysis Phase
     // =========================================================================
     let phase4_start = Instant::now();
     println!("[  40%] Analysis Phase - PROFILING IN DETAIL...\n");

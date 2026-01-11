@@ -11,6 +11,7 @@ TreeBoost is a Rust-first library for tabular machine learning that starts simpl
 ## At a Glance
 
 - AutoML and AutoTuner for fast, explainable baselines
+- Multi-label, multi-class, and regression in one API
 - Hybrid Linear+Tree mode for trend extrapolation + non-linear interactions
 - Built-in preprocessing that serializes with your model
 - GPU acceleration (WebGPU, CUDA) plus AVX-512/SVE2 CPU backends
@@ -142,6 +143,29 @@ let predictions = model.predict(&dataset);
 | Time-series, trending, needs extrapolation | `BoostingMode::LinearThenTree` |
 | Noisy data, want robustness                | `BoostingMode::RandomForest`   |
 
+## Quick Start (Multi-Label Classification)
+
+For problems where each sample can belong to multiple independent labels (e.g., multi-tag classification, multiple disease diagnoses):
+
+```rust
+use treeboost::AutoModel;
+
+// Train multi-label model (default: LinearThenTree mode)
+let target_cols = vec!["tag_finance", "tag_tech", "tag_urgent"];
+let model = AutoModel::train_multilabel(&df, &target_cols)?;
+
+// Predictions with probabilities
+let probs = model.predict_proba_multilabel(&df)?;  // Vec<Vec<f32>>
+
+// Predictions with labels (threshold 0.5)
+let labels = model.predict_labels(&df)?;  // Vec<Vec<bool>>
+
+// Tune thresholds on validation set for better F1 scores
+let mut model = AutoModel::train_multilabel(&df, &target_cols)?;
+let tune_result = model.tune_thresholds(&val_df, &target_cols)?;
+let labels = model.predict_labels_tuned(&df)?;  // Uses tuned thresholds
+```
+
 ## Quick Start (GBDTModel)
 
 ```rust
@@ -187,24 +211,27 @@ TreeBoost includes battle-tested capabilities for real-world deployments.
 
 ### Feature Matrix
 
-| Category          | Capability                        | Use Case                            | API Entry Point                              |
-| ----------------- | --------------------------------- | ----------------------------------- | -------------------------------------------- |
-| **Model Updates** | Incremental Learning (TRB format) | Daily model updates, streaming data | `UniversalModel::update()`                   |
-|                   | O(1) Append Updates               | Efficient model versioning          | `save_trb_update()`                          |
-|                   | Memory-Mapped I/O                 | Large model inference               | `MmapTrbReader` (mmap feature)               |
-| **Monitoring**    | Drift Detection (PSI, KL, KS)     | Distribution shift alerts           | `IncrementalDriftDetector`                   |
-|                   | Drift History Tracking            | Long-term monitoring                | `DriftHistory`                               |
-| **Ensembles**     | Multi-Seed Training               | Variance reduction                  | `with_ensemble_seeds()`                      |
-|                   | Stacked Blending                  | Meta-learner combination            | `StackingStrategy::Ridge`                    |
-| **Constraints**   | Monotonic Constraints             | Domain knowledge enforcement        | `TreeConfig::with_monotonic_constraints()`   |
-|                   | Interaction Constraints           | Feature interaction control         | `TreeConfig::with_interaction_constraints()` |
-| **Encoding**      | Ordered Target Encoding           | High-cardinality categoricals       | `OrderedTargetEncoder`                       |
-|                   | Count-Min Sketch Filtering        | Rare category handling              | `CategoryFilter`                             |
-| **Features**      | Time-Series (Lag/Rolling/EWMA)    | Panel data, forecasting             | `LagGenerator`, `RollingGenerator`           |
-|                   | Cross-Sectional (Poly/Ratio)      | Feature engineering                 | `PolynomialGenerator`, `RatioGenerator`      |
-| **Preprocessing** | Incremental Scaler (Welford)      | Adaptive preprocessing              | `StandardScaler::with_forget_factor()`       |
-|                   | Outlier Detection (IQR/Z-score)   | Robust pipelines                    | `OutlierDetector`, `RobustScaler`            |
-| **Uncertainty**   | Split Conformal Prediction        | Distribution-free intervals         | `GBDTConfig::with_conformal()`               |
+| Category           | Capability                        | Use Case                              | API Entry Point                              |
+| ------------------ | --------------------------------- | ------------------------------------- | -------------------------------------------- |
+| **Classification** | Multi-Label Classification        | Multi-tag prediction, multi-diagnosis | `AutoModel::train_multilabel()`              |
+|                    | Threshold Tuning                  | Per-label F1 optimization             | `model.tune_thresholds()`                    |
+|                    | Multi-Class Classification        | Single category prediction            | `AutoModel::train()` with softmax loss       |
+| **Model Updates**  | Incremental Learning (TRB format) | Daily model updates, streaming data   | `UniversalModel::update()`                   |
+|                    | O(1) Append Updates               | Efficient model versioning            | `save_trb_update()`                          |
+|                    | Memory-Mapped I/O                 | Large model inference                 | `MmapTrbReader` (mmap feature)               |
+| **Monitoring**     | Drift Detection (PSI, KL, KS)     | Distribution shift alerts             | `IncrementalDriftDetector`                   |
+|                    | Drift History Tracking            | Long-term monitoring                  | `DriftHistory`                               |
+| **Ensembles**      | Multi-Seed Training               | Variance reduction                    | `with_ensemble_seeds()`                      |
+|                    | Stacked Blending                  | Meta-learner combination              | `StackingStrategy::Ridge`                    |
+| **Constraints**    | Monotonic Constraints             | Domain knowledge enforcement          | `TreeConfig::with_monotonic_constraints()`   |
+|                    | Interaction Constraints           | Feature interaction control           | `TreeConfig::with_interaction_constraints()` |
+| **Encoding**       | Ordered Target Encoding           | High-cardinality categoricals         | `OrderedTargetEncoder`                       |
+|                    | Count-Min Sketch Filtering        | Rare category handling                | `CategoryFilter`                             |
+| **Features**       | Time-Series (Lag/Rolling/EWMA)    | Panel data, forecasting               | `LagGenerator`, `RollingGenerator`           |
+|                    | Cross-Sectional (Poly/Ratio)      | Feature engineering                   | `PolynomialGenerator`, `RatioGenerator`      |
+| **Preprocessing**  | Incremental Scaler (Welford)      | Adaptive preprocessing                | `StandardScaler::with_forget_factor()`       |
+|                    | Outlier Detection (IQR/Z-score)   | Robust pipelines                      | `OutlierDetector`, `RobustScaler`            |
+| **Uncertainty**    | Split Conformal Prediction        | Distribution-free intervals           | `GBDTConfig::with_conformal()`               |
 
 ### Example: Incremental Learning Workflow
 

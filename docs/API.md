@@ -13,7 +13,7 @@ Complete API documentation for TreeBoost's Rust and Python interfaces.
 7. [Inference](#inference) - Prediction and uncertainty
 8. [Encoding](#encoding) - Categorical feature handling
 9. [Serialization](#serialization) - Model persistence (rkyv, bincode)
-10. [Incremental Learning](#incremental-learning) - **NEW:** TRB format, warm-start updates, drift detection
+10. [Incremental Learning](#incremental-learning) - TRB format, warm-start updates, drift detection
 11. [Backend Selection](#backend-selection) - Hardware acceleration
 12. [GBDTModel (Classic)](#gbdtmodel-classic) - The original GBDT-only API (still available)
 
@@ -112,7 +112,7 @@ let config = UniversalConfig::new()
 let model = UniversalModel::train(&dataset, config, &MseLoss)?;
 ```
 
-### Automatic Mode Selection (NEW)
+### Automatic Mode Selection
 
 TreeBoost can **automatically analyze your dataset** and pick the best boosting mode. This "MRI scan" approach analyzes data characteristics WITHOUT expensive training trials.
 
@@ -197,6 +197,45 @@ println!("{}", model.analysis_report().unwrap());
 println!("{}", model.analysis_summary().unwrap());
 ```
 
+**Analysis Configuration:**
+
+Control the speed/thoroughness of dataset analysis:
+
+```rust
+use treeboost::analysis::{AnalysisConfig, AnalysisPreset};
+
+// Fast: Minimal probing (5-10k samples, shallow trees)
+let config = AnalysisConfig::fast();
+
+// Standard: Balanced (default, 10-20k samples)
+let config = AnalysisConfig::default();
+
+// Thorough: Deep analysis (30-50k samples, more iterations)
+let config = AnalysisConfig::thorough();
+
+// From preset enum
+let config = AnalysisConfig::with_preset(AnalysisPreset::Fast);
+```
+
+| Preset     | Sample Rows | Linear Iterations | Tree Depth | Use When                           |
+| ---------- | ----------- | ----------------- | ---------- | ---------------------------------- |
+| `Fast`     | 5-10k       | ~10               | 3          | Quick exploration, CI/testing      |
+| `Standard` | 10-20k      | ~50               | 5          | Default (balanced speed/accuracy)  |
+| `Thorough` | 30-50k      | ~100              | 8          | Final model selection, publication |
+
+Use with auto methods:
+
+```rust
+// Via ModeSelection
+let selection = ModeSelection::AutoWithConfig(AnalysisConfig::fast());
+let model = UniversalModel::train_with_selection(&dataset, config, selection, &loss)?;
+
+// Direct method
+let model = UniversalModel::auto_with_analysis_config(
+    &dataset, config, AnalysisConfig::thorough(), &loss
+)?;
+```
+
 **Decision Logic:**
 
 | Data Pattern                             | Recommended Mode | Why                                            |
@@ -212,6 +251,70 @@ println!("{}", model.analysis_summary().unwrap());
 - ✅ **Documentation** - Report explains the decision
 - ❌ **Benchmarking** - Use fixed mode for reproducibility
 - ❌ **Known best mode** - Skip analysis overhead
+
+### Multi-Label Classification
+
+Train models that predict multiple independent binary targets simultaneously. Ideal for multi-tagging, multi-category prediction, and any problem where samples can belong to multiple labels at once. Default mode is `LinearThenTree` which combines linear signal detection with per-label tree refinement.
+
+**Quick Start (AutoML):**
+
+```rust
+use treeboost::AutoModel;
+
+// Train multi-label model (default: LinearThenTree mode)
+let target_cols = vec!["tag_finance", "tag_tech", "tag_urgent"];
+let model = AutoModel::train_multilabel(&df, &target_cols)?;
+
+// Predictions with probabilities (sigmoid per label)
+let probs = model.predict_proba_multilabel(&df)?;        // Vec<Vec<f32>>
+
+// Predictions with binary labels (default threshold 0.5)
+let labels = model.predict_labels(&df)?;                 // Vec<Vec<bool>>
+```
+
+**With Threshold Tuning:**
+
+```rust
+let mut model = AutoModel::train_multilabel(&df, &target_cols)?;
+
+// Tune thresholds on validation set (optimizes per-label F1)
+let tune_result = model.tune_thresholds(&val_df, &target_cols)?;
+println!("Optimal thresholds: {:?}", tune_result.thresholds);
+
+// Predict with tuned thresholds
+let labels = model.predict_labels_tuned(&df)?;
+
+// Or use custom threshold
+let labels = model.predict_labels_with_threshold(&df, 0.4)?;
+```
+
+**With Specific Boosting Mode:**
+
+```rust
+use treeboost::BoostingMode;
+
+// Force LinearThenTree mode (default and recommended for multi-label)
+let model = AutoModel::train_multilabel_with_mode(
+    &df,
+    &target_cols,
+    BoostingMode::LinearThenTree,
+)?;
+
+// Or use PureTree for no linear phase
+let model = AutoModel::train_multilabel_with_mode(
+    &df,
+    &target_cols,
+    BoostingMode::PureTree,
+)?;
+```
+
+**How It Works:**
+
+- **Input:** Multiple binary target columns, each representing an independent label
+- **Training:** Unified multi-label loss (sigmoid per label), trains K trees per round
+- **Default Mode:** LinearThenTree - linear phase captures global trends, per-label trees refine residuals
+- **Threshold Tuning:** F1-optimal threshold sweep (0.01-0.99) per label on validation set
+- **Output:** Per-sample probability for each label, with optional threshold-based binary predictions
 
 ### Serialization
 
@@ -275,18 +378,59 @@ let quantile = model.conformal_quantile();  // Option<f32>
 
 ### Classification (PureTree only)
 
+**Binary Classification:**
+
 ```rust
-// Binary classification
 let probabilities = model.predict_proba(&dataset)?;        // Vec<f32> in [0, 1]
 let classes = model.predict_class(&dataset, 0.5)?;         // Vec<u32> (0 or 1)
+```
 
-// Multi-class
+**Multi-Class Classification:**
+
+```rust
 let is_mc = model.is_multiclass();                         // bool
-let num_classes = model.get_num_classes();                 // usize
 let probs = model.predict_proba_multiclass(&dataset)?;     // Vec<Vec<f32>>
 let classes = model.predict_class_multiclass(&dataset)?;   // Vec<u32>
 let logits = model.predict_raw_multiclass(&dataset)?;      // Vec<Vec<f32>>
 ```
+
+**Multi-Label Classification:**
+
+Multi-label classification handles problems where each sample can have multiple independent binary labels simultaneously (e.g., multi-tag classification, multiple disease diagnoses).
+
+```rust
+// Train multi-label model (each column is an independent binary target)
+let target_cols = vec!["tag_finance", "tag_tech", "tag_urgent"];
+let model = AutoModel::train_multilabel(&df, &target_cols)?;
+
+// Predict probabilities for each label (sigmoid per label)
+let probs = model.predict_proba_multilabel(&df)?;     // Vec<Vec<f32>>
+
+// Predict binary labels with default 0.5 threshold
+let labels = model.predict_labels(&df)?;              // Vec<Vec<bool>>
+
+// Predict with custom threshold
+let labels = model.predict_labels_with_threshold(&df, 0.3)?;  // Vec<Vec<bool>>
+
+// Tune thresholds on validation set (optimizes per-label F1 scores)
+let mut model = AutoModel::train_multilabel(&df, &target_cols)?;
+let tune_result = model.tune_thresholds(&val_df, &target_cols)?;
+let labels = model.predict_labels_tuned(&df)?;        // Uses tuned thresholds
+
+// Access tuned thresholds
+if let Some(thresholds) = model.tuned_thresholds() {
+    println!("Optimal thresholds: {:?}", thresholds);
+}
+```
+
+**Multi-Label vs Multi-Class:**
+
+| Aspect                | Multi-Label                                       | Multi-Class                  |
+| --------------------- | ------------------------------------------------- | ---------------------------- |
+| **Labels per sample** | Multiple (independent)                            | Exactly one                  |
+| **Activation**        | Sigmoid per label                                 | Softmax across classes       |
+| **Use case**          | Tags, multiple diseases, attributes               | Single category              |
+| **API**               | `predict_labels()` / `predict_proba_multilabel()` | `predict_class_multiclass()` |
 
 ### Feature Importance
 
@@ -318,26 +462,32 @@ let classes = model.predict_class_raw(features, 0.5)?;
 | Method                                                     | Returns      | Description                    |
 | ---------------------------------------------------------- | ------------ | ------------------------------ |
 | `train(&dataset, config, &loss)`                           | Result<Self> | Train with explicit config     |
-| `auto(&dataset, &loss)`                                    | Result<Self> | Auto-select mode (NEW)         |
+| `auto(&dataset, &loss)`                                    | Result<Self> | Auto-select mode               |
 | `auto_with_config(&dataset, config, &loss)`                | Result<Self> | Auto-select with custom config |
 | `train_with_selection(&dataset, config, selection, &loss)` | Result<Self> | Full control via ModeSelection |
 
 **Prediction Methods:**
 
-| Method                               | Returns                 | Modes    | Description                  |
-| ------------------------------------ | ----------------------- | -------- | ---------------------------- |
-| `predict(&dataset)`                  | Vec<f32>                | All      | Point predictions            |
-| `predict_row(&dataset, idx)`         | f32                     | All      | Single row prediction        |
-| `predict_with_intervals(&dataset)`   | Result<(Vec, Vec, Vec)> | PureTree | Conformal intervals          |
-| `predict_proba(&dataset)`            | Result<Vec<f32>>        | PureTree | Binary probabilities         |
-| `predict_class(&dataset, threshold)` | Result<Vec<u32>>        | PureTree | Binary classes               |
-| `predict_proba_multiclass(&dataset)` | Result<Vec<Vec<f32>>>   | PureTree | Multi-class probabilities    |
-| `predict_class_multiclass(&dataset)` | Result<Vec<u32>>        | PureTree | Multi-class predictions      |
-| `feature_importance()`               | Vec<f32>                | All      | Normalized importance scores |
-| `predict_raw(features)`              | Result<Vec<f32>>        | PureTree | From unbinned features       |
-| `conformal_quantile()`               | Option<f32>             | PureTree | Calibrated quantile          |
-| `is_multiclass()`                    | bool                    | All      | Check if multi-class model   |
-| `get_num_classes()`                  | usize                   | All      | Number of classes            |
+| Method                                   | Returns                 | Modes    | Description                       |
+| ---------------------------------------- | ----------------------- | -------- | --------------------------------- |
+| `predict(&dataset)`                      | Vec<f32>                | All      | Point predictions                 |
+| `predict_row(&dataset, idx)`             | f32                     | All      | Single row prediction             |
+| `predict_with_intervals(&dataset)`       | Result<(Vec, Vec, Vec)> | PureTree | Conformal intervals               |
+| `predict_proba(&df)`                     | Result<Vec<f32>>        | All      | Binary probabilities              |
+| `predict_class(&df, threshold)`          | Result<Vec<u32>>        | All      | Binary classes                    |
+| `predict_proba_multiclass(&df)`          | Result<Vec<Vec<f32>>>   | All      | Multi-class probabilities         |
+| `predict_class_multiclass(&df)`          | Result<Vec<u32>>        | All      | Multi-class predictions           |
+| `predict_multilabel(&df)`                | Result<Vec<Vec<f32>>>   | All      | Multi-label raw scores            |
+| `predict_proba_multilabel(&df)`          | Result<Vec<Vec<f32>>>   | All      | Multi-label probabilities         |
+| `predict_labels(&df)`                    | Result<Vec<Vec<bool>>>  | All      | Multi-label binary labels         |
+| `predict_labels_with_threshold(&df, t)`  | Result<Vec<Vec<bool>>>  | All      | Multi-label with custom threshold |
+| `predict_labels_tuned(&df)`              | Result<Vec<Vec<bool>>>  | All      | Multi-label with tuned thresholds |
+| `tune_thresholds(&val_df, &target_cols)` | Result<TuneResult>      | All      | Tune per-label F1 thresholds      |
+| `tuned_thresholds()`                     | Option<&[f32]>          | All      | Get tuned threshold values        |
+| `feature_importance()`                   | Vec<f32>                | All      | Normalized importance scores      |
+| `predict_raw(features)`                  | Result<Vec<f32>>        | PureTree | From unbinned features            |
+| `conformal_quantile()`                   | Option<f32>             | PureTree | Calibrated quantile               |
+| `is_multiclass()`                        | bool                    | All      | Check if multi-class model        |
 
 **Analysis Methods (for auto-selected models):**
 
@@ -348,6 +498,115 @@ let classes = model.predict_class_raw(features, 0.5)?;
 | `selection_confidence()` | Option<Confidence>       | High/Medium/Low confidence   |
 | `analysis_report()`      | Option<AnalysisReport>   | Formatted diagnostic report  |
 | `analysis_summary()`     | Option<String>           | One-line summary for logging |
+
+---
+
+## AutoBuilder
+
+High-level AutoML builder for TreeBoost. Provides a simplified API that automatically profiles your data, selects preprocessing, tunes hyperparameters, and trains the optimal model.
+
+**Philosophy**: AutoBuilder follows "analyze first, train once" - it analyzes dataset characteristics and makes informed decisions instead of trying every combination.
+
+### Basic Usage
+
+```rust
+use treeboost::model::AutoBuilder;
+use polars::prelude::*;
+
+// Load your data
+let df = CsvReader::from_path("data.csv")?.finish()?;
+
+// Build with defaults (analyze and train)
+let model = AutoBuilder::new()
+    .fit(&df, "target_column")?;
+
+// Make predictions
+let predictions = model.predict(&test_df)?;
+```
+
+### Validation Data Modes
+
+AutoBuilder supports two ways to provide validation data for tuning and early stopping:
+
+#### Mode 1: Random Split (Cross-Sectional Data)
+
+Use this for i.i.d. data where random splits are valid:
+
+```rust
+let model = AutoBuilder::new()
+    .with_random_validation_split(0.2)  // 20% random validation split
+    .fit(&df, "target")?;
+```
+
+**When to use:**
+
+- Cross-sectional tabular data (rows are independent)
+- Simple regression/classification problems
+- Data where random splits don't cause leakage
+
+#### Mode 2: Pre-Split Validation (Time-Series/Panel Data)
+
+Use this when random splits would cause data leakage:
+
+```rust
+// Example: Time-series with date-based split
+let train_df = df.filter(col("date").lt(lit("2024-01-01")))?;
+let val_df = df.filter(col("date").gte(lit("2024-01-01")))?;
+
+let model = AutoBuilder::new()
+    .with_presplit_validation(val_df)  // Pass pre-split validation data
+    .fit(&train_df, "target")?;
+```
+
+**When to use:**
+
+- **Time-series data**: Validate on future dates (date-based split)
+- **Panel data**: Validate on held-out groups (no group leakage)
+- **Cross-validation**: Custom fold splits
+- **Any non-i.i.d. data**: Where rows have dependencies
+
+### Configuration Options
+
+```rust
+use treeboost::model::{AutoBuilder, TuningLevel};
+
+let model = AutoBuilder::new()
+    .with_tuning(TuningLevel::Thorough)      // Fast | Standard | Thorough
+    .with_auto_features(true)                // Enable feature engineering
+    .with_random_validation_split(0.2)       // Or with_presplit_validation()
+    .fit(&df, "target")?;
+```
+
+### Methods
+
+| Method                                | Description                                       |
+| ------------------------------------- | ------------------------------------------------- |
+| `new()`                               | Create builder with default configuration         |
+| `with_config(AutoConfig)`             | Use custom configuration                          |
+| `with_tuning(TuningLevel)`            | Set tuning level: Fast, Standard, or Thorough     |
+| `with_random_validation_split(f32)`   | Random validation split (for i.i.d. data)         |
+| `with_presplit_validation(DataFrame)` | Pre-split validation (for time-series/panel data) |
+| `with_auto_features(bool)`            | Enable/disable automatic feature engineering      |
+| `fit(&DataFrame, &str)`               | Train on DataFrame with target column name        |
+
+### Return Type
+
+`AutoBuilder::fit()` returns an `AutoModel` wrapper that provides:
+
+```rust
+let model = AutoBuilder::new().fit(&df, "target")?;
+
+// Access the trained model
+let inner = model.inner();  // Returns &UniversalModel
+
+// Make predictions
+let predictions = model.predict(&test_df)?;
+
+// Get training summary
+println!("{}", model.summary());
+```
+
+See the **UniversalModel** section for prediction and serialization methods.
 
 ---
 
@@ -1076,12 +1335,14 @@ let dataset = loader.load_csv(
     Some(vec!["feature1", "feature2"])  // Optional feature selection
 )?;
 
-// From raw arrays
-let dataset = loader.from_arrays(
-    &features,  // &[f32]
-    &targets,   // &[f32]
-    Some(vec!["f0", "f1", "f2"])  // Feature names
-)?;
+// From Polars DataFrame
+use polars::prelude::*;
+let df = df!{
+    "f0" => &[1.0, 2.0, 3.0],
+    "f1" => &[4.0, 5.0, 6.0],
+    "target" => &[0.0, 1.0, 0.0]
+}?;
+let dataset = loader.from_dataframe(df, "target", None)?;
 ```
 
 **Python:**
@@ -1145,6 +1406,47 @@ let class = logloss.to_class(prob, threshold: 0.5);
 - `PseudoHuberLoss` - Huber loss (robust regression, outlier-resistant)
 - `BinaryLogLoss` - Logistic loss (binary classification)
 - `MultiClassLogLoss` - Softmax loss (multi-class classification)
+- `MultiLabelLogLoss` - Multi-label classification (independent sigmoid per label)
+- `MultiLabelFocalLoss` - Multi-label with focal loss (handles class imbalance)
+
+### Multi-Label Loss Functions
+
+For multi-label classification where each sample can have multiple independent binary labels:
+
+```rust
+use treeboost::loss::{MultiLabelLogLoss, MultiLabelFocalLoss};
+use treeboost::{UniversalModel, UniversalConfig, BoostingMode};
+
+// Standard multi-label log loss (used by auto_train_multilabel)
+let loss = MultiLabelLogLoss::new();
+
+// Train model with explicit loss function
+let config = UniversalConfig::new()
+    .with_mode(BoostingMode::PureTree)
+    .with_num_rounds(100);
+let model = UniversalModel::train(&dataset, config, &loss)?;
+
+// For imbalanced labels, use focal loss with focusing parameter
+let focal_loss = MultiLabelFocalLoss::new(gamma: 2.0);  // gamma ∈ [0, 5], default 2.0
+let model = UniversalModel::train(&dataset, config, &focal_loss)?;
+```
+
+**MultiLabelLogLoss:**
+- Applies independent sigmoid to each output dimension
+- Gradient: `g_k = sigmoid(pred_k) - target_k`
+- Hessian: `h_k = sigmoid(pred_k) * (1 - sigmoid(pred_k))`
+- Used automatically by `auto_train_multilabel()`
+
+**MultiLabelFocalLoss:**
+- Focal loss variant that down-weights easy examples
+- Focuses training on hard-to-classify samples
+- Parameter `gamma` controls focusing strength (higher = more focus on hard examples)
+- Best for: Imbalanced multi-label problems where some labels are rare
+
+**When to use Focal Loss:**
+- Label imbalance (e.g., 95% negative, 5% positive for some labels)
+- Hard negatives dominate training
+- Want model to focus on difficult examples
 
 ---
 
@@ -1520,6 +1822,7 @@ Returned by `UniversalModel::update()`:
 
 ```rust
 pub struct IncrementalUpdateReport {
+    pub rows_trained: usize,
     pub trees_before: usize,
     pub trees_after: usize,
     pub trees_added: usize,
@@ -1698,7 +2001,7 @@ BackendType::Scalar    // Scalar fallback (any CPU, safest)
 **Rust:**
 
 ```rust
-use treeboost::{GBDTConfig, GBDTModel, AutoTuner, TunerConfig, GridStrategy, EvalStrategy, ParameterSpace, ModelFormat};
+use treeboost::{GBDTConfig, GBDTModel, AutoTuner, TunerConfig, GridStrategy, EvalStrategy, ParameterSpace, SpacePreset, ModelFormat};
 use treeboost::dataset::DatasetLoader;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
