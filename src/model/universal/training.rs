@@ -58,18 +58,22 @@ impl UniversalModel {
         // Validate configuration
         if config.num_rounds == 0 {
             return Err(crate::TreeBoostError::Config(
-                "num_rounds must be greater than 0".to_string(),
+                "UniversalModel::train() configuration error: num_rounds must be greater than 0, got 0. \
+                 Specify at least 1 boosting round."
+                    .to_string(),
             ));
         }
         if config.learning_rate <= 0.0 || config.learning_rate > 1.0 {
             return Err(crate::TreeBoostError::Config(format!(
-                "learning_rate must be in (0, 1], got {}",
+                "UniversalModel::train() configuration error: learning_rate must be in (0, 1], got {}. \
+                 Specify a value greater than 0 and at most 1.0.",
                 config.learning_rate
             )));
         }
         if config.subsample <= 0.0 || config.subsample > 1.0 {
             return Err(crate::TreeBoostError::Config(format!(
-                "subsample must be in (0, 1], got {}",
+                "UniversalModel::train() configuration error: subsample must be in (0, 1], got {}. \
+                 Specify a value greater than 0 and at most 1.0.",
                 config.subsample
             )));
         }
@@ -163,18 +167,22 @@ impl UniversalModel {
         // Validate configuration
         if config.num_rounds == 0 {
             return Err(crate::TreeBoostError::Config(
-                "num_rounds must be greater than 0".to_string(),
+                "UniversalModel::train() configuration error: num_rounds must be greater than 0, got 0. \
+                 Specify at least 1 boosting round."
+                    .to_string(),
             ));
         }
         if config.learning_rate <= 0.0 || config.learning_rate > 1.0 {
             return Err(crate::TreeBoostError::Config(format!(
-                "learning_rate must be in (0, 1], got {}",
+                "UniversalModel::train() configuration error: learning_rate must be in (0, 1], got {}. \
+                 Specify a value greater than 0 and at most 1.0.",
                 config.learning_rate
             )));
         }
         if config.subsample <= 0.0 || config.subsample > 1.0 {
             return Err(crate::TreeBoostError::Config(format!(
-                "subsample must be in (0, 1], got {}",
+                "UniversalModel::train() configuration error: subsample must be in (0, 1], got {}. \
+                 Specify a value greater than 0 and at most 1.0.",
                 config.subsample
             )));
         }
