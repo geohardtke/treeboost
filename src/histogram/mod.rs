@@ -6,11 +6,13 @@
 //! - Cache-friendly memory access patterns
 //! - Fused gradient+histogram for eliminating cache pollution
 //! - Era-stratified histograms for Directional Era Splitting (DES)
+//! - Vector histograms for multi-output learning (multi-label, multi-target)
 
 mod builder;
 mod entry;
 mod era;
 mod fused;
+mod vector;
 
 pub use builder::HistogramBuilder;
 pub use entry::{Histogram, NodeHistograms, NUM_BINS};
@@ -18,3 +20,4 @@ pub use era::{
     average_era_gain, has_directional_agreement, EraHistogramBuilder, EraHistograms, EraSplitStats,
 };
 pub use fused::{FusedHistogramBuilder, FusedResult};
+pub use vector::{VectorHistogram, VectorNodeHistograms};
