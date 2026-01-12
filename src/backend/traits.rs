@@ -136,6 +136,11 @@ pub trait HistogramBackend: Send + Sync {
     /// Human-readable name for this backend.
     fn name(&self) -> &'static str;
 
+    /// Get the backend type enum for type-safe backend identification.
+    ///
+    /// This is the recommended way to check backend type instead of string matching on `name()`.
+    fn backend_type(&self) -> crate::backend::BackendType;
+
     /// Whether this backend uses tensor-tile (2D row-major) layout.
     /// True for GPU/AVX-512/SVE2, false for scalar.
     fn is_tensor_tile(&self) -> bool;

@@ -409,14 +409,8 @@ impl GBDTModel {
                 })
                 .select(dataset.num_rows())?;
 
-            // Update config with resolved backend (CUDA/WGPU/Scalar/etc)
-            let resolved_type = match resolved.name() {
-                "CUDA" => crate::backend::BackendType::Cuda,
-                "WGPU" => crate::backend::BackendType::Wgpu,
-                "Scalar (AVX2)" | "Scalar (NEON)" | "Scalar" => crate::backend::BackendType::Scalar,
-                _ => crate::backend::BackendType::Scalar, // Fallback
-            };
-            config.backend_type = resolved_type;
+            // Update config with resolved backend using type-safe identification
+            config.backend_type = resolved.backend_type();
         }
 
         let loss_fn = config.loss_type.create();
@@ -822,7 +816,8 @@ impl GBDTModel {
         let output_type = config.loss_type.output_type();
 
         // Convert scalar trees to EnsembleTree
-        let ensemble_trees: Vec<EnsembleTree> = trees.iter().cloned().map(EnsembleTree::from).collect();
+        let ensemble_trees: Vec<EnsembleTree> =
+            trees.iter().cloned().map(EnsembleTree::from).collect();
 
         Ok(Self {
             config,
@@ -996,7 +991,10 @@ impl GBDTModel {
 
         // Compute column permutation if enabled
         let column_permutation = if config.column_reordering && !ensemble_trees.is_empty() {
-            let importances = Self::compute_importances_from_ensemble_trees(&ensemble_trees, dataset.num_features());
+            let importances = Self::compute_importances_from_ensemble_trees(
+                &ensemble_trees,
+                dataset.num_features(),
+            );
             Some(ColumnPermutation::from_importances(&importances))
         } else {
             None
@@ -1074,9 +1072,7 @@ impl GBDTModel {
         // Compute initial predictions per label from training data
         let train_targets: Vec<f32> = train_indices
             .iter()
-            .flat_map(|&i| {
-                (0..num_outputs).map(move |k| targets[i * num_outputs + k])
-            })
+            .flat_map(|&i| (0..num_outputs).map(move |k| targets[i * num_outputs + k]))
             .collect();
         let base_predictions = loss_fn.initial_predictions_multi(&train_targets, num_outputs);
 
@@ -1124,12 +1120,8 @@ impl GBDTModel {
             }
 
             // Grow ONE vector tree for this round (optimizes all labels jointly)
-            let tree = tree_grower.grow_with_indices(
-                dataset,
-                &gradients,
-                &hessians,
-                &train_indices,
-            )?;
+            let tree =
+                tree_grower.grow_with_indices(dataset, &gradients, &hessians, &train_indices)?;
 
             // Update predictions for ALL labels using vector tree
             tree.predict_batch_add(
@@ -1165,10 +1157,8 @@ impl GBDTModel {
                         config.early_stopping_rounds,
                         config.min_early_stopping_trees,
                     ) {
-                        let keep_rounds = early_stop_keep_count(
-                            best_num_rounds,
-                            config.min_early_stopping_trees,
-                        );
+                        let keep_rounds =
+                            early_stop_keep_count(best_num_rounds, config.min_early_stopping_trees);
                         trees.truncate(keep_rounds);
                         break;
                     }
@@ -1177,20 +1167,16 @@ impl GBDTModel {
         }
 
         // Truncate if early stopping finished all rounds but best was earlier
-        if early_stopping_enabled
-            && best_num_rounds > 0
-            && best_num_rounds < trees.len()
-        {
-            let keep_rounds = early_stop_keep_count(
-                best_num_rounds,
-                config.min_early_stopping_trees,
-            );
+        if early_stopping_enabled && best_num_rounds > 0 && best_num_rounds < trees.len() {
+            let keep_rounds =
+                early_stop_keep_count(best_num_rounds, config.min_early_stopping_trees);
             trees.truncate(keep_rounds);
         }
 
         // Compute column permutation if enabled
         let column_permutation = if config.column_reordering && !trees.is_empty() {
-            let importances = Self::compute_importances_from_ensemble_trees(&trees, dataset.num_features());
+            let importances =
+                Self::compute_importances_from_ensemble_trees(&trees, dataset.num_features());
             Some(ColumnPermutation::from_importances(&importances))
         } else {
             None
@@ -1209,7 +1195,10 @@ impl GBDTModel {
     }
 
     /// Compute feature importances from ensemble trees (handles both scalar and vector)
-    fn compute_importances_from_ensemble_trees(trees: &[EnsembleTree], num_features: usize) -> Vec<f32> {
+    fn compute_importances_from_ensemble_trees(
+        trees: &[EnsembleTree],
+        num_features: usize,
+    ) -> Vec<f32> {
         let mut importances = vec![0.0f32; num_features];
 
         for tree in trees {

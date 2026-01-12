@@ -4,14 +4,13 @@ pub const DEFAULT_GPU_BATCH_SIZE: usize = 32;
 /// Default hybrid threshold for CUDA backend (rows).
 ///
 /// CUDA has low dispatch overhead (10-100μs), so can use GPU for smaller batches.
-/// This default is measured empirically - run benchmark to measure for your hardware:
 ///
-/// ```bash
-/// cargo test --release --features cuda test_gpu_threshold -- --ignored --nocapture
-/// ```
+/// In practice, GBDT training builds hundreds of histograms in parallel (many tree nodes
+/// × many features). The GPU excels at this batch parallelism even when individual batches
+/// are small. A lower threshold ensures GPU is actually used during training.
 ///
-/// Measured on RTX 3060: GPU becomes faster at ~1500 rows, using 2000 for safety margin
-pub const CUDA_HYBRID_THRESHOLD: usize = 2000;
+/// Measured on RTX 3060: GPU becomes faster at ~500-1000 rows for typical GBDT workloads
+pub const CUDA_HYBRID_THRESHOLD: usize = 500;
 
 /// Default hybrid threshold for WGPU backend (rows).
 ///

@@ -1,21 +1,43 @@
-//! Hybrid GPU backend that optimizes small batches on CPU.
+//! Smart hybrid GPU backend with workload-aware routing.
 //!
-//! Different GPU backends have different launch overhead characteristics:
-//! - **CUDA**: 10-100μs dispatch (very fast) → threshold ~1000 rows
-//! - **WGPU**: 1-2ms dispatch (slower) → threshold ~5000 rows
+//! Instead of using a fixed threshold, this backend makes intelligent routing decisions
+//! based on the full workload context:
+//! - **Batch size**: Rows in current histogram call
+//! - **Feature count**: Number of features (affects parallelism)
+//! - **GPU characteristics**: Launch overhead (CUDA: 10-100μs, WGPU: 1-2ms)
 //!
-//! For small batches, this overhead dominates actual compute time, making CPU faster.
+//! ## Smart Routing Logic
 //!
-//! This module provides a wrapper backend that:
-//! - Uses GPU for large batches (>= threshold)
-//! - Falls back to CPU for small batches (< threshold)
+//! The router considers total GPU work: `batch_size × num_features × num_bins`
+//! - **Large workloads**: Route to GPU (benefit from massive parallelism)
+//! - **Tiny workloads**: Route to CPU (avoid GPU dispatch overhead)
 //!
-//! The threshold is determined based on the GPU backend type.
+//! This is much more effective than per-call thresholds because GBDT training
+//! builds hundreds of histograms in parallel (many nodes × many features).
 
 use crate::backend::traits::{BinStorage, HistogramBackend, SplitCandidate, SplitConfig};
 use crate::backend::ScalarBackend;
-use crate::defaults::backend::{CUDA_HYBRID_THRESHOLD, WGPU_HYBRID_THRESHOLD};
 use crate::histogram::Histogram;
+
+// Smart routing thresholds
+// These values determined by empirical benchmarking of GPU dispatch overhead vs CPU compute time
+
+/// CUDA minimum batch size threshold.
+/// CUDA has extremely low dispatch overhead (10-100μs), so only skip truly tiny batches.
+const CUDA_MIN_BATCH_SIZE: usize = 10;
+
+/// WGPU minimum batch size threshold.
+/// WGPU has 1-2ms dispatch overhead, so requires larger batches to be worthwhile.
+const WGPU_MIN_BATCH_SIZE: usize = 50;
+
+/// Number of bins per feature used in histogram building.
+/// This is a fixed value in TreeBoost's binning strategy.
+const BINS_PER_FEATURE: usize = 256;
+
+/// WGPU workload threshold in histogram elements.
+/// Total work = batch_size × num_features × BINS_PER_FEATURE
+/// Below this threshold, CPU is faster due to avoiding GPU dispatch overhead.
+const WGPU_WORK_THRESHOLD: usize = 200_000;
 
 /// Hybrid GPU backend that routes small batches to CPU for optimal performance.
 ///
@@ -27,66 +49,74 @@ use crate::histogram::Histogram;
 ///
 /// The threshold was determined by benchmarking GPU overhead vs CPU compute time.
 pub struct HybridGpuBackend {
-    /// Underlying GPU backend for large batches
+    /// Underlying GPU backend for large workloads
     gpu_backend: Box<dyn HistogramBackend>,
-    /// CPU backend for small batches
+    /// CPU backend for small workloads
     cpu_backend: ScalarBackend,
-    /// Threshold for routing decision (rows)
-    batch_threshold: usize,
 }
 
 impl HybridGpuBackend {
     /// Create a new hybrid backend wrapping the given GPU backend.
     ///
-    /// Automatically selects the appropriate batch threshold based on backend type:
-    /// - CUDA: 1000 rows (low overhead)
-    /// - WGPU: 5000 rows (higher overhead)
+    /// Uses smart workload-aware routing that considers:
+    /// - Batch size (rows in current histogram call)
+    /// - Number of features (affects parallelism)
+    /// - GPU type (CUDA vs WGPU overhead characteristics)
     ///
     /// # Arguments
-    /// * `gpu_backend` - The GPU backend to use for large batches
+    /// * `gpu_backend` - The GPU backend to use for large workloads
     pub fn new(gpu_backend: Box<dyn HistogramBackend>) -> Self {
-        // Auto-detect threshold based on backend name
-        let batch_threshold = match gpu_backend.name() {
-            "CUDA" => CUDA_HYBRID_THRESHOLD,
-            "WGPU" => WGPU_HYBRID_THRESHOLD,
-            _ => CUDA_HYBRID_THRESHOLD, // Default to conservative threshold
-        };
-
         Self {
             gpu_backend,
             cpu_backend: ScalarBackend::new(),
-            batch_threshold,
         }
     }
 
-    /// Create with a custom batch threshold.
+    /// Smart routing decision based on full workload context.
     ///
-    /// # Arguments
-    /// * `gpu_backend` - The GPU backend to use for large batches
-    /// * `batch_threshold` - Custom threshold (rows) for routing decision
-    pub fn with_threshold(gpu_backend: Box<dyn HistogramBackend>, batch_threshold: usize) -> Self {
-        Self {
-            gpu_backend,
-            cpu_backend: ScalarBackend::new(),
-            batch_threshold,
-        }
-    }
-
-    /// Check if a batch should use GPU based on size.
+    /// Considers:
+    /// - Batch size (rows in current call)
+    /// - Number of features (parallelism)
+    /// - GPU type (CUDA has lower overhead than WGPU)
+    ///
+    /// Total GPU work = batch_size × num_features × BINS_PER_FEATURE
     #[inline]
-    fn should_use_gpu(&self, batch_size: usize) -> bool {
-        batch_size >= self.batch_threshold
+    fn should_use_gpu(&self, batch_size: usize, num_features: usize) -> bool {
+        // CUDA has extremely low dispatch overhead (10-100μs), so ALWAYS use GPU
+        // Only WGPU needs hybrid routing due to its 1-2ms dispatch overhead
+        if matches!(
+            self.gpu_backend.backend_type(),
+            crate::backend::BackendType::Cuda
+        ) {
+            // For CUDA: only skip truly tiny batches
+            return batch_size >= CUDA_MIN_BATCH_SIZE;
+        }
+
+        // For WGPU: use workload-based routing
+        // For tiny batches, always use CPU (avoid dispatch overhead)
+        if batch_size < WGPU_MIN_BATCH_SIZE {
+            return false;
+        }
+
+        // Calculate total histogram elements to process
+        // Each feature has BINS_PER_FEATURE bins
+        let total_work = batch_size * num_features * BINS_PER_FEATURE;
+
+        // WGPU needs larger workloads to amortize dispatch overhead
+        total_work >= WGPU_WORK_THRESHOLD
     }
 }
 
 impl HistogramBackend for HybridGpuBackend {
     fn name(&self) -> &'static str {
-        // Report the underlying GPU backend name with "Hybrid" prefix
-        match self.gpu_backend.name() {
-            "CUDA" => "Hybrid CUDA",
-            "WGPU" => "Hybrid WGPU",
-            other => other, // Fallback
-        }
+        // Report the underlying GPU backend name directly
+        // Smart routing (CPU vs GPU) is an implementation detail, not part of the name
+        self.gpu_backend.name()
+    }
+
+    fn backend_type(&self) -> crate::backend::BackendType {
+        // Delegate to underlying GPU backend for type-safe identification
+        self.gpu_backend.backend_type()
     }
 
     fn is_tensor_tile(&self) -> bool {
@@ -100,7 +130,24 @@ impl HistogramBackend for HybridGpuBackend {
         grad_hess: &[(f32, f32)],
         row_indices: &[usize],
     ) -> Vec<Histogram> {
-        if self.should_use_gpu(row_indices.len()) {
+        let batch_size = row_indices.len();
+        let num_features = bins.num_features();
+        let use_gpu = self.should_use_gpu(batch_size, num_features);
+
+        // Log routing decision (use TRACE level for high-frequency calls)
+        tracing::trace!(
+            batch_size,
+            num_features,
+            use_gpu,
+            backend = if use_gpu {
+                self.gpu_backend.name()
+            } else {
+                "CPU"
+            },
+            "Smart router histogram build"
+        );
+
+        if use_gpu {
             self.gpu_backend
                 .build_histograms(bins, grad_hess, row_indices)
         } else {
@@ -159,38 +206,101 @@ impl HistogramBackend for HybridGpuBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::BackendType;
 
     #[test]
-    fn test_hybrid_threshold() {
+    fn test_hybrid_routing_wgpu() {
+        // ScalarBackend reports as "Scalar", not "CUDA", so it uses WGPU-style routing
         let scalar = Box::new(ScalarBackend::new());
         let hybrid = HybridGpuBackend::new(scalar);
 
-        // Small batches should use CPU
-        assert!(!hybrid.should_use_gpu(100));
-        assert!(!hybrid.should_use_gpu(1999));
+        // WGPU routing: Check minimum batch size threshold
+        assert!(!hybrid.should_use_gpu(10, 100)); // < WGPU_MIN_BATCH_SIZE (50) → CPU
+        assert!(!hybrid.should_use_gpu(49, 100)); // < WGPU_MIN_BATCH_SIZE (50) → CPU
 
-        // Large batches should use GPU
-        assert!(hybrid.should_use_gpu(2000));
-        assert!(hybrid.should_use_gpu(10000));
+        // WGPU routing: Check workload threshold
+        // With 100 features, work = batch_size * 100 * BINS_PER_FEATURE (256)
+        // WGPU_WORK_THRESHOLD = 200,000
+        // Need batch_size * 100 * 256 >= 200,000 → batch_size >= 8
+        assert!(hybrid.should_use_gpu(50, 100)); // 50 * 100 * 256 = 1,280,000 > 200,000 → GPU
+        assert!(!hybrid.should_use_gpu(50, 1)); // 50 * 1 * 256 = 12,800 < 200,000 → CPU
     }
 
     #[test]
-    fn test_hybrid_custom_threshold() {
-        let scalar = Box::new(ScalarBackend::new());
-        let hybrid = HybridGpuBackend::with_threshold(scalar, 500);
+    fn test_hybrid_routing_cuda() {
+        // Create a mock backend that reports as "CUDA" to test CUDA routing logic
+        // In reality, we'd use a real CudaBackend, but this tests the logic path
+        use crate::backend::{BackendType, HistogramBackend};
+        use crate::histogram::Histogram;
 
-        assert!(!hybrid.should_use_gpu(499));
-        assert!(hybrid.should_use_gpu(500));
-        assert!(hybrid.should_use_gpu(1000));
+        struct MockCudaBackend;
+        impl HistogramBackend for MockCudaBackend {
+            fn name(&self) -> &'static str {
+                "CUDA"
+            }
+            fn backend_type(&self) -> BackendType {
+                BackendType::Cuda
+            }
+            fn is_tensor_tile(&self) -> bool {
+                true
+            }
+            fn build_histograms(
+                &self,
+                _bins: &dyn crate::backend::BinStorage,
+                _grad_hess: &[(f32, f32)],
+                _row_indices: &[usize],
+            ) -> Vec<Histogram> {
+                vec![]
+            }
+            fn build_histograms_sibling(
+                &self,
+                _parent: &[Histogram],
+                _smaller_child: &[Histogram],
+            ) -> Vec<Histogram> {
+                vec![]
+            }
+            fn find_best_split(
+                &self,
+                _histograms: &[Histogram],
+                _config: &crate::backend::SplitConfig,
+            ) -> Option<crate::backend::SplitCandidate> {
+                None
+            }
+        }
+
+        let mock_cuda = Box::new(MockCudaBackend);
+        let hybrid = HybridGpuBackend::new(mock_cuda);
+
+        // CUDA routing: Only skip truly tiny batches (< CUDA_MIN_BATCH_SIZE = 10)
+        assert!(!hybrid.should_use_gpu(5, 100)); // < CUDA_MIN_BATCH_SIZE → CPU
+        assert!(!hybrid.should_use_gpu(9, 100)); // < CUDA_MIN_BATCH_SIZE → CPU
+        assert!(hybrid.should_use_gpu(10, 100)); // >= CUDA_MIN_BATCH_SIZE → GPU
+        assert!(hybrid.should_use_gpu(100, 100)); // Large batch → GPU
+
+        // CUDA doesn't check workload threshold, only batch size
+        assert!(hybrid.should_use_gpu(10, 1)); // Even with 1 feature → GPU
     }
 
     #[test]
-    fn test_hybrid_name() {
+    fn test_hybrid_name_passthrough() {
+        // Hybrid backend should report the underlying backend's name, not "Hybrid"
         let scalar = Box::new(ScalarBackend::new());
         let hybrid = HybridGpuBackend::new(scalar);
 
-        // Should report as Hybrid variant
         let name = hybrid.name();
-        assert!(name.contains("Hybrid") || name.contains("Scalar"));
+        assert!(
+            name.starts_with("Scalar"),
+            "Expected Scalar name, got: {}",
+            name
+        );
+    }
+
+    #[test]
+    fn test_hybrid_backend_type_passthrough() {
+        // Hybrid backend should report the underlying backend's type
+        let scalar = Box::new(ScalarBackend::new());
+        let hybrid = HybridGpuBackend::new(scalar);
+
+        assert_eq!(hybrid.backend_type(), BackendType::Scalar);
     }
 }

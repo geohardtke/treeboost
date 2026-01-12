@@ -13,10 +13,20 @@ pub struct CudaDevice {
 impl CudaDevice {
     /// Create a new CUDA device (uses device 0).
     pub fn new() -> Option<Self> {
-        let ctx = CudaContext::new(0).ok()?;
-        let stream = ctx.default_stream();
-
-        Some(Self { ctx, stream })
+        match CudaContext::new(0) {
+            Ok(ctx) => {
+                let stream = ctx.default_stream();
+                tracing::debug!("CUDA device initialized successfully");
+                Some(Self { ctx, stream })
+            }
+            Err(e) => {
+                tracing::debug!(
+                    error = ?e,
+                    "CUDA initialization failed, falling back to CPU backend"
+                );
+                None
+            }
+        }
     }
 
     /// Get the device name.

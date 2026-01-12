@@ -77,6 +77,10 @@ impl HistogramBackend for CudaBackend {
         "CUDA"
     }
 
+    fn backend_type(&self) -> crate::backend::BackendType {
+        crate::backend::BackendType::Cuda
+    }
+
     fn is_tensor_tile(&self) -> bool {
         true
     }

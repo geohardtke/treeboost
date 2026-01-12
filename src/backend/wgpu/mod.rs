@@ -238,6 +238,10 @@ impl HistogramBackend for WgpuBackend {
         "WGPU"
     }
 
+    fn backend_type(&self) -> crate::backend::BackendType {
+        crate::backend::BackendType::Wgpu
+    }
+
     fn is_tensor_tile(&self) -> bool {
         true
     }

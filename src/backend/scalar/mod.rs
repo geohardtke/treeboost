@@ -56,6 +56,10 @@ impl HistogramBackend for ScalarBackend {
         }
     }
 
+    fn backend_type(&self) -> crate::backend::BackendType {
+        crate::backend::BackendType::Scalar
+    }
+
     fn is_tensor_tile(&self) -> bool {
         false
     }

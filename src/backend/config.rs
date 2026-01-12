@@ -162,6 +162,20 @@ pub struct BackendConfig {
     /// Run `cargo test --release --features gpu test_wgpu_threshold -- --ignored --nocapture`
     /// to measure optimal threshold for your hardware.
     pub wgpu_hybrid_threshold: usize,
+
+    /// CPU usage limit as a fraction (0.0 to 1.0).
+    ///
+    /// **Note**: This field is currently not implemented. Rayon uses all available cores by default.
+    /// Planned for future use to control thread pool size.
+    ///
+    /// When implemented, this will control the number of Rayon threads:
+    /// `num_threads = (num_cpus * cpu_usage_limit).floor().max(1)`
+    ///
+    /// Default: 0.85 (85%) - leaves headroom for system stability.
+    ///
+    /// # TODO
+    /// Implement Rayon thread pool configuration based on this value.
+    pub cpu_usage_limit: f32,
 }
 
 /// Presets for backend selection.
@@ -188,6 +202,7 @@ impl Default for BackendConfig {
             use_gpu_subgroups: false,
             cuda_hybrid_threshold: backend_defaults::CUDA_HYBRID_THRESHOLD,
             wgpu_hybrid_threshold: backend_defaults::WGPU_HYBRID_THRESHOLD,
+            cpu_usage_limit: 0.85, // Default: 85% CPU usage
         }
     }
 }
@@ -234,6 +249,7 @@ impl BackendConfig {
             use_gpu_subgroups: false,
             cuda_hybrid_threshold: backend_defaults::CUDA_HYBRID_THRESHOLD,
             wgpu_hybrid_threshold: backend_defaults::WGPU_HYBRID_THRESHOLD,
+            cpu_usage_limit: 0.85,
         }
     }
 
@@ -252,6 +268,7 @@ impl BackendConfig {
             use_gpu_subgroups: false,
             cuda_hybrid_threshold: backend_defaults::CUDA_HYBRID_THRESHOLD,
             wgpu_hybrid_threshold: backend_defaults::WGPU_HYBRID_THRESHOLD,
+            cpu_usage_limit: 0.85,
         }
     }
 

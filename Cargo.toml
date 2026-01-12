@@ -72,6 +72,9 @@ rand = "0.8"
 # Error handling
 thiserror = "2.0"
 
+# Structured logging for library diagnostics
+tracing = "0.1"
+
 # Ordered floats for bin boundaries
 ordered-float = "4.5"
 
