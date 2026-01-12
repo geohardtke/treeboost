@@ -57,20 +57,40 @@ impl TunableModel for UniversalModel {
                 ("linear_rounds", ParamValue::Numeric(v)) => config.linear_rounds = *v as usize,
                 // Tree config parameters (prefixed with tree_)
                 ("tree_max_depth", ParamValue::Numeric(v)) => {
-                    config.tree_config = config.tree_config.clone().with_max_depth(*v as usize).expect("valid max_depth")
+                    config.tree_config = config
+                        .tree_config
+                        .clone()
+                        .with_max_depth(*v as usize)
+                        .expect("valid max_depth")
                 }
                 ("tree_max_leaves", ParamValue::Numeric(v)) => {
-                    config.tree_config = config.tree_config.clone().with_max_leaves(*v as usize).expect("valid max_leaves")
+                    config.tree_config = config
+                        .tree_config
+                        .clone()
+                        .with_max_leaves(*v as usize)
+                        .expect("valid max_leaves")
                 }
                 ("tree_lambda", ParamValue::Numeric(v)) => {
-                    config.tree_config = config.tree_config.clone().with_lambda(*v).expect("valid lambda")
+                    config.tree_config = config
+                        .tree_config
+                        .clone()
+                        .with_lambda(*v)
+                        .expect("valid lambda")
                 }
                 // Linear config parameters (prefixed with linear_)
                 ("linear_lambda", ParamValue::Numeric(v)) => {
-                    config.linear_config = config.linear_config.clone().with_lambda(*v).expect("valid lambda")
+                    config.linear_config = config
+                        .linear_config
+                        .clone()
+                        .with_lambda(*v)
+                        .expect("valid lambda")
                 }
                 ("linear_max_iter", ParamValue::Numeric(v)) => {
-                    config.linear_config = config.linear_config.clone().with_max_iter(*v as usize).expect("valid max_iter")
+                    config.linear_config = config
+                        .linear_config
+                        .clone()
+                        .with_max_iter(*v as usize)
+                        .expect("valid max_iter")
                 }
                 _ => {} // Unknown params are ignored
             }

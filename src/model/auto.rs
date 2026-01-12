@@ -101,9 +101,29 @@ pub struct AutoModel {
 
 impl AutoModel {
     /// Create an AutoModel from a BuildResult
-    pub fn from_build_result(result: BuildResult) -> Self {
-        Self {
-            model: result.model,
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the BuildResult has `skip_training = true` (discovery mode).
+    /// AutoModel requires a trained model.
+    pub fn from_build_result(result: BuildResult) -> Result<Self> {
+        if result.skip_training {
+            return Err(TreeBoostError::Config(
+                "Cannot create AutoModel from BuildResult with skip_training = true. \
+                 Use BuildResult directly for discovery mode."
+                    .to_string(),
+            ));
+        }
+
+        let model = result.model.ok_or_else(|| {
+            TreeBoostError::Config(
+                "BuildResult has skip_training = false but model is None. This is a bug."
+                    .to_string(),
+            )
+        })?;
+
+        Ok(Self {
+            model,
             mode: result.mode,
             target_column: result.target_column,
             mode_confidence: result.mode_confidence,
@@ -117,7 +137,7 @@ impl AutoModel {
             build_time: result.build_time,
             phase_times: result.phase_times,
             tuned_thresholds: None,
-        }
+        })
     }
 
     /// Train a model with default settings (the simplest API)
@@ -133,35 +153,35 @@ impl AutoModel {
     pub fn train(df: &DataFrame, target_col: &str) -> Result<Self> {
         let builder = AutoBuilder::new();
         let result = builder.fit(df, target_col)?;
-        Ok(Self::from_build_result(result))
+        Self::from_build_result(result)
     }
 
     /// Train with quick settings (minimal tuning, fast training)
     pub fn train_quick(df: &DataFrame, target_col: &str) -> Result<Self> {
         let builder = AutoBuilder::new().with_tuning(TuningLevel::Quick);
         let result = builder.fit(df, target_col)?;
-        Ok(Self::from_build_result(result))
+        Self::from_build_result(result)
     }
 
     /// Train with thorough settings (extensive tuning, best accuracy)
     pub fn train_thorough(df: &DataFrame, target_col: &str) -> Result<Self> {
         let builder = AutoBuilder::new().with_tuning(TuningLevel::Thorough);
         let result = builder.fit(df, target_col)?;
-        Ok(Self::from_build_result(result))
+        Self::from_build_result(result)
     }
 
     /// Train with a specific mode (bypass auto-selection)
     pub fn train_with_mode(df: &DataFrame, target_col: &str, mode: BoostingMode) -> Result<Self> {
         let builder = AutoBuilder::new().with_mode(mode);
         let result = builder.fit(df, target_col)?;
-        Ok(Self::from_build_result(result))
+        Self::from_build_result(result)
     }
 
     /// Train with custom configuration
     pub fn train_with_config(df: &DataFrame, target_col: &str, config: AutoConfig) -> Result<Self> {
         let builder = AutoBuilder::with_config(config);
         let result = builder.fit(df, target_col)?;
-        Ok(Self::from_build_result(result))
+        Self::from_build_result(result)
     }
 
     // =========================================================================
@@ -337,7 +357,9 @@ impl AutoModel {
         threshold: f32,
     ) -> Result<Vec<Vec<bool>>> {
         let (_preprocessed_df, dataset) = self.prepare_dataset_for_prediction(df)?;
-        Ok(self.model.predict_labels_with_threshold(&dataset, threshold))
+        Ok(self
+            .model
+            .predict_labels_with_threshold(&dataset, threshold))
     }
 
     /// Tune thresholds for multi-label classification using F1 optimization
@@ -386,9 +408,9 @@ impl AutoModel {
             let mut row_targets = Vec::with_capacity(num_labels);
             for &col_name in target_cols {
                 let series = val_df.column(col_name)?;
-                let value = series.get(row_idx).map_err(|e| {
-                    TreeBoostError::Data(format!("Failed to get value: {}", e))
-                })?;
+                let value = series
+                    .get(row_idx)
+                    .map_err(|e| TreeBoostError::Data(format!("Failed to get value: {}", e)))?;
 
                 let target_val = match value {
                     AnyValue::Int32(v) => v as f32,
@@ -804,22 +826,45 @@ impl AutoModel {
 
     /// Prepare a DataFrame for prediction
     fn prepare_dataset_for_prediction(&self, df: &DataFrame) -> Result<(DataFrame, BinnedDataset)> {
-        // CRITICAL: Use the fitted pipeline state from training!
-        // Without this, predictions will be nonsense because the model expects
-        // features encoded the same way as during training.
+        // CRITICAL: Apply the SAME feature engineering and preprocessing pipeline as training!
+        // Order matters: 1) Feature engineering, 2) Preprocessing (encoding/scaling/binning)
+
+        // Step 1: Apply feature engineering plan if it exists (using canonical helper)
+        // Constructs PanelDataInfo from TimeSeriesFeaturePlan if time-series features are present
+        let panel_info = self.feature_plan.as_ref().and_then(|plan| {
+            plan.timeseries_features.as_ref().map(|ts_plan| {
+                crate::analysis::PanelDataInfo {
+                    group_column: ts_plan.group_column.clone(),
+                    date_column: ts_plan.date_column.clone(),
+                    num_groups: 0, // Not used by apply_timeseries_features
+                    avg_observations_per_group: 0.0,
+                    min_observations_per_group: 0,
+                    max_observations_per_group: 0,
+                    confidence: 1.0, // Assume detected correctly during training
+                    time_granularity: crate::analysis::TimeGranularity::Daily, // Default
+                }
+            })
+        });
+
+        let working_df = crate::features::apply_feature_plan(
+            df.clone(),
+            self.feature_plan.as_ref(),
+            panel_info.as_ref(),
+        )?;
+
+        // Step 2: Apply preprocessing pipeline (encoding, scaling, binning)
         let pipeline_state = self.pipeline_state.as_ref().ok_or_else(|| {
             TreeBoostError::Data(
                 "AutoModel missing fitted pipeline state - cannot make predictions".to_string(),
             )
         })?;
 
-        // Use DataPipeline to transform the test data using the fitted state
         let pipeline = DataPipeline::with_defaults();
 
         // process_for_inference() applies the learned encodings/scalers/binners
         // Returns (preprocessed_df, dataset) where preprocessed_df has encoded categoricals
         let (preprocessed_df, dataset) =
-            pipeline.process_for_inference(df.clone(), pipeline_state)?;
+            pipeline.process_for_inference(working_df, pipeline_state)?;
 
         Ok((preprocessed_df, dataset))
     }

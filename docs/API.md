@@ -572,7 +572,6 @@ use treeboost::model::{AutoBuilder, TuningLevel};
 
 let model = AutoBuilder::new()
     .with_tuning(TuningLevel::Thorough)      // Fast | Standard | Thorough
-    .with_auto_features(true)                // Enable feature engineering
     .with_random_validation_split(0.2)       // Or with_presplit_validation()
     .fit(&df, "target")?;
 ```
@@ -1432,18 +1431,21 @@ let model = UniversalModel::train(&dataset, config, &focal_loss)?;
 ```
 
 **MultiLabelLogLoss:**
+
 - Applies independent sigmoid to each output dimension
 - Gradient: `g_k = sigmoid(pred_k) - target_k`
 - Hessian: `h_k = sigmoid(pred_k) * (1 - sigmoid(pred_k))`
 - Used automatically by `auto_train_multilabel()`
 
 **MultiLabelFocalLoss:**
+
 - Focal loss variant that down-weights easy examples
 - Focuses training on hard-to-classify samples
 - Parameter `gamma` controls focusing strength (higher = more focus on hard examples)
 - Best for: Imbalanced multi-label problems where some labels are rare
 
 **When to use Focal Loss:**
+
 - Label imbalance (e.g., 95% negative, 5% positive for some labels)
 - Hard negatives dominate training
 - Want model to focus on difficult examples

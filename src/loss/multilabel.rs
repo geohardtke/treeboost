@@ -355,11 +355,17 @@ mod tests {
 
         // When prediction is too low for positive target, gradient should be negative
         let (g_pos, _) = loss.gradient_hessian_single(1.0, -2.0);
-        assert!(g_pos < 0.0, "Gradient should be negative for target=1, low pred");
+        assert!(
+            g_pos < 0.0,
+            "Gradient should be negative for target=1, low pred"
+        );
 
         // When prediction is too high for negative target, gradient should be positive
         let (g_neg, _) = loss.gradient_hessian_single(0.0, 2.0);
-        assert!(g_neg > 0.0, "Gradient should be positive for target=0, high pred");
+        assert!(
+            g_neg > 0.0,
+            "Gradient should be positive for target=0, high pred"
+        );
     }
 
     #[test]
@@ -368,7 +374,12 @@ mod tests {
 
         for pred in [-100.0, -10.0, 0.0, 10.0, 100.0] {
             let (_, h) = loss.gradient_hessian_single(0.0, pred);
-            assert!(h > 0.0, "Hessian should always be positive, got {} for pred={}", h, pred);
+            assert!(
+                h > 0.0,
+                "Hessian should always be positive, got {} for pred={}",
+                h,
+                pred
+            );
         }
     }
 
@@ -381,7 +392,10 @@ mod tests {
         // Target=1, prediction=0 -> higher loss
         let l_wrong = loss.loss_single(1.0, 0.0);
 
-        assert!(l_correct < l_wrong, "Loss should be lower for correct prediction");
+        assert!(
+            l_correct < l_wrong,
+            "Loss should be lower for correct prediction"
+        );
     }
 
     #[test]

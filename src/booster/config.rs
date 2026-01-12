@@ -96,9 +96,7 @@ impl LossType {
                      Use train_binned_multiclass() which handles multi-class gradients directly."
                 )
             }
-            LossType::MultiLabelLogLoss { .. } => {
-                Box::new(crate::loss::MultiLabelLogLoss::new())
-            }
+            LossType::MultiLabelLogLoss { .. } => Box::new(crate::loss::MultiLabelLogLoss::new()),
             LossType::MultiLabelFocalLoss { gamma, .. } => {
                 Box::new(crate::loss::MultiLabelFocalLoss::new(*gamma))
             }
@@ -108,9 +106,7 @@ impl LossType {
     /// Create a loss function for multi-label training with configurable alpha
     pub fn create_multilabel(&self, alpha: Option<f32>) -> Box<dyn LossFunction> {
         match self {
-            LossType::MultiLabelLogLoss { .. } => {
-                Box::new(crate::loss::MultiLabelLogLoss::new())
-            }
+            LossType::MultiLabelLogLoss { .. } => Box::new(crate::loss::MultiLabelLogLoss::new()),
             LossType::MultiLabelFocalLoss { gamma, .. } => {
                 let mut loss = crate::loss::MultiLabelFocalLoss::new(*gamma);
                 if let Some(a) = alpha {

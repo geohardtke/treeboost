@@ -793,8 +793,16 @@ impl DataFrameProfile {
                 if p.dtype == ColumnDataType::DateTime {
                     true
                 } else if is_date_column_name(&p.name) {
-                    // Accept Numeric (includes i64 dates) or Categorical (string dates) if name suggests date
-                    p.dtype == ColumnDataType::Numeric || p.dtype == ColumnDataType::Categorical
+                    // Accept Numeric (includes i64 dates)
+                    if p.dtype == ColumnDataType::Numeric {
+                        return true;
+                    }
+                    // For Categorical: only accept if cardinality > MIN_DATE_CARDINALITY
+                    // (low cardinality = categorical time period like "morning/afternoon", not timestamps)
+                    if p.dtype == ColumnDataType::Categorical {
+                        return p.cardinality > crate::defaults::analysis::MIN_DATE_CARDINALITY;
+                    }
+                    false
                 } else {
                     false
                 }

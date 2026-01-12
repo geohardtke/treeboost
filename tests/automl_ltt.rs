@@ -41,7 +41,7 @@ fn test_shrinkage_factor_applied() {
             .with_learning_rate(0.1);
 
         let config = AutoConfig::new()
-            .with_auto_features(false)
+            .with_feature_engineering(treeboost::model::FeatureEngineeringMode::None)
             .with_tuning(TuningLevel::None)
             .with_custom_config(univ_config);
 
@@ -106,7 +106,7 @@ fn test_ltt_pure_linear_data() {
         .with_learning_rate(0.1);
 
     let config = AutoConfig::new()
-        .with_auto_features(false)
+        .with_feature_engineering(treeboost::model::FeatureEngineeringMode::None)
         .with_tuning(TuningLevel::None) // No auto-tuning
         .with_custom_config(univ_config);
 
@@ -185,7 +185,7 @@ fn test_ltt_linear_plus_residual() {
         .with_learning_rate(0.1);
 
     let config = AutoConfig::new()
-        .with_auto_features(false)
+        .with_feature_engineering(treeboost::model::FeatureEngineeringMode::None)
         .with_tuning(TuningLevel::None)
         .with_custom_config(univ_config);
 
@@ -250,7 +250,7 @@ fn test_ltt_with_categoricals() {
 
     let config = AutoConfig::new()
         .with_mode(BoostingMode::LinearThenTree)
-        .with_auto_features(false)
+        .with_feature_engineering(treeboost::model::FeatureEngineeringMode::None)
         .with_tuning(TuningLevel::None);
 
     let model = AutoModel::train_with_config(&df, "target", config).unwrap();
@@ -325,7 +325,7 @@ fn test_ltt_with_id_like_columns() {
         .with_learning_rate(0.1);
 
     let config = AutoConfig::new()
-        .with_auto_features(false)
+        .with_feature_engineering(treeboost::model::FeatureEngineeringMode::None)
         .with_custom_config(univ_config);
 
     let model = AutoModel::train_with_config(&df, "target", config).unwrap();
@@ -410,7 +410,7 @@ fn test_ltt_feature_extractor_storage() {
 
     let config = AutoConfig::new()
         .with_mode(BoostingMode::LinearThenTree)
-        .with_auto_features(false)
+        .with_feature_engineering(treeboost::model::FeatureEngineeringMode::None)
         .with_tuning(TuningLevel::None);
 
     let model = AutoModel::train_with_config(&df, "target", config).unwrap();
@@ -514,7 +514,7 @@ fn test_ltt_with_pipeline_encoded_categoricals() {
         .with_learning_rate(0.1);
 
     let config = AutoConfig::new()
-        .with_auto_features(false)
+        .with_feature_engineering(treeboost::model::FeatureEngineeringMode::None)
         .with_tuning(TuningLevel::None) // No auto-tuning
         .with_verbose(false)
         .with_custom_config(univ_config);

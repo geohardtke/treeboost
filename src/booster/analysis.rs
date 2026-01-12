@@ -71,7 +71,8 @@ impl GBDTModel {
     /// Used for continuing training or ensembling.
     /// Validates that tree count matches multi-class requirements.
     pub fn append_trees(&mut self, new_trees: Vec<Tree>) {
-        self.trees.extend(new_trees.into_iter().map(EnsembleTree::from));
+        self.trees
+            .extend(new_trees.into_iter().map(EnsembleTree::from));
     }
 
     /// Append ensemble trees directly to the model

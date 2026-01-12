@@ -466,8 +466,12 @@ impl UniversalModel {
 
     /// Get number of trees
     pub fn num_trees(&self) -> usize {
-        // Check GBDTModel first (PureTree and LinearThenTree modes)
-        if let Some(ref gbdt) = self.gbdt_model {
+        // Check ensemble first
+        if let Some(ref ensemble) = self.gbdt_ensemble {
+            // Sum trees from all ensemble models
+            ensemble.iter().map(|m| m.num_trees()).sum()
+        } else if let Some(ref gbdt) = self.gbdt_model {
+            // Single GBDT model
             gbdt.num_trees()
         } else {
             // RandomForest uses self.trees

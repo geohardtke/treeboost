@@ -47,7 +47,8 @@ impl GBDTModel {
 
         // Tree-wise: traverse each tree for all rows
         for tree in &self.trees {
-            tree.as_scalar().predict_batch_add(dataset, &mut predictions);
+            tree.as_scalar()
+                .predict_batch_add(dataset, &mut predictions);
         }
 
         predictions
@@ -368,7 +369,11 @@ impl GBDTModel {
     /// Vector of vectors: `result[sample][label]`
     pub fn predict_multilabel_raw(&self, features: &[f64]) -> Vec<Vec<f32>> {
         if !self.is_multilabel() {
-            return self.predict_raw(features).into_iter().map(|p| vec![p]).collect();
+            return self
+                .predict_raw(features)
+                .into_iter()
+                .map(|p| vec![p])
+                .collect();
         }
 
         // Check if we're using unified vector trees or legacy scalar trees
@@ -465,7 +470,11 @@ impl GBDTModel {
     }
 
     /// Predict binary labels from raw features with custom threshold
-    pub fn predict_labels_with_threshold_raw(&self, features: &[f64], threshold: f32) -> Vec<Vec<bool>> {
+    pub fn predict_labels_with_threshold_raw(
+        &self,
+        features: &[f64],
+        threshold: f32,
+    ) -> Vec<Vec<bool>> {
         let proba = self.predict_proba_multilabel_raw(features);
         proba
             .into_iter()

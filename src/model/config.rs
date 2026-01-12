@@ -233,6 +233,215 @@ impl AutoEnsembleConfig {
     }
 }
 
+/// Feature engineering mode for AutoBuilder.
+///
+/// Controls which feature engineering techniques to apply.
+///
+/// # Examples
+///
+/// ```ignore
+/// use treeboost::{AutoBuilder, FeatureEngineeringMode};
+///
+/// // Disable all feature engineering
+/// let model = AutoBuilder::new()
+///     .with_feature_engineering(FeatureEngineeringMode::None)
+///     .fit(&df, "target")?;
+///
+/// // Use default feature engineering
+/// let model = AutoBuilder::new()
+///     .with_feature_engineering(FeatureEngineeringMode::Default)
+///     .fit(&df, "target")?;
+///
+/// // Custom feature configuration
+/// let model = AutoBuilder::new()
+///     .with_feature_engineering(FeatureEngineeringMode::Custom(
+///         SmartFeatureConfig::default()
+///             .with_enable_polynomial(false)
+///             .with_top_n_interactions(10)
+///     ))
+///     .fit(&df, "target")?;
+/// ```
+#[derive(Debug, Clone)]
+pub enum FeatureEngineeringMode {
+    /// No feature engineering
+    None,
+    /// Minimal features (polynomial only, max 20)
+    Minimal,
+    /// Standard features (polynomial + interactions, max 50)
+    Default,
+    /// Aggressive features (all types, max 100)
+    Aggressive,
+    /// Custom configuration
+    Custom(crate::features::SmartFeatureConfig),
+}
+
+impl Default for FeatureEngineeringMode {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+impl FeatureEngineeringMode {
+    /// Check if feature engineering is enabled
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// Get the feature configuration
+    pub fn get_config(&self) -> Option<crate::features::SmartFeatureConfig> {
+        use crate::features::{SmartFeatureConfig, SmartFeaturePreset};
+        match self {
+            Self::None => None,
+            Self::Minimal => {
+                Some(SmartFeatureConfig::default().with_preset(SmartFeaturePreset::Minimal))
+            }
+            Self::Default => Some(SmartFeatureConfig::default()),
+            Self::Aggressive => {
+                Some(SmartFeatureConfig::default().with_preset(SmartFeaturePreset::Aggressive))
+            }
+            Self::Custom(config) => Some(config.clone()),
+        }
+    }
+}
+
+/// Preprocessing mode for AutoBuilder.
+///
+/// Controls which preprocessing transformations to apply.
+///
+/// # Examples
+///
+/// ```ignore
+/// use treeboost::{AutoBuilder, PreprocessingMode};
+///
+/// // No preprocessing
+/// let model = AutoBuilder::new()
+///     .with_preprocessing(PreprocessingMode::None)
+///     .fit(&df, "target")?;
+///
+/// // Strict preprocessing (aggressive outlier removal, missing value handling)
+/// let model = AutoBuilder::new()
+///     .with_preprocessing(PreprocessingMode::Strict)
+///     .fit(&df, "target")?;
+///
+/// // Custom preprocessing configuration
+/// let model = AutoBuilder::new()
+///     .with_preprocessing(PreprocessingMode::Custom(
+///         SmartPreprocessConfig::default()
+///             .with_preset(SmartPreprocessPreset::Permissive)
+///     ))
+///     .fit(&df, "target")?;
+/// ```
+#[derive(Debug, Clone)]
+pub enum PreprocessingMode {
+    /// No preprocessing
+    None,
+    /// Minimal preprocessing (basic imputation only)
+    Minimal,
+    /// Standard preprocessing (default)
+    Default,
+    /// Strict preprocessing (aggressive cleaning)
+    Strict,
+    /// Custom configuration
+    Custom(crate::preprocessing::SmartPreprocessConfig),
+}
+
+impl Default for PreprocessingMode {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+impl PreprocessingMode {
+    /// Check if preprocessing is enabled
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// Get the preprocessing configuration
+    pub fn get_config(&self) -> Option<crate::preprocessing::SmartPreprocessConfig> {
+        use crate::preprocessing::{SmartPreprocessConfig, SmartPreprocessPreset};
+        match self {
+            Self::None => None,
+            Self::Minimal => Some(
+                SmartPreprocessConfig::default().with_preset(SmartPreprocessPreset::Permissive),
+            ),
+            Self::Default => Some(SmartPreprocessConfig::default()),
+            Self::Strict => {
+                Some(SmartPreprocessConfig::default().with_preset(SmartPreprocessPreset::Strict))
+            }
+            Self::Custom(config) => Some(config.clone()),
+        }
+    }
+}
+
+/// Ensemble mode for AutoBuilder.
+///
+/// Controls whether and how to build model ensembles (PureTree only).
+///
+/// # Examples
+///
+/// ```ignore
+/// use treeboost::{AutoBuilder, EnsembleMode, AutoEnsembleMethod};
+///
+/// // No ensemble
+/// let model = AutoBuilder::new()
+///     .with_ensemble(EnsembleMode::Disabled)
+///     .fit(&df, "target")?;
+///
+/// // Default ensemble (Ridge stacking with 5 seeds)
+/// let model = AutoBuilder::new()
+///     .with_ensemble(EnsembleMode::Default)
+///     .fit(&df, "target")?;
+///
+/// // Simple averaging instead of stacking
+/// let model = AutoBuilder::new()
+///     .with_ensemble(EnsembleMode::WithMethod(AutoEnsembleMethod::SimpleAverage))
+///     .fit(&df, "target")?;
+///
+/// // Custom ensemble configuration
+/// let model = AutoBuilder::new()
+///     .with_ensemble(EnsembleMode::Custom(
+///         AutoEnsembleConfig::new()
+///             .with_method(AutoEnsembleMethod::RidgeStacking)
+///             .with_multi_seed_config(MultiSeedConfig::new(10))
+///     ))
+///     .fit(&df, "target")?;
+/// ```
+#[derive(Debug, Clone)]
+pub enum EnsembleMode {
+    /// No ensemble (single model)
+    Disabled,
+    /// Default ensemble (Ridge stacking with 5 seeds)
+    Default,
+    /// Ensemble with specific method
+    WithMethod(AutoEnsembleMethod),
+    /// Custom ensemble configuration
+    Custom(AutoEnsembleConfig),
+}
+
+impl Default for EnsembleMode {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
+impl EnsembleMode {
+    /// Check if ensemble is enabled
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    /// Get the ensemble configuration
+    pub fn get_config(&self) -> Option<AutoEnsembleConfig> {
+        match self {
+            Self::Disabled => None,
+            Self::Default => Some(AutoEnsembleConfig::default()),
+            Self::WithMethod(method) => Some(AutoEnsembleConfig::default().with_method(*method)),
+            Self::Custom(config) => Some(config.clone()),
+        }
+    }
+}
+
 /// AutoBuilder configuration
 pub struct AutoConfig {
     /// Tuning intensity
@@ -241,17 +450,14 @@ pub struct AutoConfig {
     /// Validation split ratio (default: 0.2)
     pub val_ratio: f32,
 
-    /// Whether to enable automatic feature engineering
-    pub auto_features: bool,
+    /// Feature engineering mode (replaces auto_features + feature_config)
+    pub feature_engineering: FeatureEngineeringMode,
 
-    /// Whether to enable automatic preprocessing
-    pub auto_preprocessing: bool,
+    /// Preprocessing mode (replaces auto_preprocessing)
+    pub preprocessing: PreprocessingMode,
 
     /// Mode selection strategy (Auto or Fixed)
     pub mode_selection: ModeSelection,
-
-    /// Maximum number of features to generate
-    pub max_generated_features: usize,
 
     /// Random seed for reproducibility
     pub seed: u64,
@@ -272,14 +478,30 @@ pub struct AutoConfig {
     /// Custom UniversalConfig to use (bypasses tuning if provided with TuningLevel::None)
     pub custom_config: Option<crate::model::UniversalConfig>,
 
-    /// Optional ensemble configuration (PureTree only)
-    pub ensemble: Option<AutoEnsembleConfig>,
+    /// Ensemble mode (replaces ensemble: Option<AutoEnsembleConfig>)
+    pub ensemble: EnsembleMode,
 
     /// Custom tree tuner configuration (overrides tuning_level for tree-based modes)
     pub tree_tuner_config: Option<TreeTunerConfig>,
 
+    /// Output directory for saving final model artifacts (model.rkyv, config.json)
+    /// If None, artifacts are not automatically saved
+    ///
+    /// Note: config.json now contains everything (hyperparameters, feature plan, preprocessing plan, target column)
+    pub model_output_dir: Option<std::path::PathBuf>,
+
     /// Backend type for computation (Auto, Cuda, Wgpu, Scalar, etc.)
     pub backend_type: crate::backend::BackendType,
+
+    /// Skip final model training (discovery mode)
+    ///
+    /// When true:
+    /// - Runs profiling, feature engineering, preprocessing, and hyperparameter tuning
+    /// - Saves config.json with discovered settings
+    /// - Does NOT train final model or save model.rkyv
+    ///
+    /// Use this for fast config discovery on sampled data, then train on full data later.
+    pub skip_training: bool,
 }
 
 impl Clone for AutoConfig {
@@ -287,10 +509,9 @@ impl Clone for AutoConfig {
         Self {
             tuning_level: self.tuning_level,
             val_ratio: self.val_ratio,
-            auto_features: self.auto_features,
-            auto_preprocessing: self.auto_preprocessing,
+            feature_engineering: self.feature_engineering.clone(),
+            preprocessing: self.preprocessing.clone(),
             mode_selection: self.mode_selection.clone(),
-            max_generated_features: self.max_generated_features,
             seed: self.seed,
             verbose: self.verbose,
             time_budget: self.time_budget,
@@ -299,7 +520,9 @@ impl Clone for AutoConfig {
             custom_config: self.custom_config.clone(),
             ensemble: self.ensemble.clone(),
             tree_tuner_config: self.tree_tuner_config.clone(),
+            model_output_dir: self.model_output_dir.clone(),
             backend_type: self.backend_type,
+            skip_training: self.skip_training,
         }
     }
 }
@@ -309,10 +532,9 @@ impl std::fmt::Debug for AutoConfig {
         f.debug_struct("AutoConfig")
             .field("tuning_level", &self.tuning_level)
             .field("val_ratio", &self.val_ratio)
-            .field("auto_features", &self.auto_features)
-            .field("auto_preprocessing", &self.auto_preprocessing)
+            .field("feature_engineering", &self.feature_engineering)
+            .field("preprocessing", &self.preprocessing)
             .field("mode_selection", &self.mode_selection)
-            .field("max_generated_features", &self.max_generated_features)
             .field("seed", &self.seed)
             .field("verbose", &self.verbose)
             .field("time_budget", &self.time_budget)
@@ -321,6 +543,7 @@ impl std::fmt::Debug for AutoConfig {
             .field("ensemble", &self.ensemble)
             .field("tree_tuner_config", &self.tree_tuner_config)
             .field("backend_type", &self.backend_type)
+            .field("skip_training", &self.skip_training)
             .finish()
     }
 }
@@ -330,19 +553,20 @@ impl Default for AutoConfig {
         Self {
             tuning_level: TuningLevel::Standard,
             val_ratio: auto_defaults::DEFAULT_VALIDATION_RATIO,
-            auto_features: true,
-            auto_preprocessing: true,
+            feature_engineering: FeatureEngineeringMode::Default,
+            preprocessing: PreprocessingMode::Default,
             mode_selection: ModeSelection::Auto, // AutoBuilder defaults to automatic mode selection
-            max_generated_features: auto_defaults::AUTO_FEATURES_DEFAULT_COUNT,
             seed: seeds_defaults::DEFAULT_SEED,
             verbose: false,
             time_budget: None,
             progress_callback: Arc::new(QuietProgress),
             linear_feature_config: LinearFeatureConfig::default(),
             custom_config: None,
-            ensemble: None,
+            ensemble: EnsembleMode::Disabled,
             tree_tuner_config: None,
+            model_output_dir: None,
             backend_type: crate::backend::BackendType::Auto,
+            skip_training: false,
         }
     }
 }
@@ -368,15 +592,52 @@ impl AutoConfig {
         self
     }
 
-    /// Enable/disable automatic feature engineering
-    pub fn with_auto_features(mut self, enabled: bool) -> Self {
-        self.auto_features = enabled;
+    /// Set feature engineering mode
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use treeboost::{AutoConfig, FeatureEngineeringMode};
+    /// use treeboost::features::SmartFeatureConfig;
+    ///
+    /// // Disable feature engineering
+    /// let config = AutoConfig::new()
+    ///     .with_feature_engineering(FeatureEngineeringMode::None);
+    ///
+    /// // Use default features
+    /// let config = AutoConfig::new()
+    ///     .with_feature_engineering(FeatureEngineeringMode::Default);
+    ///
+    /// // Custom configuration
+    /// let config = AutoConfig::new()
+    ///     .with_feature_engineering(FeatureEngineeringMode::Custom(
+    ///         SmartFeatureConfig::default()
+    ///             .with_enable_polynomial(false)
+    ///             .with_top_n_interactions(10)
+    ///     ));
+    /// ```
+    pub fn with_feature_engineering(mut self, mode: FeatureEngineeringMode) -> Self {
+        self.feature_engineering = mode;
         self
     }
 
-    /// Enable/disable automatic preprocessing
-    pub fn with_auto_preprocessing(mut self, enabled: bool) -> Self {
-        self.auto_preprocessing = enabled;
+    /// Set preprocessing mode
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use treeboost::{AutoConfig, PreprocessingMode};
+    ///
+    /// // No preprocessing
+    /// let config = AutoConfig::new()
+    ///     .with_preprocessing(PreprocessingMode::None);
+    ///
+    /// // Strict preprocessing (aggressive cleaning)
+    /// let config = AutoConfig::new()
+    ///     .with_preprocessing(PreprocessingMode::Strict);
+    /// ```
+    pub fn with_preprocessing(mut self, mode: PreprocessingMode) -> Self {
+        self.preprocessing = mode;
         self
     }
 
@@ -417,21 +678,31 @@ impl AutoConfig {
         self
     }
 
-    /// Enable ensemble training with default settings (PureTree only)
-    pub fn with_ensemble(mut self) -> Self {
-        self.ensemble = Some(AutoEnsembleConfig::default());
-        self
-    }
-
-    /// Enable ensemble training with a specific method (PureTree only)
-    pub fn with_ensemble_method(mut self, method: AutoEnsembleMethod) -> Self {
-        self.ensemble = Some(AutoEnsembleConfig::default().with_method(method));
-        self
-    }
-
-    /// Set full ensemble configuration (PureTree only)
-    pub fn with_ensemble_config(mut self, config: AutoEnsembleConfig) -> Self {
-        self.ensemble = Some(config);
+    /// Set ensemble mode (PureTree only)
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use treeboost::{AutoConfig, EnsembleMode, AutoEnsembleMethod, AutoEnsembleConfig};
+    ///
+    /// // No ensemble
+    /// let config = AutoConfig::new()
+    ///     .with_ensemble(EnsembleMode::Disabled);
+    ///
+    /// // Default ensemble
+    /// let config = AutoConfig::new()
+    ///     .with_ensemble(EnsembleMode::Default);
+    ///
+    /// // Specific method
+    /// let config = AutoConfig::new()
+    ///     .with_ensemble(EnsembleMode::WithMethod(AutoEnsembleMethod::SimpleAverage));
+    ///
+    /// // Custom configuration
+    /// let config = AutoConfig::new()
+    ///     .with_ensemble(EnsembleMode::Custom(AutoEnsembleConfig::new()));
+    /// ```
+    pub fn with_ensemble(mut self, mode: EnsembleMode) -> Self {
+        self.ensemble = mode;
         self
     }
 
@@ -452,6 +723,32 @@ impl AutoConfig {
     /// Use BackendType::Auto (default) for automatic detection: CUDA > WGPU > Scalar
     pub fn with_backend(mut self, backend_type: crate::backend::BackendType) -> Self {
         self.backend_type = backend_type;
+        self
+    }
+
+    /// Enable skip training mode (discovery only)
+    ///
+    /// When enabled, AutoBuilder will:
+    /// - Run profiling, feature engineering, preprocessing, and hyperparameter tuning
+    /// - Save config.json with all discovered settings
+    /// - Skip final model training (no model.rkyv saved)
+    ///
+    /// Use this for fast config discovery on sampled data.
+    /// Then load the config and train with UniversalModel on full data.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Discovery on sample data
+    /// let config = AutoConfig::new().with_skip_training(true);
+    /// AutoBuilder::with_config(config).fit(&sample_df, "target")?;
+    /// // Saves config.json only
+    ///
+    /// // Train on full data
+    /// let config = UniversalConfig::load("config.json")?;
+    /// let model = UniversalModel::train(&full_dataset, config, &loss)?;
+    /// ```
+    pub fn with_skip_training(mut self, skip: bool) -> Self {
+        self.skip_training = skip;
         self
     }
 
@@ -521,11 +818,61 @@ impl AutoConfig {
         self
     }
 
-    /// Set custom tree tuner configuration (overrides tuning_level for tree-based modes)
+    /// Set output directory for tuning logs (simple API)
+    ///
+    /// **This is the recommended way** to enable CSV logging for tuning trials.
+    /// AutoConfig automatically configures TreeTunerConfig with the output directory
+    /// based on your tuning level (Quick, Standard, Thorough).
+    ///
+    /// The directory will contain timestamped subdirectories (run_YYYYMMDD_HHMMSS/) with:
+    /// - `iteration_N.csv` - Trial-by-trial results for each tuning iteration
+    /// - `best_params.json` - Best hyperparameters and validation metrics
+    /// - `summary.json` - Run metadata
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::path::Path;
+    /// use treeboost::model::{AutoConfig, TuningLevel};
+    ///
+    /// let config = AutoConfig::new()
+    ///     .with_output_dir(Path::new("my_experiment/tuning_logs"))  // Simple!
+    ///     .with_tuning(TuningLevel::Quick)
+    ///     .with_random_validation_split(0.2);
+    /// ```
+    pub fn with_output_dir(mut self, dir: &std::path::Path) -> Self {
+        // Set model output directory to parent of tuner directory
+        // Example: if dir = "accident/automl/autotuner", model_output_dir = "accident/automl"
+        self.model_output_dir = dir.parent().map(|p| p.to_path_buf());
+
+        // If tree_tuner_config already exists, update its output_dir
+        // Otherwise, create a new config based on tuning_level
+        let tuner_config = if let Some(mut existing) = self.tree_tuner_config.take() {
+            existing.output.dir = Some(dir.to_path_buf());
+            existing
+        } else {
+            // Create config from tuning level preset and set output_dir
+            let preset = match self.tuning_level {
+                TuningLevel::Quick => TreeTunerPreset::Quick,
+                TuningLevel::Standard => TreeTunerPreset::Standard,
+                TuningLevel::Thorough => TreeTunerPreset::Thorough,
+                TuningLevel::None => TreeTunerPreset::Quick, // Default to Quick if no tuning
+            };
+            TreeTunerConfig::with_preset(preset).with_output_dir(Some(dir.to_path_buf()))
+        };
+
+        self.tree_tuner_config = Some(tuner_config);
+        self
+    }
+
+    /// Set custom tree tuner configuration (advanced API for power users)
     ///
     /// Use this to provide custom hyperparameter search configuration for PureTree
     /// and RandomForest modes. This allows fine-grained control over the number of
     /// samples, iterations, depth ranges, and other tuning parameters.
+    ///
+    /// **Most users should use `with_output_dir()` instead** - it's simpler and handles
+    /// configuration automatically based on your tuning level.
     ///
     /// # Example
     ///
@@ -1051,8 +1398,16 @@ impl TreeTunerConfig {
 /// Build result containing the trained model and metadata
 #[derive(Debug)]
 pub struct BuildResult {
-    /// The trained model (UniversalModel handles all modes and ensembles)
-    pub model: UniversalModel,
+    /// The trained model (UniversalModel handles all modes and ensembles).
+    ///
+    /// None if `skip_training` was enabled (discovery mode).
+    pub model: Option<UniversalModel>,
+
+    /// Whether training was skipped (discovery mode).
+    ///
+    /// When true, `model` will be None and only configuration was discovered.
+    /// The enriched config is saved to disk and can be used for training with UniversalModel.
+    pub skip_training: bool,
 
     /// The boosting mode used
     pub mode: BoostingMode,

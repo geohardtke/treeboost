@@ -111,8 +111,7 @@ impl SimpleImputer {
     pub fn fit(&mut self, data: &[f32], num_features: usize) -> Result<()> {
         if data.is_empty() {
             return Err(TreeBoostError::Data(
-                "SimpleImputer::fit() received empty data. Provide at least 1 data point."
-                    .into(),
+                "SimpleImputer::fit() received empty data. Provide at least 1 data point.".into(),
             ));
         }
 

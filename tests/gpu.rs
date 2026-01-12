@@ -262,7 +262,10 @@ fn test_gpu_training_end_to_end() {
     let gpu_model = match GBDTModel::train_binned(&dataset, gpu_config) {
         Ok(model) => model,
         Err(e) => {
-            eprintln!("GPU training failed (may be numerical precision issue): {}", e);
+            eprintln!(
+                "GPU training failed (may be numerical precision issue): {}",
+                e
+            );
             // If GPU training fails, skip comparison
             println!("GPU training end-to-end test skipped due to GPU backend limitations");
             return;
@@ -550,7 +553,11 @@ fn test_cuda_training_end_to_end() {
 
     eprintln!("  ✓ CUDA model MSE: {:.4}", cuda_mse);
     // Just verify predictions are finite (not NaN/Inf)
-    assert!(cuda_mse.is_finite(), "CUDA model MSE is not finite: {}", cuda_mse);
+    assert!(
+        cuda_mse.is_finite(),
+        "CUDA model MSE is not finite: {}",
+        cuda_mse
+    );
     assert!(
         cuda_preds.iter().all(|p| p.is_finite()),
         "CUDA predictions contain NaN or Inf"
@@ -607,8 +614,14 @@ fn test_cuda_autotuner() {
 
     // Just verify tuning completes successfully and finds a valid config
     assert!(best_config.max_depth > 0, "Config depth should be positive");
-    assert!(best_config.learning_rate > 0.0, "Config learning rate should be positive");
-    assert!(best.val_loss.is_finite(), "Validation loss should be finite");
+    assert!(
+        best_config.learning_rate > 0.0,
+        "Config learning rate should be positive"
+    );
+    assert!(
+        best.val_loss.is_finite(),
+        "Validation loss should be finite"
+    );
 
     eprintln!("  ✓ CUDA AutoTuner test passed");
 }

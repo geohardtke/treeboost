@@ -2,8 +2,9 @@
 
 use crate::dataset::feature_extractor::FeatureExtractor;
 use crate::defaults::{
-    ensemble as ensemble_defaults, learners::gbdt as gbdt_defaults, learners::tree as tree_defaults,
-    learners::universal as universal_defaults, tuning::seeds as seeds_defaults,
+    ensemble as ensemble_defaults, learners::gbdt as gbdt_defaults,
+    learners::tree as tree_defaults, learners::universal as universal_defaults,
+    tuning::seeds as seeds_defaults,
 };
 use crate::learner::{LinearConfig, LinearPreset, TreeConfig, TreePreset};
 use crate::model::universal::mode::BoostingMode;
@@ -168,6 +169,61 @@ pub struct UniversalConfig {
     #[rkyv(with = rkyv::with::Skip)]
     #[serde(skip)]
     pub backend_type: crate::backend::BackendType,
+
+    /// Feature engineering plan (polynomial, interactions, ratios, time-series)
+    ///
+    /// **CRITICAL**: This defines how to transform raw input features before training/prediction.
+    /// When None, no feature engineering is applied.
+    ///
+    /// This plan is discovered by AutoBuilder during the feature engineering phase and
+    /// MUST be applied to any new data before prediction to ensure feature consistency.
+    ///
+    /// # Serialization Note
+    ///
+    /// This field is **skipped in rkyv** (binary model format) but **included in JSON** (config.json).
+    /// Reason: Large nested structures increase binary size. Instead:
+    /// - `model.rkyv` contains only model parameters (trees, weights, etc.)
+    /// - `config.json` contains the full configuration including `feature_plan`
+    ///
+    /// **Important**: Always save both files together. Loading `model.rkyv` without `config.json`
+    /// will result in `feature_plan = None`, preventing proper inference on new data.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // AutoBuilder discovers and saves BOTH files
+    /// let result = AutoBuilder::new().fit(&train_df, "target")?;
+    /// result.model.save("model.rkyv")?;  // Binary model
+    /// // AutoBuilder also saves config.json with feature_plan
+    ///
+    /// // For inference: Load config first, then apply to new data
+    /// let config = UniversalConfig::load("config.json")?;
+    /// let test_transformed = apply_feature_plan(&test_df, &config.feature_plan)?;
+    /// let model = UniversalModel::load("model.rkyv")?;
+    /// let preds = model.predict(&test_transformed)?;
+    /// ```
+    #[rkyv(with = rkyv::with::Skip)] // Skip for rkyv, only in config.json
+    pub feature_plan: Option<crate::features::FeaturePlan>,
+
+    /// Preprocessing plan (encoders, scalers, imputers)
+    ///
+    /// Defines how to preprocess raw data (encode categoricals, scale numerics, impute missing values).
+    /// When None, no preprocessing is applied (data is assumed to already be preprocessed).
+    ///
+    /// This plan is discovered by AutoBuilder during the preprocessing phase.
+    ///
+    /// # Serialization Note
+    ///
+    /// Like `feature_plan`, this is **skipped in rkyv** but **included in config.json**.
+    /// Always load `config.json` alongside `model.rkyv` for inference.
+    #[rkyv(with = rkyv::with::Skip)] // Skip for rkyv, only in config.json
+    pub preprocessing_plan: Option<crate::preprocessing::PreprocessingPlan>,
+
+    /// Target column name
+    ///
+    /// Name of the target variable in the training data.
+    /// Used for validation and documentation purposes.
+    #[rkyv(with = rkyv::with::Skip)] // Skip for rkyv, only in config.json
+    pub target_column: Option<String>,
 }
 
 impl Default for UniversalConfig {
@@ -190,6 +246,9 @@ impl Default for UniversalConfig {
             ensemble_seeds: None, // No ensemble by default
             stacking_strategy: StackingStrategy::default(),
             backend_type: crate::backend::BackendType::Auto,
+            feature_plan: None,
+            preprocessing_plan: None,
+            target_column: None,
         }
     }
 }

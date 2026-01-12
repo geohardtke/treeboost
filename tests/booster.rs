@@ -960,7 +960,12 @@ fn test_vector_tree_predictions_quality() {
     let flat: Vec<f32> = raw_preds.iter().flat_map(|r| r.iter().copied()).collect();
     let min = flat.iter().cloned().fold(f32::INFINITY, f32::min);
     let max = flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    assert!(max - min > 0.1, "Predictions should vary: min={}, max={}", min, max);
+    assert!(
+        max - min > 0.1,
+        "Predictions should vary: min={}, max={}",
+        min,
+        max
+    );
 
     // 3. Compute training loss - should be better than random (0.693 = -ln(0.5))
     let targets = dataset.targets();
@@ -973,5 +978,9 @@ fn test_vector_tree_predictions_quality() {
         }
     }
     let avg_loss = total_loss / (num_rows * num_outputs) as f32;
-    assert!(avg_loss < 0.69, "Training loss {} should be better than random", avg_loss);
+    assert!(
+        avg_loss < 0.69,
+        "Training loss {} should be better than random",
+        avg_loss
+    );
 }

@@ -145,13 +145,8 @@ fn tune_tree_model(
         })
         .select(dataset.num_rows())?;
 
-        // Convert backend name to BackendType
-        match resolved.name() {
-            "CUDA" => BackendType::Cuda,
-            "WGPU" => BackendType::Wgpu,
-            "Scalar (AVX2)" | "Scalar (NEON)" | "Scalar" => BackendType::Scalar,
-            _ => BackendType::Scalar,
-        }
+        // Use type-safe backend identification instead of string matching
+        resolved.backend_type()
     } else {
         config.backend_type
     };
@@ -336,7 +331,8 @@ fn tune_ltt(
     let result = tuner.tune(&features, num_features, &targets)?;
 
     // Build UniversalConfig from tuning result
-    let tree_config = TreeConfig::default().with_max_depth(result.tree_params.max_depth as usize)?;
+    let tree_config =
+        TreeConfig::default().with_max_depth(result.tree_params.max_depth as usize)?;
 
     let univ_config = UniversalConfig::default()
         .with_mode(BoostingMode::LinearThenTree)

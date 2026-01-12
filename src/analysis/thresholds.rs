@@ -138,11 +138,7 @@ impl ThresholdTuner {
     }
 
     /// Find optimal threshold for a single label
-    fn find_optimal_threshold(
-        &self,
-        probs: &[f32],
-        targets: &[f32],
-    ) -> (f32, f32, f32, f32) {
+    fn find_optimal_threshold(&self, probs: &[f32], targets: &[f32]) -> (f32, f32, f32, f32) {
         let mut best_threshold = 0.5;
         let mut best_f1 = 0.0;
         let mut best_precision = 0.0;
@@ -287,13 +283,7 @@ mod tests {
         let tuner = ThresholdTuner::new();
 
         // Imbalanced data: most samples are negative
-        let probabilities = vec![
-            vec![0.9],
-            vec![0.1],
-            vec![0.1],
-            vec![0.1],
-            vec![0.1],
-        ];
+        let probabilities = vec![vec![0.9], vec![0.1], vec![0.1], vec![0.1], vec![0.1]];
 
         let targets = vec![
             vec![1.0], // Only one positive
@@ -332,7 +322,9 @@ mod tests {
             0.0, 1.0, // Row 3
         ];
 
-        let result = tuner.tune_flat(&probabilities_flat, &targets_flat, 4, 2).unwrap();
+        let result = tuner
+            .tune_flat(&probabilities_flat, &targets_flat, 4, 2)
+            .unwrap();
 
         assert_eq!(result.thresholds.len(), 2);
         assert!(result.f1_scores[0] > 0.8);

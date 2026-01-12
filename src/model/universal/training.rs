@@ -669,7 +669,8 @@ impl UniversalModel {
         let num_outputs = dataset.num_target_cols();
         if num_outputs <= 1 {
             return Err(crate::TreeBoostError::Config(
-                "train_multilabel requires a multi-output dataset (num_target_cols > 1)".to_string(),
+                "train_multilabel requires a multi-output dataset (num_target_cols > 1)"
+                    .to_string(),
             ));
         }
 
@@ -715,7 +716,9 @@ impl UniversalModel {
 
         // Initialize one LinearBooster per label
         let mut linear_boosters: Vec<crate::learner::LinearBooster> = (0..num_outputs)
-            .map(|_| crate::learner::LinearBooster::new(num_raw_features, config.linear_config.clone()))
+            .map(|_| {
+                crate::learner::LinearBooster::new(num_raw_features, config.linear_config.clone())
+            })
             .collect();
 
         // Per-label base predictions (log-odds from loss function)
@@ -804,7 +807,8 @@ impl UniversalModel {
                 feature_info.clone(),
             );
 
-            let label_gbdt = crate::booster::GBDTModel::train_binned(&label_dataset, gbdt_config.clone())?;
+            let label_gbdt =
+                crate::booster::GBDTModel::train_binned(&label_dataset, gbdt_config.clone())?;
             gbdt_per_label.push(label_gbdt);
         }
 

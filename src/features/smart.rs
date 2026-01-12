@@ -33,7 +33,14 @@ use std::collections::HashSet;
 ///
 /// Defines lag, rolling, and EWMA features to generate for panel/time-series data.
 /// All features are computed within groups to prevent data leakage.
-#[derive(Debug, Clone)]
+///
+/// # Serialization
+///
+/// This struct is serializable via serde to ensure reproducibility:
+/// - Saved to `UniversalConfig.feature_plan` in `config.json`
+/// - Used during inference to apply the same features to new data
+/// - Format is stable for backward compatibility
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TimeSeriesFeaturePlan {
     /// Name of the group/entity column (e.g., "stock_code")
     pub group_column: String,
@@ -104,7 +111,7 @@ impl TimeSeriesFeaturePlan {
 }
 
 /// Feature generation plan
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FeaturePlan {
     /// Columns to apply polynomial transforms (x², sqrt, log)
     pub polynomial_features: Vec<String>,
@@ -178,7 +185,7 @@ impl Default for FeaturePlan {
 }
 
 /// Time feature types to extract from DateTime columns
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TimeFeatureType {
     /// Hour of day (0-23)
     Hour,

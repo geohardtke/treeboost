@@ -56,7 +56,7 @@ pub enum ModelType {
 }
 
 /// Step in a preprocessing plan
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PreprocessingStep {
     /// Column name this step applies to
     pub column: String,
@@ -67,7 +67,7 @@ pub struct PreprocessingStep {
 }
 
 /// Complete preprocessing plan for a dataset
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PreprocessingPlan {
     /// Ordered list of preprocessing steps
     pub steps: Vec<PreprocessingStep>,

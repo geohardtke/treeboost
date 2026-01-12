@@ -203,7 +203,7 @@ fn test_auto_builder_with_config() {
 
     let config = AutoConfig::default()
         .with_tuning(TuningLevel::Quick)
-        .with_auto_features(true)
+        .with_feature_engineering(treeboost::model::FeatureEngineeringMode::Default)
         .with_verbose(false);
 
     let builder = AutoBuilder::with_config(config);
@@ -213,7 +213,8 @@ fn test_auto_builder_with_config() {
     assert!(result.column_profile.is_some());
 
     // Create AutoModel from result
-    let model = treeboost::AutoModel::from_build_result(result);
+    let model =
+        treeboost::AutoModel::from_build_result(result).expect("AutoModel creation should succeed");
     let predictions = model.predict(&df).expect("Prediction should succeed");
     assert_eq!(predictions.len(), 400);
 }
@@ -375,7 +376,8 @@ fn test_time_budget_control() {
     );
 
     // Should still produce a valid model
-    let model = treeboost::AutoModel::from_build_result(result);
+    let model =
+        treeboost::AutoModel::from_build_result(result).expect("AutoModel creation should succeed");
     let predictions = model.predict(&df).expect("Prediction should succeed");
     assert_eq!(predictions.len(), 300);
 }
@@ -391,7 +393,7 @@ fn test_time_budget_adaptations() {
     let builder = AutoBuilder::new()
         .with_time_budget(Duration::from_secs(5))
         .with_verbose(true)
-        .with_auto_features(true) // Request features
+        .with_feature_engineering(treeboost::model::FeatureEngineeringMode::Default) // Request features
         .with_tuning(TuningLevel::Standard); // Request tuning
 
     let result = builder
@@ -400,7 +402,8 @@ fn test_time_budget_adaptations() {
 
     // With tight budget, features and tuning may be skipped
     // Just verify it completed and works
-    let model = treeboost::AutoModel::from_build_result(result);
+    let model =
+        treeboost::AutoModel::from_build_result(result).expect("AutoModel creation should succeed");
     assert_eq!(model.predict(&df).unwrap().len(), 200);
     println!("Tight budget model trained successfully");
 }
@@ -419,7 +422,8 @@ fn test_time_budget_via_config() {
     let builder = AutoBuilder::with_config(config);
     let result = builder.fit(&df, "target").expect("Training should succeed");
 
-    let model = treeboost::AutoModel::from_build_result(result);
+    let model =
+        treeboost::AutoModel::from_build_result(result).expect("AutoModel creation should succeed");
     assert_eq!(model.predict(&df).unwrap().len(), 150);
     println!("Time budget via config works");
 }

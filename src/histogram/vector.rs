@@ -289,7 +289,10 @@ impl VectorHistogram {
         let grad_idx = self.buffer_index(bin, output_idx, false);
         let hess_idx = self.buffer_index(bin, output_idx, true);
 
-        (self.grad_hess_buffer[grad_idx], self.grad_hess_buffer[hess_idx])
+        (
+            self.grad_hess_buffer[grad_idx],
+            self.grad_hess_buffer[hess_idx],
+        )
     }
 
     /// Get all gradient sums for a bin (one per output)
@@ -490,10 +493,7 @@ impl VectorNodeHistograms {
     }
 
     /// Compute sibling histograms from parent and child
-    pub fn from_subtraction(
-        parent: &VectorNodeHistograms,
-        child: &VectorNodeHistograms,
-    ) -> Self {
+    pub fn from_subtraction(parent: &VectorNodeHistograms, child: &VectorNodeHistograms) -> Self {
         Self {
             histograms: parent
                 .histograms

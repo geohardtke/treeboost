@@ -1405,7 +1405,10 @@ mod tests {
 
         // Too high - should return error
         let result = LinearConfig::new().with_shrinkage_factor(2.0);
-        assert!(result.is_err(), "shrinkage_factor > 1.0 should return error");
+        assert!(
+            result.is_err(),
+            "shrinkage_factor > 1.0 should return error"
+        );
 
         // Valid values should succeed
         let config = LinearConfig::new().with_shrinkage_factor(0.5).unwrap();
@@ -1486,7 +1489,9 @@ mod tests {
         let gradients_a: Vec<f32> = targets_a.iter().map(|&t| -t).collect();
         let hessians_a = vec![1.0; 5];
 
-        let config = LinearConfig::default().with_lambda(0.01)?.with_max_iter(100)?;
+        let config = LinearConfig::default()
+            .with_lambda(0.01)?
+            .with_max_iter(100)?;
         let mut booster = LinearBooster::new(1, config);
 
         // Initial fit

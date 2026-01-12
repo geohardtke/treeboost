@@ -25,20 +25,32 @@ fn create_multilabel_dataframe(n_samples: usize, seed: u64) -> DataFrame {
     let mut rng = common::SimpleRng::new(seed);
 
     // Generate features
-    let x1: Vec<f64> = (0..n_samples).map(|_| rng.next_range(0.0, 10.0) as f64).collect();
-    let x2: Vec<f64> = (0..n_samples).map(|_| rng.next_range(0.0, 10.0) as f64).collect();
-    let x3: Vec<f64> = (0..n_samples).map(|_| rng.next_range(0.0, 10.0) as f64).collect();
+    let x1: Vec<f64> = (0..n_samples)
+        .map(|_| rng.next_range(0.0, 10.0) as f64)
+        .collect();
+    let x2: Vec<f64> = (0..n_samples)
+        .map(|_| rng.next_range(0.0, 10.0) as f64)
+        .collect();
+    let x3: Vec<f64> = (0..n_samples)
+        .map(|_| rng.next_range(0.0, 10.0) as f64)
+        .collect();
 
     // Generate labels based on feature thresholds
-    let label_0: Vec<i32> = x1.iter().zip(x2.iter())
+    let label_0: Vec<i32> = x1
+        .iter()
+        .zip(x2.iter())
         .map(|(&a, &b)| if a + b > 5.0 { 1 } else { 0 })
         .collect();
 
-    let label_1: Vec<i32> = x2.iter().zip(x3.iter())
+    let label_1: Vec<i32> = x2
+        .iter()
+        .zip(x3.iter())
         .map(|(&b, &c)| if b + c > 6.0 { 1 } else { 0 })
         .collect();
 
-    let label_2: Vec<i32> = x1.iter().zip(x3.iter())
+    let label_2: Vec<i32> = x1
+        .iter()
+        .zip(x3.iter())
         .map(|(&a, &c)| if a + c > 5.5 { 1 } else { 0 })
         .collect();
 
@@ -49,7 +61,8 @@ fn create_multilabel_dataframe(n_samples: usize, seed: u64) -> DataFrame {
         Column::new("label_0".into(), label_0),
         Column::new("label_1".into(), label_1),
         Column::new("label_2".into(), label_2),
-    ]).unwrap()
+    ])
+    .unwrap()
 }
 
 /// Compute per-label accuracy
@@ -59,7 +72,8 @@ fn compute_accuracy(predictions: &[Vec<bool>], targets: &[Vec<f64>]) -> Vec<f64>
 
     (0..n_labels)
         .map(|k| {
-            let correct = predictions.iter()
+            let correct = predictions
+                .iter()
                 .zip(targets.iter())
                 .filter(|(pred, target)| {
                     let p = if pred[k] { 1.0 } else { 0.0 };
@@ -85,13 +99,25 @@ fn compute_f1_scores(predictions: &[Vec<bool>], targets: &[Vec<f64>]) -> Vec<f64
                 let p = pred[k];
                 let t = target[k] >= 0.5;
 
-                if p && t { tp += 1; }
-                else if p && !t { fp += 1; }
-                else if !p && t { fn_ += 1; }
+                if p && t {
+                    tp += 1;
+                } else if p && !t {
+                    fp += 1;
+                } else if !p && t {
+                    fn_ += 1;
+                }
             }
 
-            let precision = if tp + fp > 0 { tp as f64 / (tp + fp) as f64 } else { 0.0 };
-            let recall = if tp + fn_ > 0 { tp as f64 / (tp + fn_) as f64 } else { 0.0 };
+            let precision = if tp + fp > 0 {
+                tp as f64 / (tp + fp) as f64
+            } else {
+                0.0
+            };
+            let recall = if tp + fn_ > 0 {
+                tp as f64 / (tp + fn_) as f64
+            } else {
+                0.0
+            };
 
             if precision + recall > 0.0 {
                 2.0 * precision * recall / (precision + recall)
@@ -147,7 +173,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (k, &threshold) in tune_result.thresholds.iter().enumerate() {
         println!(
             "     label_{}: threshold={:.2}, F1={:.4}, precision={:.4}, recall={:.4}",
-            k, threshold, tune_result.f1_scores[k], tune_result.precisions[k], tune_result.recalls[k]
+            k,
+            threshold,
+            tune_result.f1_scores[k],
+            tune_result.precisions[k],
+            tune_result.recalls[k]
         );
     }
     println!();
@@ -170,12 +200,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 5. Extract ground truth for evaluation
     let targets: Vec<Vec<f64>> = (0..test_df.height())
         .map(|i| {
-            target_cols.iter()
+            target_cols
+                .iter()
                 .map(|col| {
-                    test_df.column(col).unwrap()
-                        .cast(&DataType::Float64).unwrap()
-                        .f64().unwrap()
-                        .get(i).unwrap()
+                    test_df
+                        .column(col)
+                        .unwrap()
+                        .cast(&DataType::Float64)
+                        .unwrap()
+                        .f64()
+                        .unwrap()
+                        .get(i)
+                        .unwrap()
                 })
                 .collect()
         })
@@ -194,34 +230,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Per-label Accuracy:");
     println!("   {:>10} {:>12} {:>12}", "Label", "Default", "Tuned");
     for k in 0..3 {
-        println!("   {:>10} {:>12.4} {:>12.4}", format!("label_{}", k), acc_default[k], acc_tuned[k]);
+        println!(
+            "   {:>10} {:>12.4} {:>12.4}",
+            format!("label_{}", k),
+            acc_default[k],
+            acc_tuned[k]
+        );
     }
     println!();
 
     println!("   Per-label F1 Score:");
     println!("   {:>10} {:>12} {:>12}", "Label", "Default", "Tuned");
     for k in 0..3 {
-        println!("   {:>10} {:>12.4} {:>12.4}", format!("label_{}", k), f1_default[k], f1_tuned[k]);
+        println!(
+            "   {:>10} {:>12.4} {:>12.4}",
+            format!("label_{}", k),
+            f1_default[k],
+            f1_tuned[k]
+        );
     }
     println!();
 
     // 7. Sample predictions
     println!("6. Sample predictions (first 5 samples):");
-    println!("   {:>6} {:>20} {:>20} {:>20}", "Sample", "Probabilities", "Predicted", "True");
+    println!(
+        "   {:>6} {:>20} {:>20} {:>20}",
+        "Sample", "Probabilities", "Predicted", "True"
+    );
     for i in 0..5.min(test_df.height()) {
-        let probs: String = proba[i].iter()
+        let probs: String = proba[i]
+            .iter()
             .map(|p| format!("{:.2}", p))
             .collect::<Vec<_>>()
             .join(", ");
-        let preds: String = labels_tuned[i].iter()
+        let preds: String = labels_tuned[i]
+            .iter()
             .map(|&b| if b { "1" } else { "0" })
             .collect::<Vec<_>>()
             .join(", ");
-        let trues: String = targets[i].iter()
+        let trues: String = targets[i]
+            .iter()
             .map(|&t| if t >= 0.5 { "1" } else { "0" })
             .collect::<Vec<_>>()
             .join(", ");
-        println!("   {:>6} [{:>18}] [{:>18}] [{:>18}]", i, probs, preds, trues);
+        println!(
+            "   {:>6} [{:>18}] [{:>18}] [{:>18}]",
+            i, probs, preds, trues
+        );
     }
     println!();
 

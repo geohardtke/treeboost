@@ -674,7 +674,7 @@ mod python;
 
 // Re-exports for convenience
 pub use backend::{
-    BackendConfig, BackendPreset, BackendSelector, BackendType, GpuMode, HistogramBackend, kernel,
+    kernel, BackendConfig, BackendPreset, BackendSelector, BackendType, GpuMode, HistogramBackend,
 };
 pub use booster::{GBDTConfig, GBDTModel, GbdtPreset, LossType, OutputType};
 pub use dataset::{BinnedDataset, FeatureInfo, FeatureType, QuantileBinner};
@@ -693,8 +693,8 @@ pub use learner::{
     LinearTreeConfig, TreeBooster, TreeConfig, TreePreset, WeakLearner,
 };
 pub use loss::{
-    sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss,
-    MultiLabelFocalLoss, MultiLabelLogLoss, PseudoHuberLoss,
+    sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, MultiLabelFocalLoss,
+    MultiLabelLogLoss, PseudoHuberLoss,
 };
 pub use model::{
     AutoBuilder, AutoConfig, AutoEnsembleConfig, AutoEnsembleMethod, AutoModel,

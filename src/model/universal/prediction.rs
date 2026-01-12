@@ -644,10 +644,15 @@ impl UniversalModel {
                     let base = base_preds.get(k).copied().unwrap_or(0.0);
 
                     // Linear contribution (with shrinkage)
-                    let linear_pred = linear_boosters[k].predict_row(&raw_features, num_raw_features, i);
+                    let linear_pred =
+                        linear_boosters[k].predict_row(&raw_features, num_raw_features, i);
 
                     // Tree contribution from per-label GBDT
-                    let tree_contrib = gbdt_preds.get(k).and_then(|v| v.get(i)).copied().unwrap_or(0.0);
+                    let tree_contrib = gbdt_preds
+                        .get(k)
+                        .and_then(|v| v.get(i))
+                        .copied()
+                        .unwrap_or(0.0);
 
                     predictions[i][k] = base + shrinkage * linear_pred + tree_contrib;
                 }
@@ -673,11 +678,7 @@ impl UniversalModel {
         // Apply sigmoid to each score
         raw_scores
             .into_iter()
-            .map(|row| {
-                row.into_iter()
-                    .map(crate::loss::sigmoid)
-                    .collect()
-            })
+            .map(|row| row.into_iter().map(crate::loss::sigmoid).collect())
             .collect()
     }
 
@@ -687,7 +688,11 @@ impl UniversalModel {
     }
 
     /// Multi-label prediction: boolean labels with custom threshold
-    pub fn predict_labels_with_threshold(&self, dataset: &BinnedDataset, threshold: f32) -> Vec<Vec<bool>> {
+    pub fn predict_labels_with_threshold(
+        &self,
+        dataset: &BinnedDataset,
+        threshold: f32,
+    ) -> Vec<Vec<bool>> {
         let proba = self.predict_proba_multilabel(dataset);
 
         proba

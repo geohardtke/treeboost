@@ -9,7 +9,9 @@
 //! - Tuner presets (Quick, Thorough)
 //! - LTT presets (Quick, LinearHyperparams, TreeHyperparams)
 
-use treeboost::defaults::learners::{gbdt as gbdt_defaults, linear as linear_defaults, tree as tree_defaults};
+use treeboost::defaults::learners::{
+    gbdt as gbdt_defaults, linear as linear_defaults, tree as tree_defaults,
+};
 use treeboost::defaults::tuning::{ltt as ltt_defaults, tuner as tuner_defaults};
 use treeboost::tuner::ltt::{
     LinearHyperparams, LinearHyperparamsPreset, LttTunerConfig, LttTunerPreset, TreeHyperparams,
@@ -95,10 +97,7 @@ fn elastic_net_preset_sets_l1_ratio() {
 #[test]
 fn aggressive_preset_sets_shrinkage() {
     let cfg = LinearConfig::default().with_preset(LinearPreset::Aggressive);
-    assert_eq!(
-        cfg.shrinkage_factor,
-        linear_defaults::AGGRESSIVE_SHRINKAGE
-    );
+    assert_eq!(cfg.shrinkage_factor, linear_defaults::AGGRESSIVE_SHRINKAGE);
 }
 
 #[test]

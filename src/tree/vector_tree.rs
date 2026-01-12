@@ -14,7 +14,9 @@ use rayon::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// Node type for vector trees: internal (split) or leaf (vector values)
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize,
+)]
 pub enum VectorNodeType {
     /// Internal node with split
     Internal {
@@ -193,7 +195,13 @@ impl VectorTree {
     ) -> Self {
         let num_outputs = root_values.len();
         Self {
-            nodes: vec![VectorNode::leaf(root_values, 0, num_samples, sum_gradients, sum_hessians)],
+            nodes: vec![VectorNode::leaf(
+                root_values,
+                0,
+                num_samples,
+                sum_gradients,
+                sum_hessians,
+            )],
             num_outputs,
         }
     }
@@ -331,12 +339,8 @@ impl VectorTree {
     /// * `get_bin` - Function to get bin for a sample and feature: `|sample_idx, feature_idx| -> u8`
     /// * `num_samples` - Number of samples to predict
     /// * `predictions` - Mutable slice of predictions, layout: `[s0_o0, s0_o1, ..., s1_o0, s1_o1, ...]`
-    pub fn predict_batch_add<F>(
-        &self,
-        get_bin: F,
-        num_samples: usize,
-        predictions: &mut [f32],
-    ) where
+    pub fn predict_batch_add<F>(&self, get_bin: F, num_samples: usize, predictions: &mut [f32])
+    where
         F: Fn(usize, usize) -> u8 + Sync,
     {
         debug_assert_eq!(predictions.len(), num_samples * self.num_outputs);
@@ -511,17 +515,8 @@ mod tests {
 
     #[test]
     fn test_vector_node_internal() {
-        let node = VectorNode::internal(
-            5,
-            128,
-            5.5,
-            1,
-            2,
-            1,
-            200,
-            vec![15.0, 25.0],
-            vec![8.0, 12.0],
-        );
+        let node =
+            VectorNode::internal(5, 128, 5.5, 1, 2, 1, 200, vec![15.0, 25.0], vec![8.0, 12.0]);
 
         assert!(!node.is_leaf());
         assert_eq!(node.num_outputs(), 2);
@@ -531,12 +526,7 @@ mod tests {
 
     #[test]
     fn test_vector_tree_new() {
-        let tree = VectorTree::new(
-            vec![0.5, 1.0],
-            100,
-            vec![0.0, 0.0],
-            vec![100.0, 100.0],
-        );
+        let tree = VectorTree::new(vec![0.5, 1.0], 100, vec![0.0, 0.0], vec![100.0, 100.0]);
 
         assert_eq!(tree.num_nodes(), 1);
         assert_eq!(tree.num_outputs(), 2);

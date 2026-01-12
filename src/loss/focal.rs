@@ -191,8 +191,7 @@ impl MultiLabelFocalLoss {
             for output_idx in 0..num_outputs {
                 for row_offset in 0..BLOCK_SIZE {
                     let idx = base + row_offset * num_outputs + output_idx;
-                    let (g, h) =
-                        self.gradient_hessian_single(targets[idx], predictions[idx]);
+                    let (g, h) = self.gradient_hessian_single(targets[idx], predictions[idx]);
                     gradients[idx] = g;
                     hessians[idx] = h;
                 }

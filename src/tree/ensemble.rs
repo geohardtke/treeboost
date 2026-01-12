@@ -189,7 +189,9 @@ impl EnsembleTree {
     {
         match self {
             EnsembleTree::Scalar(t) => t.predict_raw(get_feature),
-            EnsembleTree::Vector(_) => panic!("Cannot predict_raw on vector tree - use predict_raw_vector"),
+            EnsembleTree::Vector(_) => {
+                panic!("Cannot predict_raw on vector tree - use predict_raw_vector")
+            }
         }
     }
 

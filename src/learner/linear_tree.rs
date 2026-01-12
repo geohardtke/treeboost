@@ -654,7 +654,11 @@ mod tests {
     fn test_linear_tree_config_builder() {
         let config = LinearTreeConfig::new()
             .with_min_samples_for_linear(20)
-            .with_tree_config(TreeConfig::default().with_max_depth(3).expect("valid max_depth"));
+            .with_tree_config(
+                TreeConfig::default()
+                    .with_max_depth(3)
+                    .expect("valid max_depth"),
+            );
 
         assert_eq!(config.min_samples_for_linear, 20);
         assert_eq!(config.tree_config.max_depth, 3);

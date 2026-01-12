@@ -48,14 +48,12 @@ use crate::dataset::feature_extractor::LinearFeatureConfig;
 use crate::dataset::{BinnedDataset, DataPipeline};
 use crate::defaults::auto as auto_defaults;
 use crate::features::{FeaturePlan, SmartFeatureEngine};
-use crate::model::config::{
-    AutoConfig, AutoEnsembleConfig, AutoEnsembleMethod, BuildPhaseTimes, BuildResult, TuningLevel,
-};
+use crate::model::config::{AutoConfig, BuildPhaseTimes, BuildResult, TuningLevel};
 use crate::model::progress::{ProgressCallback, ProgressUpdate, TrainingPhase};
 use crate::model::universal::ModeSelection;
 use crate::model::{BoostingMode, UniversalConfig, UniversalModel};
 use crate::preprocessing::{ModelType, PreprocessingPlan, SmartPreprocessor};
-use crate::Result;
+use crate::{Result, TreeBoostError};
 use polars::prelude::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -123,9 +121,55 @@ impl AutoBuilder {
         self
     }
 
-    /// Enable/disable automatic features
-    pub fn with_auto_features(mut self, enabled: bool) -> Self {
-        self.config.auto_features = enabled;
+    /// Set feature engineering mode
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use treeboost::{AutoBuilder, FeatureEngineeringMode};
+    /// use treeboost::features::SmartFeatureConfig;
+    ///
+    /// // Disable feature engineering
+    /// let builder = AutoBuilder::new()
+    ///     .with_feature_engineering(FeatureEngineeringMode::None);
+    ///
+    /// // Use aggressive features
+    /// let builder = AutoBuilder::new()
+    ///     .with_feature_engineering(FeatureEngineeringMode::Aggressive);
+    ///
+    /// // Custom configuration
+    /// let builder = AutoBuilder::new()
+    ///     .with_feature_engineering(FeatureEngineeringMode::Custom(
+    ///         SmartFeatureConfig::default()
+    ///             .with_enable_polynomial(false)
+    ///             .with_top_n_interactions(10)
+    ///     ));
+    /// ```
+    pub fn with_feature_engineering(
+        mut self,
+        mode: crate::model::config::FeatureEngineeringMode,
+    ) -> Self {
+        self.config.feature_engineering = mode;
+        self
+    }
+
+    /// Set preprocessing mode
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use treeboost::{AutoBuilder, PreprocessingMode};
+    ///
+    /// // No preprocessing
+    /// let builder = AutoBuilder::new()
+    ///     .with_preprocessing(PreprocessingMode::None);
+    ///
+    /// // Strict preprocessing
+    /// let builder = AutoBuilder::new()
+    ///     .with_preprocessing(PreprocessingMode::Strict);
+    /// ```
+    pub fn with_preprocessing(mut self, mode: crate::model::config::PreprocessingMode) -> Self {
+        self.config.preprocessing = mode;
         self
     }
 
@@ -186,21 +230,31 @@ impl AutoBuilder {
         self
     }
 
-    /// Enable ensemble training with default settings (PureTree only)
-    pub fn with_ensemble(mut self) -> Self {
-        self.config.ensemble = Some(AutoEnsembleConfig::default());
-        self
-    }
-
-    /// Enable ensemble training with a specific method (PureTree only)
-    pub fn with_ensemble_method(mut self, method: AutoEnsembleMethod) -> Self {
-        self.config.ensemble = Some(AutoEnsembleConfig::default().with_method(method));
-        self
-    }
-
-    /// Set full ensemble configuration (PureTree only)
-    pub fn with_ensemble_config(mut self, config: AutoEnsembleConfig) -> Self {
-        self.config.ensemble = Some(config);
+    /// Set ensemble mode (PureTree only)
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use treeboost::{AutoBuilder, EnsembleMode, AutoEnsembleMethod, AutoEnsembleConfig};
+    ///
+    /// // No ensemble
+    /// let builder = AutoBuilder::new()
+    ///     .with_ensemble(EnsembleMode::Disabled);
+    ///
+    /// // Default ensemble
+    /// let builder = AutoBuilder::new()
+    ///     .with_ensemble(EnsembleMode::Default);
+    ///
+    /// // With specific method
+    /// let builder = AutoBuilder::new()
+    ///     .with_ensemble(EnsembleMode::WithMethod(AutoEnsembleMethod::SimpleAverage));
+    ///
+    /// // Custom configuration
+    /// let builder = AutoBuilder::new()
+    ///     .with_ensemble(EnsembleMode::Custom(AutoEnsembleConfig::new()));
+    /// ```
+    pub fn with_ensemble(mut self, mode: crate::model::config::EnsembleMode) -> Self {
+        self.config.ensemble = mode;
         self
     }
 
@@ -341,7 +395,7 @@ impl AutoBuilder {
 
         // === Phase 3: Feature Engineering ===
         // Adapt feature engineering based on remaining time
-        let mut skip_features = !adapted_config.auto_features;
+        let mut skip_features = !adapted_config.feature_engineering.is_enabled();
         if let Some(budget) = self.config.time_budget {
             let elapsed = start.elapsed();
             let remaining = budget.saturating_sub(elapsed);
@@ -349,7 +403,7 @@ impl AutoBuilder {
             // Skip feature engineering if time is tight
             if remaining < Duration::from_secs(20) {
                 skip_features = true;
-                if self.config.verbose && adapted_config.auto_features {
+                if self.config.verbose && adapted_config.feature_engineering.is_enabled() {
                     println!("  [Budget] Low time remaining, skipping feature engineering");
                 }
             }
@@ -377,7 +431,7 @@ impl AutoBuilder {
         if self.config.verbose {
             if let Some(ref plan) = feature_plan {
                 println!(
-                    "  [Features] {} polynomial, {} ratio, {} interaction features",
+                    "  [Features] Planning: {} polynomial, {} ratio, {} interaction features",
                     plan.polynomial_features.len(),
                     plan.ratio_pairs.len(),
                     plan.interaction_pairs.len()
@@ -385,9 +439,29 @@ impl AutoBuilder {
             }
         }
 
-        // === Phase 3b: Time-Series Feature Engineering ===
-        // ALWAYS detect panel data structure (needed for era indices, even if not generating features)
+        // === Phase 3b: Apply Cross-Sectional Features (polynomial, ratio, interaction) ===
         let mut working_df = df.clone();
+        let initial_cols = working_df.width();
+
+        // Apply cross-sectional features (polynomial, ratio, interaction) using canonical helper
+        working_df = crate::features::apply_feature_plan(
+            working_df,
+            feature_plan.as_ref(),
+            None, // panel_info will be added for time-series features below
+        )?;
+
+        if self.config.verbose && feature_plan.as_ref().map_or(false, |p| !p.is_empty()) {
+            let added = working_df.width() - initial_cols;
+            println!(
+                "  [Features] Applied cross-sectional: {} → {} columns (+{})",
+                initial_cols,
+                working_df.width(),
+                added
+            );
+        }
+
+        // === Phase 3c: Time-Series Feature Engineering ===
+        // ALWAYS detect panel data structure (needed for era indices, even if not generating features)
         let panel_info = self.detect_panel_structure(&profile, df);
 
         if let Some(ref info) = panel_info {
@@ -398,14 +472,14 @@ impl AutoBuilder {
                 );
             }
 
-            // Only generate time-series features if auto_features is enabled
+            // Only generate time-series features if feature engineering is enabled
             if !skip_features {
-                // Plan time-series features
-                let ts_plan = SmartFeatureEngine::plan_timeseries_features(
-                    &profile,
-                    info,
-                    &crate::features::SmartFeatureConfig::default(),
-                );
+                // Plan time-series features using user config (or default if not specified)
+                let default_config = crate::features::SmartFeatureConfig::default();
+                let config_option = self.config.feature_engineering.get_config();
+                let feature_config = config_option.as_ref().unwrap_or(&default_config);
+                let ts_plan =
+                    SmartFeatureEngine::plan_timeseries_features(&profile, info, feature_config);
 
                 if !ts_plan.is_empty() {
                     if self.config.verbose {
@@ -646,7 +720,7 @@ impl AutoBuilder {
                 (None, None, None)
             };
         // Handle ensemble configuration by setting ensemble_seeds in UniversalConfig
-        let final_config = if let Some(ref ensemble_config) = adapted_config.ensemble {
+        let final_config = if let Some(ref ensemble_config) = adapted_config.ensemble.get_config() {
             // Only PureTree and LinearThenTree support ensembles
             if matches!(mode, BoostingMode::PureTree | BoostingMode::LinearThenTree) {
                 // Generate ensemble seeds from multi_seed config
@@ -682,6 +756,52 @@ impl AutoBuilder {
         } else {
             universal_config
         };
+
+        // Check if skip_training is enabled (discovery mode)
+        if self.config.skip_training {
+            // Save discovered config without training
+            if let Some(ref output_dir) = self.config.model_output_dir {
+                use std::fs;
+                fs::create_dir_all(output_dir)?;
+
+                // Build enriched config with all discovered settings
+                let mut enriched_config = final_config.clone();
+                enriched_config.feature_plan = feature_plan.clone();
+                enriched_config.preprocessing_plan = Some(preprocessing_plan.clone());
+                enriched_config.target_column = Some(target_col.to_string());
+
+                // Save config.json only (no model.rkyv)
+                let config_path = output_dir.join("config.json");
+                let config_json = serde_json::to_string_pretty(&enriched_config).map_err(|e| {
+                    TreeBoostError::Serialization(format!("Failed to serialize config: {}", e))
+                })?;
+                fs::write(&config_path, config_json)?;
+
+                if self.config.verbose {
+                    println!("  [Discovery] Config saved: {}", config_path.display());
+                    println!("  [Discovery] Skip training enabled - no model trained");
+                    println!("  [Discovery] Use UniversalModel::train() with this config for production training");
+                }
+            }
+
+            // Return BuildResult with skip_training=true and no model
+            return Ok(BuildResult {
+                model: None,
+                skip_training: true,
+                mode,
+                target_column: target_col.to_string(),
+                mode_confidence: Some(mode_confidence),
+                preprocessing_plan: Some(preprocessing_plan),
+                feature_plan,
+                ltt_tuning: None,
+                tree_tuning: None,
+                column_profile: Some(profile),
+                analysis,
+                pipeline_state: Some(pipeline_state),
+                build_time: start.elapsed(),
+                phase_times,
+            });
+        }
 
         // Train UniversalModel (handles both single and ensemble internally)
         let max_rounds = final_config.num_rounds; // Save before moving
@@ -719,8 +839,9 @@ impl AutoBuilder {
             message: Some(format!("Total: {:?}", start.elapsed())),
         });
 
-        Ok(BuildResult {
-            model,
+        let build_result = BuildResult {
+            model: Some(model),
+            skip_training: false,
             mode,
             target_column: target_col.to_string(),
             mode_confidence: Some(mode_confidence),
@@ -733,13 +854,21 @@ impl AutoBuilder {
             pipeline_state: Some(pipeline_state), // CRITICAL for inference!
             build_time: start.elapsed(),
             phase_times,
-        })
+        };
+
+        // Auto-save artifacts if model_output_dir is configured
+        if let Some(ref output_dir) = self.config.model_output_dir {
+            self.auto_save_artifacts(&build_result, output_dir)?;
+        }
+
+        Ok(build_result)
     }
 
     /// Profile a DataFrame to understand column types
     fn profile_dataframe(&self, df: &DataFrame, target_col: &str) -> Result<DataFrameProfile> {
-        // Skip correlations when mode is fixed and auto features disabled
-        let skip_correlations = !self.config.mode_selection.is_auto() && !self.config.auto_features;
+        // Skip correlations when mode is fixed and feature engineering disabled
+        let skip_correlations =
+            !self.config.mode_selection.is_auto() && !self.config.feature_engineering.is_enabled();
         DataFrameProfile::analyze_with_options(df, target_col, skip_correlations)
     }
 
@@ -769,7 +898,12 @@ impl AutoBuilder {
 
     /// Plan feature engineering based on profile
     fn plan_features(&self, profile: &DataFrameProfile) -> Result<FeaturePlan> {
-        let plan = SmartFeatureEngine::infer(profile, None);
+        // Use user-provided feature config, or default if not specified
+        let default_config = crate::features::SmartFeatureConfig::default();
+        let config_option = self.config.feature_engineering.get_config();
+        let config = config_option.as_ref().unwrap_or(&default_config);
+
+        let plan = SmartFeatureEngine::infer_with_config(profile, None, config);
         Ok(plan)
     }
 
@@ -885,24 +1019,38 @@ impl AutoBuilder {
 
         // Heuristic: Look for categorical column + numeric column named "date"
         // This handles cases where date is stored as integer (e.g., YYYYMMDD or ordinal)
-        let has_date_col = df.get_column_names().iter().any(|c| {
-            c.to_lowercase().contains("date")
-                || c.to_lowercase().contains("time")
-                || c.to_lowercase() == "dt"
-        });
+        // CRITICAL: Exclude low-cardinality categoricals (e.g., "time_of_day" with 3 values = categorical period, not timestamp)
 
-        if !has_date_col {
-            return None;
-        }
-
-        // Find the date column
+        // Find the date column (must be numeric OR high-cardinality categorical)
         let date_col_name = df
             .get_column_names()
             .iter()
             .find(|c| {
-                c.to_lowercase().contains("date")
-                    || c.to_lowercase().contains("time")
-                    || c.to_lowercase() == "dt"
+                let lower = c.to_lowercase();
+                if !lower.contains("date") && !lower.contains("time") && lower != "dt" {
+                    return false;
+                }
+
+                // Check the column's dtype and cardinality
+                if let Ok(series) = df.column(c) {
+                    let dtype = series.dtype();
+                    // Accept numeric columns (integer timestamps)
+                    if dtype.is_numeric() {
+                        return true;
+                    }
+                    // For categorical: only accept if many unique values (>MIN_DATE_CARDINALITY)
+                    // Low cardinality = categorical time period (morning/afternoon), not timestamps
+                    if matches!(
+                        dtype,
+                        polars::prelude::DataType::String
+                            | polars::prelude::DataType::Categorical(_, _)
+                    ) {
+                        if let Ok(n_unique) = series.n_unique() {
+                            return n_unique > crate::defaults::analysis::MIN_DATE_CARDINALITY;
+                        }
+                    }
+                }
+                false
             })?
             .to_string();
 
@@ -929,6 +1077,62 @@ impl AutoBuilder {
             time_granularity: crate::analysis::TimeGranularity::Daily, // Default assumption
         })
     }
+
+    /// Automatically save all artifacts (model, config, metadata) to output directory
+    fn auto_save_artifacts(
+        &self,
+        build_result: &BuildResult,
+        output_dir: &std::path::Path,
+    ) -> Result<()> {
+        use std::fs;
+
+        // Create output directory if it doesn't exist
+        fs::create_dir_all(output_dir)?;
+
+        // If skip_training mode, the config was already saved inline during fit()
+        // No model to save, only config was produced
+        if build_result.skip_training {
+            return Ok(());
+        }
+
+        // Extract model (safe to unwrap since skip_training is false)
+        let model = build_result
+            .model
+            .as_ref()
+            .expect("model must be Some when skip_training is false");
+
+        // Update model config to include feature plan, preprocessing plan, and target column
+        // This makes UniversalConfig truly universal - it contains everything needed to replicate the pipeline
+        let mut enriched_config = model.config().clone();
+        enriched_config.feature_plan = build_result.feature_plan.clone();
+        enriched_config.preprocessing_plan = build_result.preprocessing_plan.clone();
+        enriched_config.target_column = Some(build_result.target_column.clone());
+
+        // Save trained model (rkyv format for fast loading)
+        // Note: The model internally stores its config, which now includes feature_plan/preprocessing_plan
+        let model_path = output_dir.join("model.rkyv");
+        model.save(&model_path)?;
+        if self.config.verbose {
+            println!("  [AutoSave] Model: {}", model_path.display());
+        }
+
+        // Save UniversalConfig as config.json
+        // This is the SINGLE SOURCE OF TRUTH containing everything:
+        // - Model hyperparameters
+        // - Feature engineering plan (polynomial, interactions, ratios)
+        // - Preprocessing plan (encoders, scalers, imputers)
+        // - Target column name
+        let config_path = output_dir.join("config.json");
+        let config_json = serde_json::to_string_pretty(&enriched_config).map_err(|e| {
+            TreeBoostError::Serialization(format!("Failed to serialize config: {}", e))
+        })?;
+        fs::write(&config_path, config_json)?;
+        if self.config.verbose {
+            println!("  [AutoSave] Config: {}", config_path.display());
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for AutoBuilder {
@@ -946,26 +1150,9 @@ mod tests {
         let config = AutoConfig::default();
         assert_eq!(config.tuning_level, TuningLevel::Standard);
         assert!((config.val_ratio - 0.2).abs() < 0.01);
-        assert!(config.auto_features);
-        assert!(config.auto_preprocessing);
+        assert!(config.feature_engineering.is_enabled());
+        assert!(config.preprocessing.is_enabled());
         assert_eq!(config.mode_selection, ModeSelection::Auto);
-    }
-
-    #[test]
-    fn test_auto_config_builder() {
-        let config = AutoConfig::new()
-            .with_tuning(TuningLevel::Thorough)
-            .with_random_validation_split(0.3)
-            .with_auto_features(false)
-            .with_mode(BoostingMode::LinearThenTree);
-
-        assert_eq!(config.tuning_level, TuningLevel::Thorough);
-        assert!((config.val_ratio - 0.3).abs() < 0.01);
-        assert!(!config.auto_features);
-        assert_eq!(
-            config.mode_selection,
-            ModeSelection::Fixed(BoostingMode::LinearThenTree)
-        );
     }
 
     #[test]

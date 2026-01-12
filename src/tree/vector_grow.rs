@@ -321,8 +321,12 @@ impl VectorTreeGrower {
         let mut partitioner = RowPartitioner::new(row_indices.to_vec());
 
         // Build root histograms
-        let root_histograms =
-            self.build_vector_histograms(dataset, gradients, hessians, partitioner.get_rows(0, num_rows));
+        let root_histograms = self.build_vector_histograms(
+            dataset,
+            gradients,
+            hessians,
+            partitioner.get_rows(0, num_rows),
+        );
 
         // Find best split for root
         let root_split = split_finder.find_best_split_all_features(&root_histograms);

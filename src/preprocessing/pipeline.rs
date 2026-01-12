@@ -931,11 +931,12 @@ mod tests {
         }
 
         fn deserialize_state(&mut self, data: &[u8]) -> crate::Result<()> {
-            let s = std::str::from_utf8(data)
-                .map_err(|e| crate::TreeBoostError::Serialization(format!(
+            let s = std::str::from_utf8(data).map_err(|e| {
+                crate::TreeBoostError::Serialization(format!(
                     "DummyPreprocessor::deserialize_state() failed to decode UTF-8: {}",
                     e
-                )))?;
+                ))
+            })?;
             let parts: Vec<&str> = s.split('|').collect();
             if parts.len() != 2 {
                 return Err(crate::TreeBoostError::Serialization(format!(

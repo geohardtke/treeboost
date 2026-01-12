@@ -370,7 +370,9 @@ impl LabelEncoder {
                 return Err(TreeBoostError::Data(format!(
                     "LabelEncoder::inverse_transform() encountered invalid label {} at index {}. \
                      Valid label range is [0, {}). This indicates a data corruption or mismatch.",
-                    label, i, self.inverse_mapping.len()
+                    label,
+                    i,
+                    self.inverse_mapping.len()
                 )));
             }
         }

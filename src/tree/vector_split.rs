@@ -214,7 +214,11 @@ impl VectorSplitFinder {
     ///
     /// # Returns
     /// Split information with the best gain, or invalid split if no good split found
-    pub fn find_best_split(&self, histogram: &VectorHistogram, feature_idx: usize) -> VectorSplitInfo {
+    pub fn find_best_split(
+        &self,
+        histogram: &VectorHistogram,
+        feature_idx: usize,
+    ) -> VectorSplitInfo {
         debug_assert_eq!(histogram.num_outputs(), self.num_outputs);
 
         let mut best = VectorSplitInfo::new(self.num_outputs);

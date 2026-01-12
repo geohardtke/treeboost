@@ -723,3 +723,146 @@ pub fn apply_crosssectional_features_selective(
     )
     .map_err(|e| crate::TreeBoostError::Data(e.to_string()))
 }
+
+/// Apply a complete feature engineering plan to a DataFrame.
+///
+/// This is the canonical function for applying feature engineering. It consolidates all
+/// feature generation logic in one place to ensure consistency between training and inference.
+///
+/// # Arguments
+///
+/// * `df` - Input DataFrame
+/// * `feature_plan` - Feature engineering plan containing polynomial, ratio, interaction, and time-series features
+/// * `panel_info` - Optional panel data information (for time-series features only)
+///
+/// # Returns
+///
+/// Transformed DataFrame with all engineered features added.
+///
+/// # Example
+///
+/// ```ignore
+/// // During training: AutoBuilder discovers the plan
+/// let plan = feature_plan.clone();
+///
+/// // During inference: Apply the same plan to new data
+/// let test_df = apply_feature_plan(test_df, Some(&plan), None)?;
+/// ```
+pub fn apply_feature_plan(
+    mut df: DataFrame,
+    feature_plan: Option<&crate::features::FeaturePlan>,
+    panel_info: Option<&PanelDataInfo>,
+) -> Result<DataFrame> {
+    // Early return if no plan
+    let plan = match feature_plan {
+        Some(p) if !p.is_empty() => p,
+        _ => return Ok(df),
+    };
+
+    // 1. Apply polynomial features (x², sqrt, log)
+    if !plan.polynomial_features.is_empty() {
+        let poly_gen = PolynomialGenerator::all();
+        df = apply_polynomial_features(df, &poly_gen, Some(plan.polynomial_features.clone()))?;
+        tracing::debug!(
+            num_features = plan.polynomial_features.len(),
+            "Applied polynomial features"
+        );
+    }
+
+    // 2. Apply ratio features (x_i / x_j)
+    if !plan.ratio_pairs.is_empty() {
+        // Get numeric columns for name-to-index mapping
+        let numeric_cols: Vec<String> = df
+            .get_columns()
+            .iter()
+            .filter(|col| col.dtype().is_numeric())
+            .map(|col| col.name().to_string())
+            .collect();
+
+        // Convert named pairs to index pairs
+        let mut index_pairs = Vec::new();
+        for (col_a, col_b) in &plan.ratio_pairs {
+            if let (Some(idx_a), Some(idx_b)) = (
+                numeric_cols.iter().position(|c| c == col_a),
+                numeric_cols.iter().position(|c| c == col_b),
+            ) {
+                index_pairs.push((idx_a, idx_b));
+            }
+        }
+
+        if !index_pairs.is_empty() {
+            let ratio_gen = RatioGenerator::from_pairs(index_pairs);
+            df = apply_ratio_features(df, &ratio_gen, None)?;
+            tracing::debug!(
+                num_ratios = plan.ratio_pairs.len(),
+                "Applied ratio features"
+            );
+        }
+    }
+
+    // 3. Apply interaction features (x_i * x_j)
+    if !plan.interaction_pairs.is_empty() {
+        // Get numeric columns for name-to-index mapping
+        let numeric_cols: Vec<String> = df
+            .get_columns()
+            .iter()
+            .filter(|col| col.dtype().is_numeric())
+            .map(|col| col.name().to_string())
+            .collect();
+
+        // Convert named pairs to index pairs
+        let mut index_pairs = Vec::new();
+        for (col_a, col_b) in &plan.interaction_pairs {
+            if let (Some(idx_a), Some(idx_b)) = (
+                numeric_cols.iter().position(|c| c == col_a),
+                numeric_cols.iter().position(|c| c == col_b),
+            ) {
+                index_pairs.push((idx_a, idx_b));
+            }
+        }
+
+        if !index_pairs.is_empty() {
+            let interaction_gen = InteractionGenerator::from_pairs(index_pairs);
+            df = apply_interaction_features(df, &interaction_gen, None)?;
+            tracing::debug!(
+                num_interactions = plan.interaction_pairs.len(),
+                "Applied interaction features"
+            );
+        }
+    }
+
+    // 4. Apply time-series features (lags, rolling, EWMA)
+    if let Some(ts_plan) = &plan.timeseries_features {
+        // Require panel_info for time-series features
+        let panel_info = panel_info.ok_or_else(|| {
+            crate::TreeBoostError::Data(
+                "Time-series features require panel_info (group and date columns)".to_string(),
+            )
+        })?;
+
+        df = apply_timeseries_features(df, ts_plan, panel_info, true /* fast_mode */)?;
+
+        // Fill nulls created by lags with 0 (safe for tree models)
+        // Nulls appear for rows without sufficient history (e.g., first rows of each group)
+        df = df
+            .lazy()
+            .with_columns([col("*").fill_null(lit(0))])
+            .with_columns([col("*").fill_nan(lit(0.0))])
+            .collect()
+            .map_err(|e| {
+                crate::TreeBoostError::Data(format!(
+                    "Failed to fill nulls after feature engineering: {}",
+                    e
+                ))
+            })?;
+
+        tracing::debug!(
+            num_lags = ts_plan.lag_periods.len(),
+            num_rolling = ts_plan.rolling_windows.len(),
+            num_ewma = ts_plan.ewma_alphas.len(),
+            "Applied time-series features"
+        );
+    }
+
+    Ok(df)
+}

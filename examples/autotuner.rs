@@ -139,7 +139,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ParamBounds::log_continuous(0.005, 0.5),
             0.05,
         )
-        .with_param(TunableParam::Subsample, ParamBounds::continuous(0.6, 1.0), 0.8)
+        .with_param(
+            TunableParam::Subsample,
+            ParamBounds::continuous(0.6, 1.0),
+            0.8,
+        )
         .with_param(TunableParam::Lambda, ParamBounds::continuous(0.0, 5.0), 1.0);
 
     let tuner_config = TunerConfig::new()
