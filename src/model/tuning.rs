@@ -94,7 +94,7 @@ fn tune_tree_model(
     }
 
     // Get tuning configuration - use custom config if provided, otherwise use preset
-    let tuner_cfg = if let Some(custom_cfg) = &config.tree_tuner_config {
+    let mut tuner_cfg = if let Some(custom_cfg) = &config.tree_tuner_config {
         custom_cfg.clone()
     } else {
         match config.tuning_level {
@@ -110,6 +110,14 @@ fn tune_tree_model(
             TuningLevel::None => return Ok((UniversalConfig::default().with_mode(mode), None)),
         }
     };
+
+    // Auto-configure tuning logs directory: {output_dir}/autotuner
+    // Only set if model_output_dir is configured AND tuner_cfg doesn't already have explicit dir
+    if let Some(ref output_dir) = config.model_output_dir {
+        if tuner_cfg.output.dir.is_none() {
+            tuner_cfg.output.dir = Some(output_dir.join("autotuner"));
+        }
+    }
 
     // Define parameter space from config
     use crate::tuner::TunableParam;
@@ -313,8 +321,43 @@ fn tune_ltt(
     // Extract raw features for linear tuning
     let (features, targets, num_features) = extract_raw_features(df, target_col, profile)?;
 
+    // Compute linear_feature_indices by identifying ENGINEERED features
+    // Linear model uses: polynomial features (_squared, _sqrt, _log) + interaction features (_x_)
+    // Tree model uses: original features (both numeric and categorical-encoded)
+    // This is different from filtering by column TYPE - we filter by feature ORIGIN
+    let col_names: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let mut linear_feature_indices = Vec::new();
+
+    // Build indices relative to EXTRACTED features (target excluded)
+    let mut feature_idx = 0;
+    for col_name in &col_names {
+        if col_name == target_col {
+            continue; // Skip target
+        }
+
+        // Identify engineered features by naming convention
+        let is_engineered = col_name.ends_with("_squared")
+            || col_name.ends_with("_sqrt")
+            || col_name.ends_with("_log")
+            || col_name.ends_with("_log1p")
+            || col_name.contains("_x_") // Interaction features
+            || col_name.contains("_ratio_"); // Ratio features
+
+        if is_engineered {
+            // Engineered features go to linear model (polynomial/interaction)
+            linear_feature_indices.push(feature_idx);
+        }
+
+        feature_idx += 1; // Increment for each non-target feature
+    }
+
     // Create tuner config based on tuning level
-    let tuner_config = match config.tuning_level {
+    let mut tuner_config = match config.tuning_level {
         TuningLevel::Quick => {
             LttTunerConfig::default().with_preset(crate::tuner::ltt::LttTunerPreset::Quick)
         }
@@ -327,19 +370,29 @@ fn tune_ltt(
         } // Should not reach here
     };
 
+    // Set output directory for tuning logs
+    if let Some(ref output_dir) = config.model_output_dir {
+        tuner_config = tuner_config.with_output_dir(output_dir.clone());
+    }
+
     let tuner = LttTuner::new(tuner_config);
-    let result = tuner.tune(&features, num_features, &targets)?;
+    let result = tuner.tune(&features, num_features, &targets, &linear_feature_indices)?;
 
     // Build UniversalConfig from tuning result
-    let tree_config =
-        TreeConfig::default().with_max_depth(result.tree_params.max_depth as usize)?;
+    // Apply ALL tuned tree parameters (not just max_depth!)
+    let tree_config = TreeConfig::default()
+        .with_max_depth(result.tree_params.max_depth as usize)?
+        .with_min_hessian_leaf(result.tree_params.min_child_weight)?
+        .with_colsample(result.tree_params.colsample_bytree)?;
 
     let univ_config = UniversalConfig::default()
         .with_mode(BoostingMode::LinearThenTree)
         .with_learning_rate(result.tree_params.learning_rate)
         .with_num_rounds(result.tree_params.num_rounds as usize)
+        .with_subsample(result.tree_params.subsample)
         .with_tree_config(tree_config)
-        .with_linear_config(result.linear_params.to_config());
+        .with_linear_config(result.linear_params.to_config())
+        .with_linear_feature_indices(linear_feature_indices); // Store for training and prediction
 
     Ok((univ_config, Some(result)))
 }

@@ -72,7 +72,14 @@ impl TrialLogger {
             .map(|s| s.to_string())
             .collect();
         headers.extend(self.param_names.clone());
-        headers.extend(self.extra_param_names.clone());
+
+        // Only add extra params that aren't already in param_names (avoid duplicates)
+        let param_names_set: std::collections::HashSet<_> = self.param_names.iter().collect();
+        for extra_name in &self.extra_param_names {
+            if !param_names_set.contains(extra_name) {
+                headers.push(extra_name.clone());
+            }
+        }
 
         writer
             .write_record(&headers)
@@ -96,9 +103,12 @@ impl TrialLogger {
                 row.push(trial.param_to_csv(name));
             }
 
-            // Add fixed param values (learning_rate, num_rounds, etc.)
+            // Add fixed param values that aren't already in param_names (avoid duplicates)
+            let param_names_set: std::collections::HashSet<_> = self.param_names.iter().collect();
             for name in &self.extra_param_names {
-                row.push(trial.param_to_csv(name));
+                if !param_names_set.contains(name) {
+                    row.push(trial.param_to_csv(name));
+                }
             }
 
             writer

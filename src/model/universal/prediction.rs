@@ -11,6 +11,7 @@
 use crate::dataset::BinnedDataset;
 use crate::features::extract_selected_features;
 use crate::learner::WeakLearner;
+use crate::preprocessing::TargetTransform; // For auto inverse transform
 use crate::Result;
 
 use super::{BoostingMode, UniversalModel};
@@ -21,8 +22,14 @@ impl UniversalModel {
     // =========================================================================
 
     /// Predict for all rows in dataset
+    ///
+    /// # Automatic Inverse Transformation
+    ///
+    /// If `config.target_transform` is set, predictions are automatically inverse-transformed
+    /// back to the original target space. For example, if trained with LogitTransform(0, 100),
+    /// raw predictions in (-∞, +∞) are automatically mapped back to [0, 100].
     pub fn predict(&self, dataset: &BinnedDataset) -> Vec<f32> {
-        match self.config.mode {
+        let mut predictions = match self.config.mode {
             BoostingMode::PureTree => {
                 // Check for ensemble first, then single model
                 if let Some(ref ensemble) = self.gbdt_ensemble {
@@ -38,38 +45,101 @@ impl UniversalModel {
             BoostingMode::LinearThenTree => {
                 // Linear contribution + GBDTModel (trained on residuals)
                 let num_rows = dataset.num_rows();
-                let mut predictions = vec![self.base_prediction; num_rows];
+                let mut preds = vec![self.base_prediction; num_rows];
 
                 // Add linear contribution with shrinkage
                 if let Some(ref linear) = self.linear_booster {
-                    let raw_features = Self::extract_raw_features(dataset);
-                    let linear_preds = linear.predict_batch(&raw_features, self.num_features);
-                    self.apply_linear_shrinkage(&mut predictions, &linear_preds);
+                    // Get raw features from dataset (packed during pipeline processing)
+                    let raw_features_full = dataset.raw_features()
+                        .map(|r| r.to_vec())
+                        .unwrap_or_else(|| Self::extract_raw_features(dataset));
+
+                    // Calculate actual number of raw features from array size
+                    let num_raw_features = if num_rows > 0 {
+                        raw_features_full.len() / num_rows
+                    } else {
+                        self.num_features // Fallback
+                    };
+
+                    // Filter features for linear model if indices are specified
+                    let (raw_features, num_linear_features) = if let Some(ref indices) = self.linear_feature_indices {
+                        let filtered = extract_selected_features(
+                            &raw_features_full,
+                            num_rows,
+                            num_raw_features,  // Use actual raw feature count (34), not tree feature count (26)
+                            Some(indices.as_slice()),
+                        );
+                        (filtered, indices.len())
+                    } else {
+                        // No filtering - use all features (backward compat)
+                        (raw_features_full, num_raw_features)
+                    };
+
+                    let linear_preds = linear.predict_batch(&raw_features, num_linear_features);
+                    self.apply_linear_shrinkage(&mut preds, &linear_preds);
                 }
+
+                // Filter dataset to tree features (tree was trained on filtered features)
+                let tree_dataset = if let Some(ref linear_idx) = self.linear_feature_indices {
+                    // Compute tree_indices = all features NOT in linear_indices
+                    let all_indices: std::collections::HashSet<usize> =
+                        (0..self.num_features).collect();
+                    let linear_set: std::collections::HashSet<usize> =
+                        linear_idx.iter().copied().collect();
+                    let mut tree_indices: Vec<usize> = all_indices
+                        .difference(&linear_set)
+                        .copied()
+                        .collect();
+                    tree_indices.sort_unstable(); // Keep deterministic order
+
+                    eprintln!("[PRED DEBUG] Dataset features: {}, Linear features: {}, Tree features: {}",
+                              self.num_features, linear_set.len(), tree_indices.len());
+
+                    // Filter to only tree features
+                    std::borrow::Cow::Owned(dataset.subset_features(&tree_indices))
+                } else {
+                    eprintln!("[PRED DEBUG] No feature filtering (backward compat)");
+                    // No filtering (backward compat)
+                    std::borrow::Cow::Borrowed(dataset)
+                };
 
                 // Add tree contribution (either ensemble or single GBDT, trained on residuals)
                 // IMPORTANT: Subtract gbdt's base_prediction to avoid double-counting
                 // gbdt.predict() returns (gbdt_base + tree_sum), but we already have ltt_base
                 if let Some(ref ensemble) = self.gbdt_ensemble {
-                    let tree_preds = self.predict_ensemble(dataset, ensemble);
+                    let tree_preds = self.predict_ensemble(&tree_dataset, ensemble);
                     // Ensemble already accounts for base predictions internally
+                    eprintln!("[PRED DEBUG] Ensemble predictions - mean: {:.4}, min: {:.4}, max: {:.4}",
+                              tree_preds.iter().sum::<f32>() / tree_preds.len() as f32,
+                              tree_preds.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+                              tree_preds.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
                     for i in 0..num_rows {
-                        predictions[i] += tree_preds[i];
+                        preds[i] += tree_preds[i];
                     }
                 } else if let Some(ref gbdt) = self.gbdt_model {
-                    let tree_preds = gbdt.predict(dataset);
+                    let tree_preds = gbdt.predict(&tree_dataset);
                     let gbdt_base = gbdt.base_prediction();
+                    eprintln!("[PRED DEBUG] GBDT predictions - base: {:.4}, mean: {:.4}, min: {:.4}, max: {:.4}",
+                              gbdt_base,
+                              tree_preds.iter().sum::<f32>() / tree_preds.len() as f32,
+                              tree_preds.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+                              tree_preds.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
                     for i in 0..num_rows {
-                        predictions[i] += tree_preds[i] - gbdt_base;
+                        preds[i] += tree_preds[i] - gbdt_base;
                     }
                 }
 
-                predictions
+                eprintln!("[PRED DEBUG] Final LTT preds (before inverse transform) - mean: {:.4}, min: {:.4}, max: {:.4}",
+                          preds.iter().sum::<f32>() / preds.len() as f32,
+                          preds.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+                          preds.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
+
+                preds
             }
             BoostingMode::RandomForest => {
                 // RandomForest: Each tree is independent, predictions averaged
                 let num_rows = dataset.num_rows();
-                let mut predictions = vec![self.base_prediction; num_rows];
+                let mut preds = vec![self.base_prediction; num_rows];
 
                 if !self.trees.is_empty() {
                     let mut tree_sum = vec![0.0f32; num_rows];
@@ -78,13 +148,23 @@ impl UniversalModel {
                     }
                     let scale = 1.0 / self.trees.len() as f32;
                     for i in 0..num_rows {
-                        predictions[i] += tree_sum[i] * scale;
+                        preds[i] += tree_sum[i] * scale;
                     }
                 }
 
-                predictions
+                preds
+            }
+        };
+
+        // Apply automatic inverse transformation if configured in pipeline
+        if let Some(ref pipeline) = self.config.pipeline {
+            if let Some(transform) = pipeline.target_transform() {
+                // Silently ignore errors (shouldn't happen in practice)
+                let _ = transform.inverse_transform(&mut predictions);
             }
         }
+
+        predictions
     }
 
     /// Predict for all rows using raw features (recommended for LinearThenTree)
@@ -98,12 +178,16 @@ impl UniversalModel {
     ///
     /// # Note
     /// For PureTree and RandomForest, `raw_features` is ignored (trees use binned data).
+    ///
+    /// # Automatic Inverse Transformation
+    ///
+    /// Like `predict()`, predictions are automatically inverse-transformed if `config.target_transform` is set.
     pub fn predict_with_raw_features(
         &self,
         dataset: &BinnedDataset,
         raw_features: &[f32],
     ) -> Vec<f32> {
-        match self.config.mode {
+        let mut predictions = match self.config.mode {
             BoostingMode::PureTree => {
                 // Check for ensemble first, then single model (raw features not used for trees)
                 if let Some(ref ensemble) = self.gbdt_ensemble {
@@ -118,7 +202,7 @@ impl UniversalModel {
             BoostingMode::LinearThenTree => {
                 // Linear contribution uses raw features + GBDTModel uses binned
                 let num_rows = dataset.num_rows();
-                let mut predictions = vec![self.base_prediction; num_rows];
+                let mut preds = vec![self.base_prediction; num_rows];
 
                 // Add linear contribution using raw features (possibly selected subset)
                 if let Some(ref linear) = self.linear_booster {
@@ -142,8 +226,19 @@ impl UniversalModel {
 
                     let linear_preds = linear.predict_batch(&linear_features, num_lin_feats);
 
+                    // Debug linear predictions
+                    let lin_mean = linear_preds.iter().sum::<f32>() / linear_preds.len() as f32;
+                    let lin_min = linear_preds.iter().cloned().fold(f32::INFINITY, f32::min);
+                    let lin_max = linear_preds.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    eprintln!("[PRED DEBUG] Linear preds - mean: {:.4}, min: {:.4}, max: {:.4}",
+                             lin_mean, lin_min, lin_max);
+
                     // Apply shrinkage factor (ensemble weighting)
-                    self.apply_linear_shrinkage(&mut predictions, &linear_preds);
+                    self.apply_linear_shrinkage(&mut preds, &linear_preds);
+
+                    // Debug after shrinkage
+                    let preds_after_linear_mean = preds.iter().sum::<f32>() / preds.len() as f32;
+                    eprintln!("[PRED DEBUG] After linear shrinkage - mean: {:.4}", preds_after_linear_mean);
                 }
 
                 // Add tree contribution (either ensemble or single GBDT, trees use binned data)
@@ -151,23 +246,47 @@ impl UniversalModel {
                 if let Some(ref ensemble) = self.gbdt_ensemble {
                     let tree_preds = self.predict_ensemble(dataset, ensemble);
                     for i in 0..num_rows {
-                        predictions[i] += tree_preds[i];
+                        preds[i] += tree_preds[i];
                     }
                 } else if let Some(ref gbdt) = self.gbdt_model {
                     let tree_preds = gbdt.predict(dataset);
                     let gbdt_base = gbdt.base_prediction();
+
+                    // Debug GBDT predictions
+                    let gbdt_mean = tree_preds.iter().sum::<f32>() / tree_preds.len() as f32;
+                    let gbdt_min = tree_preds.iter().cloned().fold(f32::INFINITY, f32::min);
+                    let gbdt_max = tree_preds.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    eprintln!("[PRED DEBUG] GBDT predictions - base: {:.4}, mean: {:.4}, min: {:.4}, max: {:.4}",
+                             gbdt_base, gbdt_mean, gbdt_min, gbdt_max);
+
                     for i in 0..num_rows {
-                        predictions[i] += tree_preds[i] - gbdt_base;
+                        preds[i] += tree_preds[i] - gbdt_base;
                     }
                 }
 
-                predictions
+                // Debug final predictions before inverse transform
+                let final_mean = preds.iter().sum::<f32>() / preds.len() as f32;
+                let final_min = preds.iter().cloned().fold(f32::INFINITY, f32::min);
+                let final_max = preds.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                eprintln!("[PRED DEBUG] Final LTT preds (before inverse transform) - mean: {:.4}, min: {:.4}, max: {:.4}",
+                         final_mean, final_min, final_max);
+
+                preds
             }
             BoostingMode::RandomForest => {
                 // RandomForest: trees don't use raw features
                 self.predict(dataset)
             }
+        };
+
+        // Apply automatic inverse transformation if configured in pipeline
+        if let Some(ref pipeline) = self.config.pipeline {
+            if let Some(transform) = pipeline.target_transform() {
+                let _ = transform.inverse_transform(&mut predictions);
+            }
         }
+
+        predictions
     }
 
     /// Predict using only linear component (LinearThenTree mode only)
@@ -216,6 +335,175 @@ impl UniversalModel {
             }
         }
 
+        Ok(predictions)
+    }
+
+    // =========================================================================
+    // DataFrame-Based Prediction (Auto-Applies Pipeline)
+    // =========================================================================
+
+    /// Predict directly from a DataFrame
+    ///
+    /// This is the **recommended** inference API. It automatically:
+    /// 1. Applies the stored Pipeline (feature engineering, encoding)
+    /// 2. Bins the data using learned quantile boundaries
+    /// 3. Extracts raw features for the linear model (if LinearThenTree)
+    /// 4. Makes predictions using the trained model
+    /// 5. Applies inverse transformation to return predictions in original space
+    ///
+    /// # Arguments
+    /// * `df` - Input DataFrame with same schema as training data (minus target column)
+    ///
+    /// # Returns
+    /// Predictions in original target space (e.g., [0, 100] for exam scores)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let model = UniversalModel::load("model.rkyv")?;
+    /// let predictions = model.predict_df(&test_df)?;
+    /// ```
+    ///
+    /// # Errors
+    /// - Returns error if Pipeline is not stored in the model
+    /// - Returns error if DataFrame schema doesn't match training schema
+    pub fn predict_df(&self, df: &polars::prelude::DataFrame) -> Result<Vec<f32>> {
+        use crate::dataset::core::{BinnedDataset, FeatureInfo, FeatureType};
+
+        // Get pipeline from config
+        let pipeline = self.config.pipeline.as_ref().ok_or_else(|| {
+            crate::TreeBoostError::Config(
+                "Model has no pipeline stored. Cannot use predict_df(). \
+                 Use predict() with a pre-processed BinnedDataset instead."
+                    .to_string(),
+            )
+        })?;
+
+        // Step 1: Apply Pipeline transformations (feature engineering, encoding)
+        let transformed_df = pipeline.transform(df.clone())?;
+
+        eprintln!(
+            "[PREDICT_DF] DataFrame transformed: {} rows, {} columns",
+            transformed_df.height(),
+            transformed_df.width()
+        );
+
+        let num_rows = transformed_df.height();
+        let num_features = transformed_df.width();
+
+        // Step 2: Extract raw_features (for LinearThenTree linear model)
+        // Row-major layout: [row0_feat0, row0_feat1, ..., row1_feat0, ...]
+        let mut raw_features = Vec::with_capacity(num_rows * num_features);
+        for row_idx in 0..num_rows {
+            for col in transformed_df.get_columns() {
+                let val = if let Ok(ca) = col.f64() {
+                    ca.get(row_idx).unwrap_or(0.0) as f32
+                } else if let Ok(ca) = col.f32() {
+                    ca.get(row_idx).unwrap_or(0.0)
+                } else if let Ok(ca) = col.i64() {
+                    ca.get(row_idx).unwrap_or(0) as f32
+                } else if let Ok(ca) = col.i32() {
+                    ca.get(row_idx).unwrap_or(0) as f32
+                } else {
+                    0.0
+                };
+                raw_features.push(val);
+            }
+        }
+
+        eprintln!(
+            "[PREDICT_DF] Extracted raw_features: {} values ({} rows x {} features)",
+            raw_features.len(),
+            num_rows,
+            num_features
+        );
+
+        // Step 3: Create BinnedDataset with simple uniform binning
+        // For LinearThenTree, raw_features are primary; trees use binned backup.
+        let mut binned = Vec::with_capacity(num_rows * num_features);
+        let mut feature_info = Vec::with_capacity(num_features);
+
+        // Get min/max for each feature to create uniform bins
+        for col in transformed_df.get_columns() {
+            let col_name = col.name().to_string();
+
+            // Extract column values as f32
+            let vals: Vec<f32> = (0..num_rows)
+                .map(|r| {
+                    if let Ok(ca) = col.f64() {
+                        ca.get(r).unwrap_or(0.0) as f32
+                    } else if let Ok(ca) = col.f32() {
+                        ca.get(r).unwrap_or(0.0)
+                    } else if let Ok(ca) = col.i64() {
+                        ca.get(r).unwrap_or(0) as f32
+                    } else if let Ok(ca) = col.i32() {
+                        ca.get(r).unwrap_or(0) as f32
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+
+            // Compute min/max for uniform binning
+            let min_val = vals.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max_val = vals.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let range = (max_val - min_val).max(1e-9); // Avoid division by zero
+
+            // Create 255 uniform bins
+            let boundaries: Vec<f64> = (1..=254)
+                .map(|i| (min_val + range * (i as f32) / 255.0) as f64)
+                .collect();
+
+            // Bin values
+            for &val in &vals {
+                let bin = ((val - min_val) / range * 254.0).clamp(0.0, 254.0) as u8;
+                binned.push(bin);
+            }
+
+            feature_info.push(FeatureInfo {
+                name: col_name,
+                feature_type: FeatureType::Numeric,
+                num_bins: 255,
+                bin_boundaries: boundaries,
+            });
+        }
+
+        // Transpose from column-major to row-major format
+        let mut binned_row_major = vec![0u8; num_rows * num_features];
+        for row in 0..num_rows {
+            for feat in 0..num_features {
+                binned_row_major[row * num_features + feat] = binned[feat * num_rows + row];
+            }
+        }
+
+        // Create BinnedDataset with dummy targets
+        let dummy_targets = vec![0.0f32; num_rows];
+        let binned_dataset = BinnedDataset::new(num_rows, binned_row_major, dummy_targets, feature_info);
+        let binned_dataset = binned_dataset.with_raw_features(raw_features.clone());
+
+        eprintln!(
+            "[PREDICT_DF] BinnedDataset created: {} rows, {} features",
+            binned_dataset.num_rows(),
+            binned_dataset.num_features()
+        );
+
+        // Step 4: Make predictions using the appropriate method
+        let predictions = match self.config.mode {
+            BoostingMode::LinearThenTree => {
+                // Use raw_features for accurate linear predictions
+                self.predict_with_raw_features(&binned_dataset, &raw_features)
+            }
+            BoostingMode::PureTree | BoostingMode::RandomForest => {
+                // Trees use binned data
+                self.predict(&binned_dataset)
+            }
+        };
+
+        eprintln!(
+            "[PREDICT_DF] Predictions generated: {} values",
+            predictions.len()
+        );
+
+        // Predictions are already inverse-transformed by predict() / predict_with_raw_features()
         Ok(predictions)
     }
 
@@ -610,12 +898,33 @@ impl UniversalModel {
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
 
-            // Get raw features for linear models
-            let raw_features = self
-                .raw_features_for_linear
-                .clone()
+            // Get raw features from dataset (packed during pipeline processing)
+            let raw_features_full = dataset.raw_features()
+                .map(|r| r.to_vec())
                 .unwrap_or_else(|| Self::extract_raw_features(dataset));
-            let num_raw_features = self.num_linear_features.unwrap_or(self.num_features);
+
+            // Calculate actual number of raw features from array size
+            let num_raw_feats_total = if num_rows > 0 {
+                raw_features_full.len() / num_rows
+            } else {
+                self.num_features // Fallback
+            };
+
+            // Filter features for linear model if indices are specified
+            let (raw_features, num_raw_features) = if let Some(ref indices) = self.linear_feature_indices {
+                let filtered = extract_selected_features(
+                    &raw_features_full,
+                    num_rows,
+                    num_raw_feats_total,  // Use actual raw feature count, not tree feature count
+                    Some(indices.as_slice()),
+                );
+                let num_selected = indices.len();
+                (filtered, num_selected)
+            } else {
+                // No filtering - use all features (backward compat)
+                let num = self.num_linear_features.unwrap_or(num_raw_feats_total);
+                (raw_features_full, num)
+            };
 
             // Combine: base + shrinkage*linear + tree per label
             let shrinkage = self.config.linear_config.shrinkage_factor;

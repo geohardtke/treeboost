@@ -67,6 +67,18 @@ pub struct BinnedDataset {
     /// Only used when all features have ≤16 bins
     #[rkyv(with = rkyv::with::Skip)]
     row_major_4bit_cache: OnceLock<Vec<u8>>,
+    /// Raw (unbinned) features for LinearThenTree mode (optional)
+    ///
+    /// Stores the preprocessed feature values BEFORE binning. This is critical
+    /// for LinearThenTree mode where the linear model needs the exact StandardScaled
+    /// polynomial/interaction features, not bin center approximations.
+    ///
+    /// Layout: Row-major `raw_features[row * num_features + feature]`
+    ///
+    /// **Serialization**: This MUST be serialized for correct LinearThenTree predictions.
+    /// **Memory**: Can be large (num_rows × num_features × 4 bytes), but necessary
+    /// for correct linear model behavior with engineered features.
+    raw_features: Option<Vec<f32>>,
 }
 
 impl std::fmt::Debug for BinnedDataset {
@@ -104,6 +116,7 @@ impl Clone for BinnedDataset {
             // Don't clone caches - they will be recomputed if needed
             row_major_cache: OnceLock::new(),
             row_major_4bit_cache: OnceLock::new(),
+            raw_features: self.raw_features.clone(),
         }
     }
 }
@@ -150,6 +163,7 @@ impl BinnedDataset {
             num_eras: 0,
             row_major_cache: OnceLock::new(),
             row_major_4bit_cache: OnceLock::new(),
+            raw_features: None, // No raw features by default
         }
     }
 
@@ -209,6 +223,7 @@ impl BinnedDataset {
             num_eras: 0,
             row_major_cache: OnceLock::new(),
             row_major_4bit_cache: OnceLock::new(),
+            raw_features: None,
         }
     }
 
@@ -270,7 +285,45 @@ impl BinnedDataset {
             num_eras,
             row_major_cache: OnceLock::new(),
             row_major_4bit_cache: OnceLock::new(),
+            raw_features: None, // No raw features by default
         }
+    }
+
+    // =========================================================================
+    // Raw Features (for LinearThenTree mode)
+    // =========================================================================
+
+    /// Attach raw (unbinned) features to this dataset
+    ///
+    /// This is critical for LinearThenTree mode where the linear model needs
+    /// exact preprocessed feature values (e.g., StandardScaled polynomials),
+    /// not bin center approximations.
+    ///
+    /// # Arguments
+    /// * `raw_features` - Row-major features: `[row0_feat0, row0_feat1, ..., row1_feat0, ...]`
+    ///
+    /// # Panics
+    /// Panics if `raw_features.len() != num_rows * num_features`
+    pub fn with_raw_features(mut self, raw_features: Vec<f32>) -> Self {
+        assert_eq!(
+            raw_features.len(),
+            self.num_rows * self.num_features(),
+            "Raw features size mismatch: expected {} ({}×{}), got {}",
+            self.num_rows * self.num_features(),
+            self.num_rows,
+            self.num_features(),
+            raw_features.len()
+        );
+        self.raw_features = Some(raw_features);
+        self
+    }
+
+    /// Get raw features if available
+    ///
+    /// Returns the unbinned feature values that were attached via `with_raw_features()`.
+    /// If not available, returns `None` (caller should fall back to extracting bin centers).
+    pub fn raw_features(&self) -> Option<&[f32]> {
+        self.raw_features.as_deref()
     }
 
     // =========================================================================
@@ -480,6 +533,7 @@ impl BinnedDataset {
             num_eras: self.num_eras,
             row_major_cache: OnceLock::new(),
             row_major_4bit_cache: OnceLock::new(),
+            raw_features: self.raw_features.clone(),
         }
     }
 
@@ -512,6 +566,7 @@ impl BinnedDataset {
             num_eras: self.num_eras,
             row_major_cache: OnceLock::new(),
             row_major_4bit_cache: OnceLock::new(),
+            raw_features: self.raw_features.clone(),
         }
     }
 
@@ -789,6 +844,18 @@ impl BinnedDataset {
             .map(|m| m as usize + 1)
             .unwrap_or(0);
 
+        // Filter raw_features if present (row-major layout: row × feature)
+        // This method only filters rows, keeps all features
+        let new_raw_features = self.raw_features.as_ref().map(|raw| {
+            let num_features = self.num_features();
+            let mut filtered = Vec::with_capacity(new_num_rows * num_features);
+            for &idx in indices {
+                let row_start = idx * num_features;
+                filtered.extend_from_slice(&raw[row_start..row_start + num_features]);
+            }
+            filtered
+        });
+
         Self {
             num_rows: new_num_rows,
             features: new_features,
@@ -798,9 +865,107 @@ impl BinnedDataset {
             sparse_columns,
             era_indices: new_era_indices,
             num_eras: new_num_eras,
+            raw_features: new_raw_features,
             // Caches are not copied - will be recomputed if needed
             row_major_cache: OnceLock::new(),
             row_major_4bit_cache: OnceLock::new(),
+        }
+    }
+
+    /// Create a new BinnedDataset with only the specified features
+    ///
+    /// This is useful for LinearThenTree mode where you want to train the tree
+    /// on a subset of features (e.g., only categorical features, excluding
+    /// polynomial/interaction features that the linear model already used).
+    ///
+    /// # Arguments
+    ///
+    /// * `feature_indices` - Indices of features to keep
+    ///
+    /// # Returns
+    ///
+    /// A new BinnedDataset with only the selected features (all rows preserved)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Keep only features 0, 2, 5 (e.g., original categorical features)
+    /// let tree_features = &[0, 2, 5];
+    /// let filtered_dataset = dataset.subset_features(tree_features);
+    /// assert_eq!(filtered_dataset.num_features(), 3);
+    /// assert_eq!(filtered_dataset.num_rows(), dataset.num_rows()); // Same rows
+    /// ```
+    pub fn subset_features(&self, feature_indices: &[usize]) -> Self {
+        let new_num_features = feature_indices.len();
+        let num_features = self.num_features();
+        let num_rows = self.num_rows;
+
+        // Validate feature indices
+        for &idx in feature_indices {
+            assert!(
+                idx < num_features,
+                "Feature index {} out of bounds for dataset with {} features",
+                idx,
+                num_features
+            );
+        }
+
+        // Extract selected feature columns (column-major layout)
+        let mut new_features = Vec::with_capacity(num_rows * new_num_features);
+        for &feat_idx in feature_indices {
+            let col_start = feat_idx * num_rows;
+            let col_end = col_start + num_rows;
+            new_features.extend_from_slice(&self.features[col_start..col_end]);
+        }
+
+        // Keep all targets unchanged (no feature filtering for targets)
+        let new_targets = self.targets.clone();
+
+        // Extract selected feature_info
+        let new_feature_info: Vec<FeatureInfo> = feature_indices
+            .iter()
+            .map(|&idx| self.feature_info[idx].clone())
+            .collect();
+
+        // Recompute sparse columns for selected features
+        let sparse_columns: Vec<Option<SparseColumn>> = (0..new_num_features)
+            .map(|f| {
+                let start = f * num_rows;
+                let column = &new_features[start..start + num_rows];
+                let sparse = SparseColumn::from_dense(column, DEFAULT_BIN);
+
+                if sparse.is_sparse() {
+                    Some(sparse)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Filter raw_features if present (row-major layout)
+        let new_raw_features = self.raw_features.as_ref().map(|raw| {
+            let mut filtered = Vec::with_capacity(num_rows * new_num_features);
+            for row in 0..num_rows {
+                for &feat_idx in feature_indices {
+                    filtered.push(raw[row * num_features + feat_idx]);
+                }
+            }
+            filtered
+        });
+
+        Self {
+            num_rows,
+            features: new_features,
+            targets: new_targets,
+            num_target_cols: self.num_target_cols,
+            feature_info: new_feature_info,
+            sparse_columns,
+            era_indices: self.era_indices.clone(),
+            num_eras: self.num_eras,
+            // Caches are not copied - will be recomputed if needed
+            row_major_cache: OnceLock::new(),
+            row_major_4bit_cache: OnceLock::new(),
+            raw_features: new_raw_features,
         }
     }
 }

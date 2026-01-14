@@ -40,6 +40,8 @@ pub const DEFAULT_SHRINKAGE_GRID: &[f32] = &[
     0.95, 1.0,
 ];
 pub const DEFAULT_EXTRAPOLATION_DAMPING_GRID: &[f32] = &[0.0, 0.1, 0.2];
+pub const DEFAULT_SUBSAMPLE_GRID: &[f32] = &[0.7, 0.85, 1.0];
+pub const DEFAULT_COLSAMPLE_GRID: &[f32] = &[0.7, 0.85, 1.0];
 pub const QUICK_LAMBDA_GRID: &[f32] = &[0.1, 1.0];
 pub const THOROUGH_LAMBDA_GRID: &[f32] = &[0.01, 0.1, 0.5, 1.0, 10.0];
 pub const QUICK_L1_RATIO_GRID: &[f32] = &[0.0, 1.0];
@@ -53,4 +55,8 @@ pub const THOROUGH_ROUNDS_GRID: &[u32] = &[200, 400, 600, 800, 1000];
 pub const QUICK_SHRINKAGE_GRID: &[f32] = DEFAULT_SHRINKAGE_GRID;
 pub const THOROUGH_SHRINKAGE_GRID: &[f32] = DEFAULT_SHRINKAGE_GRID;
 pub const QUICK_EXTRAPOLATION_DAMPING_GRID: &[f32] = &[0.0];
+pub const QUICK_SUBSAMPLE_GRID: &[f32] = &[0.8, 1.0];
+pub const QUICK_COLSAMPLE_GRID: &[f32] = &[0.8, 1.0];
 pub const THOROUGH_EXTRAPOLATION_DAMPING_GRID: &[f32] = &[0.0, 0.1, 0.2, 0.3];
+pub const THOROUGH_SUBSAMPLE_GRID: &[f32] = &[0.6, 0.7, 0.8, 0.9, 1.0];
+pub const THOROUGH_COLSAMPLE_GRID: &[f32] = &[0.6, 0.7, 0.8, 0.9, 1.0];

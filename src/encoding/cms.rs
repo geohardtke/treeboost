@@ -10,6 +10,7 @@
 use rkyv::{Archive, Deserialize, Serialize};
 use rustc_hash::FxHashSet;
 use rustc_hash::FxHasher;
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use std::hash::{Hash, Hasher};
 
 // ============================================================================
@@ -271,7 +272,7 @@ impl CategoryFilter {
 /// Mapping from original categories to filtered indices.
 ///
 /// Used for serialization and consistent encoding during inference.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct CategoryMapping {
     /// Map from category string to index (sorted for binary search)
     pub category_to_idx: Vec<(String, u32)>,

@@ -190,6 +190,72 @@ impl StandardScaler {
         &self.stds
     }
 
+    /// Inverse transform: Convert standardized data back to original scale
+    ///
+    /// # Arguments
+    /// * `data` - Mutable slice of standardized data in row-major order
+    /// * `num_features` - Number of features per row
+    ///
+    /// # Formula
+    /// ```text
+    /// x = y * std + mean
+    /// ```
+    ///
+    /// # Example
+    /// ```
+    /// use treeboost::preprocessing::{StandardScaler, Scaler};
+    ///
+    /// let mut scaler = StandardScaler::new();
+    /// let mut data = vec![10.0, 50.0, 90.0];
+    ///
+    /// scaler.fit(&data, 1).unwrap();
+    /// scaler.transform(&mut data, 1).unwrap(); // Standardized
+    /// scaler.inverse_transform(&mut data, 1).unwrap(); // Back to original
+    ///
+    /// assert!((data[0] - 10.0).abs() < 0.01);
+    /// assert!((data[1] - 50.0).abs() < 0.01);
+    /// assert!((data[2] - 90.0).abs() < 0.01);
+    /// ```
+    pub fn inverse_transform(&self, data: &mut [f32], num_features: usize) -> Result<()> {
+        if !self.fitted {
+            return Err(TreeBoostError::Data(
+                "StandardScaler not fitted. Call fit() first before inverse_transform().".into(),
+            ));
+        }
+
+        if num_features != self.means.len() {
+            return Err(TreeBoostError::Data(format!(
+                "StandardScaler::inverse_transform() feature count mismatch: fitted with {} features, \
+                 but inverse_transform() called with {} features.",
+                self.means.len(),
+                num_features
+            )));
+        }
+
+        if !data.len().is_multiple_of(num_features) {
+            return Err(TreeBoostError::Data(format!(
+                "StandardScaler::inverse_transform() received invalid data layout: {} elements not divisible by {} features.",
+                data.len(),
+                num_features
+            )));
+        }
+
+        let num_rows = data.len() / num_features;
+
+        // Inverse standardization: x = y * std + mean
+        for feat in 0..num_features {
+            let mean = self.means[feat];
+            let std = self.stds[feat];
+
+            for row in 0..num_rows {
+                let idx = row * num_features + feat;
+                data[idx] = data[idx] * std + mean;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Sync means/stds from Welford states (internal helper)
     fn sync_from_welford(&mut self) {
         let num_features = self.welford_states.len();
@@ -578,6 +644,80 @@ impl MinMaxScaler {
         self.feature_range = (min, max);
         self
     }
+
+    /// Inverse transform: Convert scaled data back to original range
+    ///
+    /// # Arguments
+    /// * `data` - Mutable slice of scaled data in row-major order (num_rows × num_features)
+    /// * `num_features` - Number of features per row
+    ///
+    /// # Returns
+    /// * `Ok(())` on success
+    /// * `Err` if scaler not fitted or data dimensions don't match
+    ///
+    /// # Formula
+    /// Given scaled value `y` in range [a, b], recover original `x`:
+    /// ```text
+    /// x = (y - a) / (b - a) * (max - min) + min
+    /// ```
+    ///
+    /// # Example
+    /// ```
+    /// use treeboost::preprocessing::{MinMaxScaler, Scaler};
+    ///
+    /// let mut scaler = MinMaxScaler::new().with_range(0.0, 1.0);
+    /// let mut data = vec![10.0, 50.0, 90.0]; // Original: [10, 50, 90]
+    ///
+    /// scaler.fit(&data, 1).unwrap();
+    /// scaler.transform(&mut data, 1).unwrap(); // Scaled: [0.0, 0.5, 1.0]
+    ///
+    /// scaler.inverse_transform(&mut data, 1).unwrap(); // Back to: [10, 50, 90]
+    /// assert!((data[0] - 10.0).abs() < 0.01);
+    /// assert!((data[1] - 50.0).abs() < 0.01);
+    /// assert!((data[2] - 90.0).abs() < 0.01);
+    /// ```
+    pub fn inverse_transform(&self, data: &mut [f32], num_features: usize) -> Result<()> {
+        if !self.fitted {
+            return Err(TreeBoostError::Data(
+                "MinMaxScaler not fitted. Call fit() first before inverse_transform().".into(),
+            ));
+        }
+
+        if num_features != self.mins.len() {
+            return Err(TreeBoostError::Data(format!(
+                "MinMaxScaler::inverse_transform() feature count mismatch: fitted with {} features, \
+                 but inverse_transform() called with {} features.",
+                self.mins.len(),
+                num_features
+            )));
+        }
+
+        if !data.len().is_multiple_of(num_features) {
+            return Err(TreeBoostError::Data(format!(
+                "MinMaxScaler::inverse_transform() received invalid data layout: {} elements not divisible by {} features.",
+                data.len(),
+                num_features
+            )));
+        }
+
+        let num_rows = data.len() / num_features;
+        let (a, b) = self.feature_range;
+        let scale = b - a;
+
+        // Inverse scaling: x = (y - a) / (b - a) * (max - min) + min
+        for feat in 0..num_features {
+            let min = self.mins[feat];
+            let max = self.maxs[feat];
+            let data_range = max - min;
+
+            for row in 0..num_rows {
+                let idx = row * num_features + feat;
+                data[idx] = (data[idx] - a) / scale * data_range + min;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for MinMaxScaler {
@@ -832,6 +972,72 @@ impl RobustScaler {
             iqrs: Vec::new(),
             fitted: false,
         }
+    }
+
+    /// Inverse transform: Convert scaled data back to original scale
+    ///
+    /// # Arguments
+    /// * `data` - Mutable slice of scaled data in row-major order
+    /// * `num_features` - Number of features per row
+    ///
+    /// # Formula
+    /// ```text
+    /// x = y * IQR + median
+    /// ```
+    ///
+    /// # Example
+    /// ```
+    /// use treeboost::preprocessing::{RobustScaler, Scaler};
+    ///
+    /// let mut scaler = RobustScaler::new();
+    /// let mut data = vec![10.0, 50.0, 90.0];
+    ///
+    /// scaler.fit(&data, 1).unwrap();
+    /// scaler.transform(&mut data, 1).unwrap(); // Scaled
+    /// scaler.inverse_transform(&mut data, 1).unwrap(); // Back to original
+    ///
+    /// assert!((data[0] - 10.0).abs() < 0.01);
+    /// assert!((data[1] - 50.0).abs() < 0.01);
+    /// assert!((data[2] - 90.0).abs() < 0.01);
+    /// ```
+    pub fn inverse_transform(&self, data: &mut [f32], num_features: usize) -> Result<()> {
+        if !self.fitted {
+            return Err(TreeBoostError::Data(
+                "RobustScaler not fitted. Call fit() first before inverse_transform().".into(),
+            ));
+        }
+
+        if num_features != self.medians.len() {
+            return Err(TreeBoostError::Data(format!(
+                "RobustScaler::inverse_transform() feature count mismatch: fitted with {} features, \
+                 but inverse_transform() called with {} features.",
+                self.medians.len(),
+                num_features
+            )));
+        }
+
+        if !data.len().is_multiple_of(num_features) {
+            return Err(TreeBoostError::Data(format!(
+                "RobustScaler::inverse_transform() received invalid data layout: {} elements not divisible by {} features.",
+                data.len(),
+                num_features
+            )));
+        }
+
+        let num_rows = data.len() / num_features;
+
+        // Inverse robust scaling: x = y * IQR + median
+        for feat in 0..num_features {
+            let median = self.medians[feat];
+            let iqr = self.iqrs[feat];
+
+            for row in 0..num_rows {
+                let idx = row * num_features + feat;
+                data[idx] = data[idx] * iqr + median;
+            }
+        }
+
+        Ok(())
     }
 }
 

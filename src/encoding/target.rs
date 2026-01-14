@@ -5,6 +5,7 @@
 
 use rkyv::{Archive, Deserialize, Serialize};
 use rustc_hash::FxHashMap;
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
 /// Statistics for a single category
 #[derive(Debug, Clone, Default)]
@@ -164,7 +165,7 @@ impl OrderedTargetEncoder {
 }
 
 /// Serializable encoding map for inference
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct EncodingMap {
     /// Category to encoded value mapping
     pub encodings: Vec<(String, f64)>,

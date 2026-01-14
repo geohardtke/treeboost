@@ -72,6 +72,7 @@ pub mod polars_ext;
 pub mod registry;
 pub mod scaler;
 pub mod smart;
+pub mod target_transform;
 pub mod traits;
 pub mod transforms;
 
@@ -95,6 +96,10 @@ pub use scaler::{MinMaxScaler, RobustScaler, Scaler, StandardScaler};
 pub use smart::{
     EncodingType, LttPreprocessingPlan, ModelType, PreprocessingPlan, PreprocessingStep,
     ScalerType, SmartPreprocessConfig, SmartPreprocessPreset, SmartPreprocessor,
+};
+pub use target_transform::{
+    ClampParams, IdentityTransform, LogitTransform, LogitTransformParams, TargetTransform,
+    TargetTransformKind,
 };
 pub use traits::{CustomPreprocessorDyn, PreprocessorTrait};
 pub use transforms::YeoJohnsonTransform;

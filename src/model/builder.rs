@@ -48,7 +48,12 @@ use crate::dataset::feature_extractor::LinearFeatureConfig;
 use crate::dataset::{BinnedDataset, DataPipeline};
 use crate::defaults::auto as auto_defaults;
 use crate::features::{FeaturePlan, SmartFeatureEngine};
-use crate::model::config::{AutoConfig, BuildPhaseTimes, BuildResult, TuningLevel};
+use crate::model::{
+    Pipeline, EngineerFeaturesStep, TransformTargetStep, ExtractLinearFeaturesStep, CategoryEncoding,
+    PipelineStepKind, EncodeCategoricalsState, BinNumericFeaturesState, DropColumnsStep,
+    CustomFeaturesStep, PipelineStep,
+};
+use crate::model::config::{AutoConfig, BuildPhaseTimes, BuildResult, TargetBoundConfig, TuningLevel};
 use crate::model::progress::{ProgressCallback, ProgressUpdate, TrainingPhase};
 use crate::model::universal::ModeSelection;
 use crate::model::{BoostingMode, UniversalConfig, UniversalModel};
@@ -264,6 +269,41 @@ impl AutoBuilder {
         self
     }
 
+    /// Set target bound configuration for bounded regression.
+    ///
+    /// Controls how target bounds are determined and what transformation to apply.
+    /// See [`TargetBoundConfig`] for available modes.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use treeboost::model::{AutoBuilder, TargetBoundConfig};
+    ///
+    /// // Exam scores: known bounds [0, 100] with Logit transform
+    /// let model = AutoBuilder::new()
+    ///     .with_target_bound_config(TargetBoundConfig::Logit { min: 0.0, max: 100.0 })
+    ///     .fit(&train_df, "exam_score")?;
+    ///
+    /// // Simple clamp using empirical min/max from data
+    /// let model = AutoBuilder::new()
+    ///     .with_target_bound_config(TargetBoundConfig::ClampEmpirical)
+    ///     .fit(&train_df, "target")?;
+    /// ```
+    pub fn with_target_bound_config(mut self, config: TargetBoundConfig) -> Self {
+        self.config.target_bound_config = config;
+        self
+    }
+
+    /// Set explicit target bounds for bounded regression (deprecated)
+    ///
+    /// **Deprecated:** Use [`with_target_bound_config`] instead for more control.
+    #[deprecated(since = "0.2.0", note = "Use with_target_bound_config() instead")]
+    #[allow(deprecated)]
+    pub fn with_target_bounds(mut self, min: f32, max: f32) -> Self {
+        self.config = self.config.with_target_bounds(min, max);
+        self
+    }
+
     /// Set time budget for training
     ///
     /// AutoBuilder will adapt its behavior to fit within this time limit:
@@ -360,11 +400,17 @@ impl AutoBuilder {
 
         if self.config.verbose {
             println!(
-                "  [Profile] {} columns analyzed, {} dropped, task: {:?}",
+                "  [Profile] {} columns analyzed, {} marked for dropping, task: {:?}",
                 profile.columns.len(),
                 profile.drop_columns.len(),
                 profile.task_type
             );
+            if !profile.drop_columns.is_empty() {
+                println!("  [Profile] Columns to drop:");
+                for col in &profile.drop_columns {
+                    println!("    - {} ({})", col.name, col.reason);
+                }
+            }
         }
 
         // === Phase 2: Determine Model Type and Preprocessing ===
@@ -391,6 +437,14 @@ impl AutoBuilder {
                 model_type,
                 preprocessing_plan.steps.len()
             );
+
+            // WHITEBOX: Show exact preprocessing steps
+            if !preprocessing_plan.steps.is_empty() {
+                println!("  [Preprocess] Steps:");
+                for (i, step) in preprocessing_plan.steps.iter().enumerate() {
+                    println!("    {}. {:?}", i + 1, step);
+                }
+            }
         }
 
         // === Phase 3: Feature Engineering ===
@@ -436,11 +490,49 @@ impl AutoBuilder {
                     plan.ratio_pairs.len(),
                     plan.interaction_pairs.len()
                 );
+
+                // WHITEBOX: Show exact features being created
+                if !plan.polynomial_features.is_empty() {
+                    println!("  [Features] Polynomial features (^2, ^3, sqrt, log1p):");
+                    for feat in &plan.polynomial_features {
+                        println!("    - {}", feat);
+                    }
+                }
+
+                if !plan.ratio_pairs.is_empty() {
+                    println!("  [Features] Ratio features:");
+                    for (num, denom) in &plan.ratio_pairs {
+                        println!("    - {} / {}", num, denom);
+                    }
+                }
+
+                if !plan.interaction_pairs.is_empty() {
+                    println!("  [Features] Interaction features (multiplicative):");
+                    for (f1, f2) in &plan.interaction_pairs {
+                        println!("    - {} × {}", f1, f2);
+                    }
+                }
             }
         }
 
         // === Phase 3b: Apply Cross-Sectional Features (polynomial, ratio, interaction) ===
         let mut working_df = df.clone();
+
+        // === Phase 3a: Apply Custom User-Defined Features ===
+        // These encode domain-specific knowledge that AutoML cannot discover
+        if !self.config.custom_features.is_empty() {
+            if self.config.verbose {
+                println!("  [CustomFeatures] Applying {} user-defined features", self.config.custom_features.len());
+            }
+            let custom_step = CustomFeaturesStep::new(self.config.custom_features.clone());
+            working_df = custom_step.transform(working_df)?;
+            if self.config.verbose {
+                for feature in &self.config.custom_features {
+                    println!("    - {}", feature.name);
+                }
+            }
+        }
+
         let initial_cols = working_df.width();
 
         // Apply cross-sectional features (polynomial, ratio, interaction) using canonical helper
@@ -452,11 +544,18 @@ impl AutoBuilder {
 
         if self.config.verbose && feature_plan.as_ref().map_or(false, |p| !p.is_empty()) {
             let added = working_df.width() - initial_cols;
+            let num_poly = feature_plan.as_ref().map(|p| p.polynomial_features.len()).unwrap_or(0);
+            let num_interactions = feature_plan.as_ref().map(|p| p.interaction_pairs.len()).unwrap_or(0);
+            let num_ratios = feature_plan.as_ref().map(|p| p.ratio_pairs.len()).unwrap_or(0);
+
             println!(
-                "  [Features] Applied cross-sectional: {} → {} columns (+{})",
+                "  [Features] Applied: {} → {} columns (+{} = {} poly×4 + {} interactions + {} ratios)",
                 initial_cols,
                 working_df.width(),
-                added
+                added,
+                num_poly,
+                num_interactions,
+                num_ratios
             );
         }
 
@@ -511,7 +610,30 @@ impl AutoBuilder {
         }
 
         // === Phase 4: Prepare Dataset ===
-        // Convert DataFrame to BinnedDataset (and capture pipeline state for inference!)
+        // Apply stateless pre-processing BEFORE creating BinnedDataset
+        // (DropColumns and EngineerFeatures transform the schema)
+
+        // Step 1: Drop useless columns (id, constants, etc.) BUT NOT the target
+        if !profile.drop_columns.is_empty() {
+            let cols_to_drop: Vec<String> = profile.drop_columns
+                .iter()
+                .filter(|c| c.name != target_col)  // Never drop target during training!
+                .map(|c| c.name.clone())
+                .collect();
+
+            if !cols_to_drop.is_empty() {
+                working_df = working_df.drop_many(&cols_to_drop);
+                if self.config.verbose {
+                    println!("  [Prepare] Dropped {} columns: {:?}", cols_to_drop.len(), cols_to_drop);
+                }
+            }
+        }
+
+        // Step 2: Apply feature engineering (already done above, working_df has engineered features)
+        // (No-op here, just documenting the flow)
+
+        // Now create BinnedDataset from preprocessed DataFrame
+        // This learns categorical encodings and binning boundaries on the FINAL schema
         self.config.progress_callback.on_progress(&ProgressUpdate {
             phase: TrainingPhase::DatasetPreparation,
             progress_pct: TrainingPhase::DatasetPreparation.progress_pct(),
@@ -523,8 +645,29 @@ impl AutoBuilder {
             )),
         });
 
-        let (dataset, pipeline_state, filtered_df) =
+        let (mut dataset, pipeline_state, filtered_df) =
             self.prepare_dataset_and_state(&working_df, target_col, panel_info.as_ref())?;
+
+        // === Phase 4b: Auto-detect bounded targets and recommend transformation ===
+        let target_transform = self.detect_and_recommend_transform(&filtered_df, target_col)?;
+
+        // === Phase 4c: Apply target transformation to training targets ===
+        // This transforms targets BEFORE training (e.g., logit maps [0,100] → (-∞,+∞))
+        // The inverse transform is applied during prediction via Pipeline.target_transform()
+        if let Some(ref transform) = target_transform {
+            use crate::preprocessing::TargetTransform;
+            transform.transform(dataset.targets_mut())?;
+            if self.config.verbose {
+                let targets = dataset.targets();
+                let mean = targets.iter().sum::<f32>() / targets.len() as f32;
+                let min = targets.iter().cloned().fold(f32::INFINITY, f32::min);
+                let max = targets.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                println!(
+                    "  [TargetTransform] Applied transform to training targets: mean={:.4}, min={:.4}, max={:.4}",
+                    mean, min, max
+                );
+            }
+        }
 
         // Prepare validation dataset if custom validation data provided
         let validation_dataset = if let Some(ref val_df) = self.validation_df {
@@ -544,8 +687,14 @@ impl AutoBuilder {
             // CRITICAL: Reuse era_column from training data's panel_info!
             // Don't re-detect panel structure on validation set (may fail due to different cardinality ratio)
             let era_column = panel_info.as_ref().map(|info| info.date_column.as_str());
-            let (val_dataset, _, _) =
+            let (mut val_dataset, _, _) =
                 self.prepare_dataset_with_era_column(&val_working_df, target_col, era_column)?;
+
+            // Apply same target transformation to validation targets
+            if let Some(ref transform) = target_transform {
+                use crate::preprocessing::TargetTransform;
+                transform.transform(val_dataset.targets_mut())?;
+            }
             Some(val_dataset)
         } else {
             None
@@ -602,6 +751,21 @@ impl AutoBuilder {
         });
 
         let phase_start = Instant::now();
+
+        // Print detailed tuning start message
+        if self.config.verbose && adapted_config.tuning_level != TuningLevel::None {
+            let (train_samples, val_samples, expected_trials) =
+                self.compute_tuning_info(&adapted_config, mode, &dataset, &validation_dataset);
+
+            println!(
+                "  [Tuning] Starting {:?} tuning: {} train, {} val samples, ~{} trials...",
+                adapted_config.tuning_level,
+                train_samples,
+                val_samples,
+                expected_trials
+            );
+        }
+
         let (universal_config, ltt_tuning, tree_tuning) =
             // CRITICAL: If user provided custom_config, use it directly (bypasses all tuning)
             if let Some(ref custom) = self.config.custom_config {
@@ -625,6 +789,8 @@ impl AutoBuilder {
             };
         phase_times.tuning = phase_start.elapsed();
 
+        // Note: target_transform is now part of Pipeline (built later)
+
         if self.config.verbose {
             let num_trials = ltt_tuning
                 .as_ref()
@@ -632,6 +798,33 @@ impl AutoBuilder {
                 .or_else(|| tree_tuning.as_ref().map(|t| t.num_trials))
                 .unwrap_or(0);
             println!("  [Tuning] {} trials completed", num_trials);
+
+            // Print detailed breakdown for LTT mode
+            if let Some(ltt) = ltt_tuning.as_ref() {
+                println!("  [Tuning] === LinearThenTree Breakdown ===");
+                println!("  [Tuning] Linear phase R²: {:.4} ({:.1}% variance captured)",
+                    ltt.linear_r2, ltt.linear_r2 * 100.0);
+
+                // Get best linear trial to show residual RMSE
+                if let Some(best_linear) = ltt.history.linear_trials.iter()
+                    .min_by(|a, b| a.rmse.partial_cmp(&b.rmse).unwrap()) {
+                    println!("  [Tuning] Linear residual RMSE: {:.6}", best_linear.rmse);
+                }
+
+                // Get best tree trial to show how much trees improved
+                if let Some(best_tree) = ltt.history.tree_trials.iter()
+                    .min_by(|a, b| a.residual_rmse.partial_cmp(&b.residual_rmse).unwrap()) {
+                    println!("  [Tuning] Tree residual RMSE: {:.6}", best_tree.residual_rmse);
+                }
+
+                println!("  [Tuning] Combined final RMSE: {:.6}", ltt.final_rmse);
+            } else if let Some(tree) = tree_tuning.as_ref() {
+                // best_metric is MSE, compute RMSE for display
+                let rmse = tree.best_metric.sqrt();
+                println!("  [Tuning] Best validation MSE: {:.6} (RMSE: {:.6})", tree.best_metric, rmse);
+            }
+
+            println!("  [Tuning] (Computed on validation split during hyperparameter search)");
         }
 
         // === Phase 7: Train Final Model ===
@@ -684,13 +877,12 @@ impl AutoBuilder {
                 let (all_features, _num_all_features) =
                     all_extractor.extract(&filtered_df, target_col)?;
 
-                // Step 2: Build linear_feature_indices based on filter config
-                let filter_config = &self.config.linear_feature_config;
-                let filter_extractor =
-                    crate::dataset::feature_extractor::FeatureExtractor::with_config(
-                        filter_config.clone(),
-                    );
+                // Step 2: Build linear_feature_indices by identifying ENGINEERED features
+                // Linear model uses: polynomial features (_squared, _sqrt, _log) + interaction features (_x_)
+                // Tree model uses: original features (both numeric and categorical-encoded)
+                // This is different from filtering by column TYPE - we filter by feature ORIGIN
                 let mut linear_feature_indices = Vec::new();
+                let mut linear_feature_names = Vec::new(); // Track names for logging
 
                 let col_names: Vec<String> = filtered_df
                     .get_column_names()
@@ -704,11 +896,35 @@ impl AutoBuilder {
                     if col_name == target_col {
                         continue; // Skip target
                     }
-                    // Check if this column should be used by linear (based on filter config)
-                    if !filter_extractor.should_exclude_column(&filtered_df, col_name, target_col) {
+
+                    // Identify engineered features by naming convention
+                    let is_engineered = col_name.ends_with("_squared")
+                        || col_name.ends_with("_sqrt")
+                        || col_name.ends_with("_log")
+                        || col_name.ends_with("_log1p")
+                        || col_name.contains("_x_") // Interaction features
+                        || col_name.contains("_ratio_"); // Ratio features
+
+                    if is_engineered {
+                        // Engineered features go to linear model (polynomial/interaction)
                         linear_feature_indices.push(feature_idx);
+                        linear_feature_names.push(col_name.clone());
                     }
+
                     feature_idx += 1; // Increment for each non-target feature
+                }
+
+                // WHITEBOX: Log which features are selected for linear model
+                if self.config.verbose && !linear_feature_names.is_empty() {
+                    println!(
+                        "  [Linear] Selected {} engineered features for linear component:",
+                        linear_feature_names.len()
+                    );
+                    for name in &linear_feature_names {
+                        println!("    - {}", name);
+                    }
+                    println!("  [Linear] Tree component uses all {} original features (numeric + encoded categoricals)",
+                             col_names.len() - 1 - linear_feature_names.len()); // -1 for target
                 }
 
                 (
@@ -757,6 +973,12 @@ impl AutoBuilder {
             universal_config
         };
 
+        // Add validation split for final training (80/20) to report RMSE
+        // This ensures we have a proper validation metric before submission
+        let final_config = final_config
+            .with_validation_ratio(0.2)
+            .with_early_stopping_rounds(10);
+
         // Check if skip_training is enabled (discovery mode)
         if self.config.skip_training {
             // Save discovered config without training
@@ -764,11 +986,19 @@ impl AutoBuilder {
                 use std::fs;
                 fs::create_dir_all(output_dir)?;
 
-                // Build enriched config with all discovered settings
+                // Build Pipeline from all discovered settings
+                let drop_columns: Vec<String> = profile.drop_columns.iter().map(|c| c.name.clone()).collect();
+                let pipeline = self.build_pipeline(
+                    &feature_plan,
+                    &pipeline_state,
+                    target_transform.clone(),
+                    final_config.linear_feature_indices.clone(),
+                    &drop_columns,
+                )?;
+
+                // Build enriched config with pipeline
                 let mut enriched_config = final_config.clone();
-                enriched_config.feature_plan = feature_plan.clone();
-                enriched_config.preprocessing_plan = Some(preprocessing_plan.clone());
-                enriched_config.target_column = Some(target_col.to_string());
+                enriched_config.pipeline = Some(pipeline);
 
                 // Save config.json only (no model.rkyv)
                 let config_path = output_dir.join("config.json");
@@ -798,6 +1028,7 @@ impl AutoBuilder {
                 column_profile: Some(profile),
                 analysis,
                 pipeline_state: Some(pipeline_state),
+                target_transform: target_transform.clone(),
                 build_time: start.elapsed(),
                 phase_times,
             });
@@ -805,7 +1036,8 @@ impl AutoBuilder {
 
         // Train UniversalModel (handles both single and ensemble internally)
         let max_rounds = final_config.num_rounds; // Save before moving
-        let model = self.train_model(
+        let linear_feature_indices_for_pipeline = final_config.linear_feature_indices.clone();
+        let mut model = self.train_model(
             &dataset,
             final_config,
             feature_extractor,
@@ -814,6 +1046,19 @@ impl AutoBuilder {
         )?;
         phase_times.training = phase_start.elapsed();
 
+        // Build Pipeline and set it on the model BEFORE creating BuildResult
+        // This ensures the pipeline is serialized with model.rkyv
+        let drop_columns: Vec<String> = profile.drop_columns.iter().map(|c| c.name.clone()).collect();
+        let pipeline = self.build_pipeline(
+            &feature_plan,
+            &pipeline_state,
+            target_transform.clone(),
+            linear_feature_indices_for_pipeline,
+            &drop_columns,
+        )?;
+        model.set_pipeline(pipeline);
+
+        // Report training metrics
         if self.config.verbose {
             let num_trees = model.num_trees();
             let stopped_early = num_trees < max_rounds;
@@ -829,6 +1074,35 @@ impl AutoBuilder {
                     "(full rounds)"
                 }
             );
+
+            // Compute training RMSE in ORIGINAL scale (comparable to Kaggle score)
+            // 1. Get raw predictions from model
+            let mut train_preds = model.predict(&dataset);
+
+            // 2. Apply inverse transform to predictions (e.g., sigmoid for Logit, clamp for Clamp)
+            if let Some(ref transform) = target_transform {
+                use crate::preprocessing::TargetTransform;
+                let _ = transform.inverse_transform(&mut train_preds);
+            }
+
+            // 3. Get targets in original scale
+            // Note: For Clamp, targets were never transformed (identity).
+            // For Logit, targets were transformed, so we need to inverse-transform them back.
+            let mut train_targets = dataset.targets().to_vec();
+            if let Some(ref transform) = target_transform {
+                use crate::preprocessing::TargetTransform;
+                let _ = transform.inverse_transform(&mut train_targets);
+            }
+
+            // 4. Compute RMSE in original scale [0, 100]
+            let mse: f32 = train_preds
+                .iter()
+                .zip(train_targets.iter())
+                .map(|(p, t)| (p - t).powi(2))
+                .sum::<f32>()
+                / train_preds.len() as f32;
+            let train_rmse = mse.sqrt();
+            println!("  [Train] Training RMSE: {:.4}", train_rmse);
         }
 
         // Emit completion progress
@@ -852,6 +1126,7 @@ impl AutoBuilder {
             column_profile: Some(profile),
             analysis,
             pipeline_state: Some(pipeline_state), // CRITICAL for inference!
+            target_transform: target_transform.clone(),
             build_time: start.elapsed(),
             phase_times,
         };
@@ -877,19 +1152,38 @@ impl AutoBuilder {
         &self,
         profile: &DataFrameProfile,
     ) -> Result<(ModelType, PreprocessingPlan)> {
-        // For now, use a simple heuristic based on profile
-        // If the data looks linear (high correlation with target), use LinearThenTree
-        // Otherwise use Tree
-        let has_linear_signal = profile.columns.iter().any(|c| {
-            c.target_correlation
-                .map(|r| r.abs() > auto_defaults::LINEAR_SIGNAL_THRESHOLD)
-                .unwrap_or(false)
-        });
-
-        let model_type = if has_linear_signal {
-            ModelType::LinearThenTree
+        // PRIORITY 1: Check if custom_config provided - if so, use its mode for preprocessing
+        // This ensures preprocessing and training use the same mode
+        let model_type = if let Some(ref custom) = self.config.custom_config {
+            match custom.mode {
+                BoostingMode::LinearThenTree => ModelType::LinearThenTree,
+                BoostingMode::PureTree | BoostingMode::RandomForest => ModelType::Tree,
+            }
         } else {
-            ModelType::Tree
+            // PRIORITY 2: Check if user explicitly set the mode via mode_selection
+            match &self.config.mode_selection {
+                ModeSelection::Fixed(forced_mode) => {
+                    // User explicitly set the mode - respect it
+                    match forced_mode {
+                        BoostingMode::LinearThenTree => ModelType::LinearThenTree,
+                        BoostingMode::PureTree | BoostingMode::RandomForest => ModelType::Tree,
+                    }
+                }
+                ModeSelection::Auto | ModeSelection::AutoWithConfig(_) => {
+                    // PRIORITY 3: Auto-detect based on linear signal in data
+                    let has_linear_signal = profile.columns.iter().any(|c| {
+                        c.target_correlation
+                            .map(|r| r.abs() > auto_defaults::LINEAR_SIGNAL_THRESHOLD)
+                            .unwrap_or(false)
+                    });
+
+                    if has_linear_signal {
+                        ModelType::LinearThenTree
+                    } else {
+                        ModelType::Tree
+                    }
+                }
+            }
         };
 
         let plan = SmartPreprocessor::infer(profile, model_type);
@@ -950,6 +1244,103 @@ impl AutoBuilder {
         Ok((dataset, pipeline_state, filtered_df))
     }
 
+    /// Build a Pipeline from training components
+    ///
+    /// Constructs a sequential Pipeline that captures all transformation steps:
+    /// 1. Feature engineering (polynomials, interactions, ratios)
+    /// 2. Categorical encoding (with learned state from pipeline_state)
+    /// 3. Target transformation (if provided)
+    /// 4. Numeric binning (with learned boundaries from pipeline_state)
+    /// 5. Linear feature extraction (if linear_feature_indices provided)
+    fn build_pipeline(
+        &self,
+        feature_plan: &Option<FeaturePlan>,
+        pipeline_state: &crate::dataset::PipelineState,
+        target_transform: Option<crate::preprocessing::TargetTransformKind>,
+        linear_feature_indices: Option<Vec<usize>>,
+        drop_columns: &[String],
+    ) -> Result<Pipeline> {
+        let mut pipeline = Pipeline::new();
+
+        // Step 0: DropColumns (MUST be first - remove id, constants, etc.)
+        if !drop_columns.is_empty() {
+            pipeline.add_step(PipelineStepKind::DropColumns(DropColumnsStep::new(
+                drop_columns.to_vec(),
+            )));
+        }
+
+        // Step 0.5: CustomFeaturesStep (user-defined features BEFORE auto feature engineering)
+        // These encode domain-specific knowledge that AutoML cannot discover
+        if !self.config.custom_features.is_empty() {
+            if self.config.verbose {
+                println!("  [CustomFeatures] Applying {} user-defined features", self.config.custom_features.len());
+                for feature in &self.config.custom_features {
+                    println!("    - {}", feature.name);
+                }
+            }
+            pipeline.add_step(PipelineStepKind::CustomFeatures(
+                CustomFeaturesStep::new(self.config.custom_features.clone())
+            ));
+        }
+
+        // Step 1: EngineerFeaturesStep (if feature engineering was applied)
+        if let Some(ref plan) = feature_plan {
+            if !plan.is_empty() {
+                pipeline.add_step(PipelineStepKind::EngineerFeatures(EngineerFeaturesStep::new(
+                    plan.polynomial_features.clone(),
+                    plan.interaction_pairs.clone(),
+                    plan.ratio_pairs.clone(),
+                )));
+            }
+        }
+
+        // Step 2: EncodeCategoricalsStep (with learned encodings from pipeline_state)
+        if !pipeline_state.categorical_encodings.is_empty() {
+            let encodings: Vec<(String, CategoryEncoding)> = pipeline_state.categorical_encodings
+                .iter()
+                .map(|enc| {
+                    (enc.name.clone(), CategoryEncoding {
+                        method: "target".to_string(),
+                        category_mapping: enc.category_mapping.clone(),
+                        encoding_map: enc.encoding_map.clone(),
+                        bin_boundaries: enc.bin_boundaries.clone(),
+                    })
+                })
+                .collect();
+            pipeline.add_step(PipelineStepKind::EncodeCategoricals(EncodeCategoricalsState { encodings }));
+        }
+
+        // Step 3: TransformTargetStep (if target transform was applied)
+        if let Some(transform) = target_transform {
+            pipeline.add_step(PipelineStepKind::TransformTarget(TransformTargetStep::new(transform)));
+        }
+
+        // Step 4: BinNumericFeaturesStep (with learned boundaries from feature_info)
+        let boundaries: Vec<(String, Vec<f64>)> = pipeline_state.feature_info
+            .iter()
+            .filter(|fi| !fi.bin_boundaries.is_empty())
+            .map(|fi| (fi.name.clone(), fi.bin_boundaries.clone()))
+            .collect();
+        pipeline.add_step(PipelineStepKind::BinNumericFeatures(BinNumericFeaturesState {
+            num_bins: 255,
+            boundaries,
+        }));
+
+        // Step 5: ExtractLinearFeaturesStep (if LinearThenTree mode with feature indices)
+        if let Some(indices) = linear_feature_indices {
+            pipeline.add_step(PipelineStepKind::ExtractLinearFeatures(ExtractLinearFeaturesStep {
+                linear_feature_indices: indices,
+                all_feature_names: pipeline_state.column_order.clone(),
+            }));
+        }
+
+        // Don't set column_order - Pipeline is a graph, each step validates its own inputs
+        // The column_order will be computed dynamically as the DataFrame flows through steps
+        pipeline.set_target_column(Some("target".to_string())); // Placeholder, not critical for inference
+
+        Ok(pipeline)
+    }
+
     /// Select boosting mode based on analysis
     fn select_mode(
         &self,
@@ -976,6 +1367,58 @@ impl AutoBuilder {
         Ok((mode, Some(analysis), confidence))
     }
 
+    /// Compute tuning information for display
+    fn compute_tuning_info(
+        &self,
+        config: &AutoConfig,
+        mode: BoostingMode,
+        dataset: &BinnedDataset,
+        validation_dataset: &Option<BinnedDataset>,
+    ) -> (usize, usize, usize) {
+        // Compute train/val split sizes
+        let total_rows = dataset.num_rows();
+        let (train_samples, val_samples) = if validation_dataset.is_some() {
+            // Custom validation provided
+            let val_rows = validation_dataset.as_ref().unwrap().num_rows();
+            (total_rows, val_rows)
+        } else {
+            // Will do internal split - default 0.2 validation ratio
+            let val_ratio = auto_defaults::DEFAULT_VALIDATION_RATIO;
+            let train_rows = (total_rows as f32 * (1.0 - val_ratio)) as usize;
+            let val_rows = total_rows - train_rows;
+            (train_rows, val_rows)
+        };
+
+        // Compute expected trial count based on TuningLevel
+        let expected_trials = match config.tuning_level {
+            TuningLevel::Quick => {
+                // Quick: 30 samples × 1 iteration
+                30
+            }
+            TuningLevel::Standard => {
+                // Standard: 100 samples × 3 iterations
+                if matches!(mode, BoostingMode::LinearThenTree) {
+                    // LTT does dual-phase tuning (linear + tree), roughly double
+                    200
+                } else {
+                    300
+                }
+            }
+            TuningLevel::Thorough => {
+                // Thorough: 150 samples × 15 iterations
+                if matches!(mode, BoostingMode::LinearThenTree) {
+                    // LTT does dual-phase tuning
+                    3000
+                } else {
+                    2250
+                }
+            }
+            TuningLevel::None => 0,
+        };
+
+        (train_samples, val_samples, expected_trials)
+    }
+
     /// Train the final model
     fn train_model(
         &self,
@@ -991,6 +1434,12 @@ impl AutoBuilder {
         // Add feature_extractor to config
         config.feature_extractor = feature_extractor;
 
+        // Add linear_feature_indices to config (for LinearThenTree mode)
+        // This ensures the indices are serialized and used during prediction
+        if let Some(indices) = &linear_indices {
+            config.linear_feature_indices = Some(indices.clone());
+        }
+
         // Pass raw features AND linear_feature_indices to training if we're in LTT mode
         // Use pattern matching instead of is_some() + unwrap() for idiomatic Rust
         match (config.mode, raw_features, linear_indices) {
@@ -999,7 +1448,10 @@ impl AutoBuilder {
                     dataset, &features, &indices, config, &loss,
                 )
             }
-            _ => UniversalModel::train(dataset, config, &loss),
+            _ => {
+                // PureTree or RandomForest mode
+                UniversalModel::train(dataset, config, &loss)
+            }
         }
     }
 
@@ -1078,6 +1530,121 @@ impl AutoBuilder {
         })
     }
 
+    /// Auto-detect bounded targets and recommend transformation
+    ///
+    /// Analyzes the target column to detect if values are bounded and suggests
+    /// appropriate transformations:
+    /// - [0, 1]: Suggest LogitTransform(0.0, 1.0) for probabilities
+    /// - Explicit user config: Use specified mode (Logit, Clamp, etc.)
+    /// - None: No transformation
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(TargetTransformKind))` if transform configured
+    /// `Ok(None)` if no transformation requested
+    fn detect_and_recommend_transform(
+        &self,
+        df: &DataFrame,
+        target_col: &str,
+    ) -> Result<Option<crate::preprocessing::TargetTransformKind>> {
+        use crate::model::TargetBoundConfig;
+
+        // Handle explicit user configuration
+        match &self.config.target_bound_config {
+            TargetBoundConfig::None => {
+                if self.config.verbose {
+                    println!("  [TargetBound] No target transformation configured");
+                }
+                return Ok(None);
+            }
+            TargetBoundConfig::Logit { min, max } => {
+                if self.config.verbose {
+                    println!(
+                        "  [TargetBound] Using Logit transform with fixed bounds: [{:.4}, {:.4}]",
+                        min, max
+                    );
+                }
+                return Ok(Some(crate::preprocessing::TargetTransformKind::logit(*min, *max)?));
+            }
+            TargetBoundConfig::Clamp { min, max } => {
+                if self.config.verbose {
+                    println!(
+                        "  [TargetBound] Using Clamp transform with fixed bounds: [{:.4}, {:.4}]",
+                        min, max
+                    );
+                }
+                return Ok(Some(crate::preprocessing::TargetTransformKind::clamp(*min, *max)?));
+            }
+            TargetBoundConfig::LogitEmpirical | TargetBoundConfig::ClampEmpirical => {
+                // Need to compute empirical bounds from data
+            }
+        }
+
+        // For empirical modes, extract target column and compute bounds
+        let target_series = df
+            .column(target_col)
+            .map_err(|e| TreeBoostError::Data(format!("Target column '{}' not found: {}", target_col, e)))?;
+
+        // Convert to f32 values
+        let targets: Vec<f32> = match target_series.dtype() {
+            polars::prelude::DataType::Float32 => {
+                target_series.f32()?.into_no_null_iter().collect()
+            }
+            polars::prelude::DataType::Float64 => {
+                target_series.f64()?.into_no_null_iter().map(|x| x as f32).collect()
+            }
+            polars::prelude::DataType::Int32 => {
+                target_series.i32()?.into_no_null_iter().map(|x| x as f32).collect()
+            }
+            polars::prelude::DataType::Int64 => {
+                target_series.i64()?.into_no_null_iter().map(|x| x as f32).collect()
+            }
+            _ => {
+                // Non-numeric target, cannot apply transformation
+                return Ok(None);
+            }
+        };
+
+        if targets.is_empty() {
+            return Ok(None);
+        }
+
+        // Compute empirical bounds
+        let empirical_min = targets.iter().cloned().fold(f32::INFINITY, f32::min);
+        let empirical_max = targets.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+
+        if self.config.verbose {
+            println!(
+                "  [TargetBound] Empirical bounds: [{:.4}, {:.4}]",
+                empirical_min, empirical_max
+            );
+        }
+
+        // Apply empirical transform based on config
+        match &self.config.target_bound_config {
+            TargetBoundConfig::LogitEmpirical => {
+                if self.config.verbose {
+                    println!(
+                        "  [TargetBound] Using Logit transform with empirical bounds: [{:.4}, {:.4}]",
+                        empirical_min, empirical_max
+                    );
+                }
+                Ok(Some(crate::preprocessing::TargetTransformKind::logit(empirical_min, empirical_max)?))
+            }
+            TargetBoundConfig::ClampEmpirical => {
+                if self.config.verbose {
+                    println!(
+                        "  [TargetBound] Using Clamp transform with empirical bounds: [{:.4}, {:.4}]",
+                        empirical_min, empirical_max
+                    );
+                }
+                Ok(Some(crate::preprocessing::TargetTransformKind::clamp(empirical_min, empirical_max)?))
+            }
+            // Already handled above
+            _ => Ok(None),
+        }
+    }
+
     /// Automatically save all artifacts (model, config, metadata) to output directory
     fn auto_save_artifacts(
         &self,
@@ -1101,26 +1668,24 @@ impl AutoBuilder {
             .as_ref()
             .expect("model must be Some when skip_training is false");
 
-        // Update model config to include feature plan, preprocessing plan, and target column
-        // This makes UniversalConfig truly universal - it contains everything needed to replicate the pipeline
-        let mut enriched_config = model.config().clone();
-        enriched_config.feature_plan = build_result.feature_plan.clone();
-        enriched_config.preprocessing_plan = build_result.preprocessing_plan.clone();
-        enriched_config.target_column = Some(build_result.target_column.clone());
+        // Model already has pipeline set (from fit() before BuildResult creation)
+        // Just extract the config for saving as JSON
+        let enriched_config = model.config().clone();
 
         // Save trained model (rkyv format for fast loading)
-        // Note: The model internally stores its config, which now includes feature_plan/preprocessing_plan
+        // The model's config now includes the Pipeline - it's serialized together
         let model_path = output_dir.join("model.rkyv");
         model.save(&model_path)?;
         if self.config.verbose {
             println!("  [AutoSave] Model: {}", model_path.display());
         }
 
-        // Save UniversalConfig as config.json
-        // This is the SINGLE SOURCE OF TRUTH containing everything:
+        // Save UniversalConfig as config.json (human-readable view)
+        // The model.rkyv is the SINGLE SOURCE OF TRUTH.
+        // config.json is extracted FROM the model for human inspection and contains:
         // - Model hyperparameters
-        // - Feature engineering plan (polynomial, interactions, ratios)
-        // - Preprocessing plan (encoders, scalers, imputers)
+        // - Pipeline steps (feature engineering, encoding, binning, target transform)
+        // - Linear feature indices
         // - Target column name
         let config_path = output_dir.join("config.json");
         let config_json = serde_json::to_string_pretty(&enriched_config).map_err(|e| {

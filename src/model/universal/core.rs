@@ -84,10 +84,13 @@ pub struct UniversalModel {
     #[serde(skip)]
     pub(super) analysis: Option<DatasetAnalysis>,
 
-    /// Raw features for LinearThenTree prediction (optional)
+    /// Raw features for LinearThenTree prediction (DEPRECATED - now in BinnedDataset)
     ///
-    /// When LTT is trained with raw features, we store them for prediction.
-    /// This avoids the lossy bin-center approximation.
+    /// **DEPRECATED**: Raw features are now packed into BinnedDataset via
+    /// `BinnedDataset::with_raw_features()`. This field is kept for backward compatibility
+    /// with old serialized models, but new code should not use it.
+    ///
+    /// For new code: Use `dataset.raw_features()` to get preprocessed values.
     #[rkyv(with = rkyv::with::Skip)]
     #[serde(skip)]
     pub(super) raw_features_for_linear: Option<Vec<f32>>,
@@ -95,15 +98,11 @@ pub struct UniversalModel {
     /// Feature indices to use for linear model (optional)
     ///
     /// When set, only these feature indices from raw_features are used for
-    /// the linear model. This allows feature selection for linear while
-    /// trees use all features.
-    #[rkyv(with = rkyv::with::Skip)]
-    #[serde(skip)]
+    /// the linear model. Trees use the complementary set (all features NOT in this list).
+    /// This is CRITICAL for LinearThenTree mode - must be serialized with the model!
     pub(super) linear_feature_indices: Option<Vec<usize>>,
 
     /// Number of features used by linear model (may differ from num_features)
-    #[rkyv(with = rkyv::with::Skip)]
-    #[serde(skip)]
     pub(super) num_linear_features: Option<usize>,
 
     /// Feature extractor for LinearThenTree inference (optional)
@@ -135,6 +134,21 @@ impl UniversalModel {
         &self,
     ) -> Option<&crate::dataset::feature_extractor::FeatureExtractor> {
         self.feature_extractor.as_ref()
+    }
+
+    /// Set the preprocessing pipeline on the model's config
+    ///
+    /// This is called after training to store the Pipeline, which includes:
+    /// - Feature engineering steps (polynomial, interactions, ratios)
+    /// - Categorical encoding (target encoding, frequency encoding)
+    /// - Numeric binning (quantile boundaries)
+    /// - Target transformation (log, logit, power)
+    /// - Linear feature extraction indices
+    ///
+    /// The pipeline is serialized with the model (in model.rkyv) and used
+    /// during inference to apply the same transformations as training.
+    pub fn set_pipeline(&mut self, pipeline: crate::model::Pipeline) {
+        self.config.pipeline = Some(pipeline);
     }
 
     /// Apply linear model shrinkage factor to predictions (batch)

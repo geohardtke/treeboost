@@ -178,6 +178,64 @@ impl TuningLevel {
     }
 }
 
+/// Target bound configuration for bounded regression problems.
+///
+/// Controls how target bounds are determined and what transformation to apply.
+/// This configuration is stored in the Pipeline and can be replicated from saved models.
+///
+/// # Modes
+///
+/// | Mode | Bounds Source | Transformation | Use When |
+/// |------|--------------|----------------|----------|
+/// | `Logit { min, max }` | User-specified | Logit transform | Known theoretical bounds (e.g., scores [0, 100]) |
+/// | `LogitEmpirical` | From data min/max | Logit transform | Want logit but let data determine bounds |
+/// | `Clamp { min, max }` | User-specified | Clamp only | Logit causes issues, simpler approach |
+/// | `ClampEmpirical` | From data min/max | Clamp only | Simple bounded regression from data |
+/// | `None` | N/A | No transform | Unbounded targets |
+///
+/// # Example
+///
+/// ```ignore
+/// use treeboost::model::{AutoConfig, TargetBoundConfig};
+///
+/// // Exam scores with known bounds [0, 100]
+/// let config = AutoConfig::new()
+///     .with_target_bound_config(TargetBoundConfig::Logit { min: 0.0, max: 100.0 });
+///
+/// // Let data determine bounds, use simple clamp
+/// let config = AutoConfig::new()
+///     .with_target_bound_config(TargetBoundConfig::ClampEmpirical);
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub enum TargetBoundConfig {
+    /// No target transformation (unbounded regression)
+    None,
+
+    /// Logit transform with user-specified bounds.
+    /// Maps [min, max] → (-∞, +∞) via logit, predictions via sigmoid back to [min, max].
+    /// Best when theoretical bounds are known (e.g., exam scores always [0, 100]).
+    Logit { min: f32, max: f32 },
+
+    /// Logit transform with bounds from training data min/max.
+    /// Automatically determines bounds from empirical data.
+    LogitEmpirical,
+
+    /// Clamp-only with user-specified bounds.
+    /// No transform during training, predictions clamped to [min, max] at inference.
+    /// Simpler than Logit, use when Logit causes issues.
+    Clamp { min: f32, max: f32 },
+
+    /// Clamp-only with bounds from training data min/max.
+    /// Simpler bounded regression using empirical bounds.
+    ClampEmpirical,
+}
+
+impl Default for TargetBoundConfig {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 /// Ensemble strategy for AutoBuilder (PureTree only)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoEnsembleMethod {
@@ -502,6 +560,58 @@ pub struct AutoConfig {
     ///
     /// Use this for fast config discovery on sampled data, then train on full data later.
     pub skip_training: bool,
+
+    /// Target bound configuration for bounded regression.
+    ///
+    /// Controls how target bounds are determined and what transformation to apply.
+    /// See [`TargetBoundConfig`] for available modes.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use treeboost::model::{AutoConfig, TargetBoundConfig};
+    ///
+    /// // Exam scores: known bounds [0, 100] with Logit transform
+    /// let config = AutoConfig::new()
+    ///     .with_target_bound_config(TargetBoundConfig::Logit { min: 0.0, max: 100.0 });
+    ///
+    /// // Simple clamp using empirical min/max from data
+    /// let config = AutoConfig::new()
+    ///     .with_target_bound_config(TargetBoundConfig::ClampEmpirical);
+    /// ```
+    ///
+    /// Default is `TargetBoundConfig::None` (no transformation).
+    pub target_bound_config: TargetBoundConfig,
+
+    /// Custom user-defined features.
+    ///
+    /// These features are applied BEFORE automatic feature engineering and encode
+    /// domain-specific knowledge that the AutoML system cannot discover on its own.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use treeboost::model::{AutoConfig, CustomFeature, FeatureOp};
+    ///
+    /// // Manual formula with LUT mappings (like winning Kaggle notebooks)
+    /// let manual_formula = CustomFeature::formula("manual_formula")
+    ///     .add_term("study_hours", 6.0)
+    ///     .add_term("class_attendance", 0.35)
+    ///     .add_term("sleep_hours", 1.5)
+    ///     .add_lut("sleep_quality", &[("good", 5.0), ("average", 0.0), ("poor", -5.0)])
+    ///     .add_lut("study_method", &[("coaching", 10.0), ("mixed", 5.0), ("self-study", 0.0)])
+    ///     .build();
+    ///
+    /// // Trigonometric feature for cyclical patterns
+    /// let trig_feature = CustomFeature::new(
+    ///     "study_hours_sin",
+    ///     FeatureOp::sin("study_hours", 12.0)
+    /// );
+    ///
+    /// let config = AutoConfig::new()
+    ///     .with_custom_features(vec![manual_formula, trig_feature]);
+    /// ```
+    pub custom_features: Vec<super::CustomFeature>,
 }
 
 impl Clone for AutoConfig {
@@ -523,6 +633,8 @@ impl Clone for AutoConfig {
             model_output_dir: self.model_output_dir.clone(),
             backend_type: self.backend_type,
             skip_training: self.skip_training,
+            target_bound_config: self.target_bound_config.clone(),
+            custom_features: self.custom_features.clone(),
         }
     }
 }
@@ -544,6 +656,8 @@ impl std::fmt::Debug for AutoConfig {
             .field("tree_tuner_config", &self.tree_tuner_config)
             .field("backend_type", &self.backend_type)
             .field("skip_training", &self.skip_training)
+            .field("target_bound_config", &self.target_bound_config)
+            .field("custom_features", &format!("{} features", self.custom_features.len()))
             .finish()
     }
 }
@@ -567,6 +681,8 @@ impl Default for AutoConfig {
             model_output_dir: None,
             backend_type: crate::backend::BackendType::Auto,
             skip_training: false,
+            target_bound_config: TargetBoundConfig::None,
+            custom_features: Vec::new(),
         }
     }
 }
@@ -752,6 +868,91 @@ impl AutoConfig {
         self
     }
 
+    /// Set target bound configuration for bounded regression.
+    ///
+    /// Controls how target bounds are determined and what transformation to apply.
+    /// See [`TargetBoundConfig`] for available modes.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use treeboost::model::{AutoConfig, TargetBoundConfig};
+    ///
+    /// // Exam scores: known bounds [0, 100] with Logit transform
+    /// let config = AutoConfig::new()
+    ///     .with_target_bound_config(TargetBoundConfig::Logit { min: 0.0, max: 100.0 });
+    ///
+    /// // Simple clamp using empirical min/max from data
+    /// let config = AutoConfig::new()
+    ///     .with_target_bound_config(TargetBoundConfig::ClampEmpirical);
+    ///
+    /// // Clamp to known bounds (no transform during training)
+    /// let config = AutoConfig::new()
+    ///     .with_target_bound_config(TargetBoundConfig::Clamp { min: 0.0, max: 100.0 });
+    /// ```
+    pub fn with_target_bound_config(mut self, config: TargetBoundConfig) -> Self {
+        self.target_bound_config = config;
+        self
+    }
+
+    /// Set custom user-defined features.
+    ///
+    /// Custom features are applied BEFORE automatic feature engineering and encode
+    /// domain-specific knowledge that the AutoML system cannot discover on its own.
+    ///
+    /// These features are:
+    /// - Applied in order before any automatic feature engineering
+    /// - Serialized with the model for consistent inference
+    /// - Available for both training and prediction
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use treeboost::model::{AutoConfig, CustomFeature, FeatureOp};
+    ///
+    /// // Manual formula like winning Kaggle notebooks
+    /// let manual_formula = CustomFeature::formula("manual_formula")
+    ///     .add_term("study_hours", 6.0)
+    ///     .add_term("class_attendance", 0.35)
+    ///     .add_lut("sleep_quality", &[("good", 5.0), ("average", 0.0), ("poor", -5.0)])
+    ///     .build();
+    ///
+    /// // Sin transform for cyclical patterns
+    /// let trig = CustomFeature::new("study_hours_sin", FeatureOp::sin("study_hours", 12.0));
+    ///
+    /// let config = AutoConfig::new()
+    ///     .with_custom_features(vec![manual_formula, trig]);
+    /// ```
+    pub fn with_custom_features(mut self, features: Vec<super::CustomFeature>) -> Self {
+        self.custom_features = features;
+        self
+    }
+
+    /// Add a single custom feature.
+    ///
+    /// Appends to existing custom features rather than replacing them.
+    pub fn add_custom_feature(mut self, feature: super::CustomFeature) -> Self {
+        self.custom_features.push(feature);
+        self
+    }
+
+    /// Set explicit target bounds for bounded regression (deprecated)
+    ///
+    /// **Deprecated:** Use [`with_target_bound_config`] instead for more control.
+    ///
+    /// This method is equivalent to `with_target_bound_config(TargetBoundConfig::Logit { min, max })`.
+    #[deprecated(since = "0.2.0", note = "Use with_target_bound_config() instead")]
+    pub fn with_target_bounds(mut self, min: f32, max: f32) -> Self {
+        assert!(
+            min < max,
+            "Target bounds must have min < max, got min={}, max={}",
+            min,
+            max
+        );
+        self.target_bound_config = TargetBoundConfig::Logit { min, max };
+        self
+    }
+
     /// Set time budget for training
     ///
     /// AutoBuilder will adapt tuning intensity to fit within this budget.
@@ -841,27 +1042,12 @@ impl AutoConfig {
     ///     .with_random_validation_split(0.2);
     /// ```
     pub fn with_output_dir(mut self, dir: &std::path::Path) -> Self {
-        // Set model output directory to parent of tuner directory
-        // Example: if dir = "accident/automl/autotuner", model_output_dir = "accident/automl"
-        self.model_output_dir = dir.parent().map(|p| p.to_path_buf());
+        // Set model output directory
+        // Tuner logs will automatically be saved to {dir}/autotuner/ by tune_tree_model() and tune_ltt()
+        self.model_output_dir = Some(dir.to_path_buf());
 
-        // If tree_tuner_config already exists, update its output_dir
-        // Otherwise, create a new config based on tuning_level
-        let tuner_config = if let Some(mut existing) = self.tree_tuner_config.take() {
-            existing.output.dir = Some(dir.to_path_buf());
-            existing
-        } else {
-            // Create config from tuning level preset and set output_dir
-            let preset = match self.tuning_level {
-                TuningLevel::Quick => TreeTunerPreset::Quick,
-                TuningLevel::Standard => TreeTunerPreset::Standard,
-                TuningLevel::Thorough => TreeTunerPreset::Thorough,
-                TuningLevel::None => TreeTunerPreset::Quick, // Default to Quick if no tuning
-            };
-            TreeTunerConfig::with_preset(preset).with_output_dir(Some(dir.to_path_buf()))
-        };
-
-        self.tree_tuner_config = Some(tuner_config);
+        // DO NOT set tree_tuner_config.output.dir here!
+        // Let tune_tree_model() handle appending "/autotuner" to avoid path conflicts
         self
     }
 
@@ -1438,6 +1624,9 @@ pub struct BuildResult {
 
     /// Fitted pipeline state for inference (CRITICAL for prediction!)
     pub pipeline_state: Option<crate::dataset::PipelineState>,
+
+    /// Target transformation applied (if any)
+    pub target_transform: Option<crate::preprocessing::TargetTransformKind>,
 
     /// Total build time
     pub build_time: Duration,

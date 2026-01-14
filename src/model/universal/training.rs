@@ -85,14 +85,25 @@ impl UniversalModel {
         Self::validate_config(&config)?;
 
         let feature_extractor = config.feature_extractor.clone();
+
+        // Extract linear_feature_indices from config for LinearThenTree mode
+        let linear_indices_opt = config.linear_feature_indices.clone();
+
+        // Extract raw features from dataset if available (for LinearThenTree mode)
+        let raw_features_opt = if config.mode == BoostingMode::LinearThenTree {
+            dataset.raw_features().map(|r| r.to_vec())
+        } else {
+            None
+        };
+
         match config.mode {
             BoostingMode::PureTree => {
                 Self::train_pure_tree(dataset, config, loss_fn, None, feature_extractor)
             }
             BoostingMode::LinearThenTree => Self::train_linear_then_tree(
                 dataset,
-                None,
-                None,
+                raw_features_opt.as_deref(),  // Use raw features from dataset if available
+                linear_indices_opt.as_deref(),  // Pass linear_feature_indices from config
                 config,
                 loss_fn,
                 None,
@@ -417,9 +428,20 @@ impl UniversalModel {
         analysis: Option<DatasetAnalysis>,
         feature_extractor: Option<crate::dataset::feature_extractor::FeatureExtractor>,
     ) -> Result<Self> {
-        let targets = dataset.targets();
+        let raw_targets = dataset.targets();
         let num_rows = dataset.num_rows();
         let num_features = dataset.num_features();
+
+        // Apply target transform if specified (critical for LinearThenTree)
+        // Linear model must be trained in the same space as GBDT (logit space for bounded targets)
+        let mut transformed_targets = raw_targets.to_vec();
+        if let Some(ref pipeline) = config.pipeline {
+            if let Some(transform) = pipeline.target_transform() {
+                use crate::preprocessing::TargetTransform;
+                transform.transform(&mut transformed_targets)?;
+            }
+        }
+        let targets = &transformed_targets;
 
         // Determine which features to use for linear model
         let linear_indices: Option<Vec<usize>> = linear_feature_indices_opt.map(|v| v.to_vec());
@@ -534,6 +556,27 @@ impl UniversalModel {
                 residual_targets[i] = targets[i] - predictions[i];
             }
         }
+
+        // Filter dataset to only tree features (exclude features used by linear model)
+        // Linear model uses polynomial/interaction features → tree uses categorical/other features
+        let residual_dataset = if let Some(ref linear_idx) = linear_indices {
+            // Compute tree_indices = all features NOT in linear_indices
+            let all_indices: std::collections::HashSet<usize> =
+                (0..num_features).collect();
+            let linear_set: std::collections::HashSet<usize> =
+                linear_idx.iter().copied().collect();
+            let mut tree_indices: Vec<usize> = all_indices
+                .difference(&linear_set)
+                .copied()
+                .collect();
+            tree_indices.sort_unstable(); // Keep deterministic order
+
+            // Filter to only tree features
+            residual_dataset.subset_features(&tree_indices)
+        } else {
+            // No linear_indices specified, use all features (backward compat)
+            residual_dataset
+        };
 
         // Check if ensemble training is requested
         let (gbdt_model, gbdt_ensemble, stacker_weights, stacker_intercept) =

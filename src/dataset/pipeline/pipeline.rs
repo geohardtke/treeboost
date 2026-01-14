@@ -346,6 +346,77 @@ impl DataPipeline {
             TreeBoostError::Data(format!("Failed to build filtered DataFrame: {}", e))
         })?;
 
+        // Extract raw features from filtered_df and pack into dataset
+        // This is critical for LinearThenTree mode where the linear model needs
+        // exact preprocessed values (StandardScaled polynomials, target-encoded categoricals)
+        // Extract ALL non-target columns (both originally numeric and encoded categoricals)
+        let raw_features = {
+            let _num_rows = filtered_df.height();
+            let mut features = Vec::new();
+
+            for col_name in filtered_df.get_column_names() {
+                if col_name == target_column {
+                    continue; // Skip target column
+                }
+
+                let col = filtered_df.column(col_name)?;
+
+                // Try to extract as f32/f64/i64, handling all numeric types after encoding
+                match col.dtype() {
+                    polars::prelude::DataType::Float32 => {
+                        if let Ok(ca) = col.f32() {
+                            for val in ca.iter() {
+                                features.push(val.unwrap_or(0.0));
+                            }
+                        }
+                    }
+                    polars::prelude::DataType::Float64 => {
+                        if let Ok(ca) = col.f64() {
+                            for val in ca.iter() {
+                                features.push(val.unwrap_or(0.0) as f32);
+                            }
+                        }
+                    }
+                    polars::prelude::DataType::Int64 => {
+                        if let Ok(ca) = col.i64() {
+                            for val in ca.iter() {
+                                features.push(val.unwrap_or(0) as f32);
+                            }
+                        }
+                    }
+                    polars::prelude::DataType::UInt64 => {
+                        if let Ok(ca) = col.u64() {
+                            for val in ca.iter() {
+                                features.push(val.unwrap_or(0) as f32);
+                            }
+                        }
+                    }
+                    polars::prelude::DataType::Int32 => {
+                        if let Ok(ca) = col.i32() {
+                            for val in ca.iter() {
+                                features.push(val.unwrap_or(0) as f32);
+                            }
+                        }
+                    }
+                    polars::prelude::DataType::UInt32 => {
+                        if let Ok(ca) = col.u32() {
+                            for val in ca.iter() {
+                                features.push(val.unwrap_or(0) as f32);
+                            }
+                        }
+                    }
+                    _ => {
+                        // Skip non-numeric columns (shouldn't happen after preprocessing)
+                        continue;
+                    }
+                }
+            }
+
+            features
+        };
+
+        let dataset = dataset.with_raw_features(raw_features);
+
         Ok((dataset, state, filtered_df))
     }
 
@@ -456,6 +527,72 @@ impl DataPipeline {
         let targets = vec![0.0f32; num_rows];
 
         let dataset = BinnedDataset::new(num_rows, features, targets, state.feature_info.clone());
+
+        // Extract raw features from preprocessed_df and pack into dataset
+        // This ensures LinearThenTree predictions use the same preprocessed values
+        // Extract ALL columns (both originally numeric and encoded categoricals)
+        let raw_features = {
+            let _num_rows = preprocessed_df.height();
+            let mut features = Vec::new();
+
+            for col_name in preprocessed_df.get_column_names() {
+                let col = preprocessed_df.column(col_name)?;
+
+                // Try to extract as f32/f64/i64, handling all numeric types after encoding
+                match col.dtype() {
+                    polars::prelude::DataType::Float32 => {
+                        if let Ok(ca) = col.f32() {
+                            for val in ca.iter() {
+                                features.push(val.unwrap_or(0.0));
+                            }
+                        }
+                    }
+                    polars::prelude::DataType::Float64 => {
+                        if let Ok(ca) = col.f64() {
+                            for val in ca.iter() {
+                                features.push(val.unwrap_or(0.0) as f32);
+                            }
+                        }
+                    }
+                    polars::prelude::DataType::Int64 => {
+                        if let Ok(ca) = col.i64() {
+                            for val in ca.iter() {
+                                features.push(val.unwrap_or(0) as f32);
+                            }
+                        }
+                    }
+                    polars::prelude::DataType::UInt64 => {
+                        if let Ok(ca) = col.u64() {
+                            for val in ca.iter() {
+                                features.push(val.unwrap_or(0) as f32);
+                            }
+                        }
+                    }
+                    polars::prelude::DataType::Int32 => {
+                        if let Ok(ca) = col.i32() {
+                            for val in ca.iter() {
+                                features.push(val.unwrap_or(0) as f32);
+                            }
+                        }
+                    }
+                    polars::prelude::DataType::UInt32 => {
+                        if let Ok(ca) = col.u32() {
+                            for val in ca.iter() {
+                                features.push(val.unwrap_or(0) as f32);
+                            }
+                        }
+                    }
+                    _ => {
+                        // Skip non-numeric columns (shouldn't happen after preprocessing)
+                        continue;
+                    }
+                }
+            }
+
+            features
+        };
+
+        let dataset = dataset.with_raw_features(raw_features);
 
         Ok((preprocessed_df, dataset))
     }

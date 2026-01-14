@@ -258,7 +258,8 @@ pub struct LinearTrial {
 pub struct TreeTrial {
     pub max_depth: u32,
     pub learning_rate: f32,
-    pub num_rounds: u32,
+    /// Actual number of trees built (after early stopping)
+    pub num_trees: u32,
     pub residual_rmse: f32,
 }
 
@@ -334,6 +335,10 @@ pub struct LttTunerConfig {
     pub learning_rate_values: Vec<f32>,
     /// Num rounds values to try
     pub num_rounds_values: Vec<u32>,
+    /// Subsample ratio values to try (row sampling)
+    pub subsample_values: Vec<f32>,
+    /// Colsample ratio values to try (column sampling per tree)
+    pub colsample_values: Vec<f32>,
 
     // Shrinkage factor tuning (Phase 1.5)
     /// Shrinkage factor values to try for ensemble weighting
@@ -345,6 +350,17 @@ pub struct LttTunerConfig {
     pub extrapolation_damping_values: Vec<f32>,
     /// Enable joint refinement phase
     pub enable_joint_refinement: bool,
+
+    // AutoTuner configuration for tree phase
+    /// Number of iterations for tree phase AutoTuner (progressive zoom)
+    /// - Quick: 1 iteration (grid search only)
+    /// - Standard: 2 iterations (grid + 1 zoom)
+    /// - Thorough: 3+ iterations (grid + multiple zooms)
+    pub tree_tuner_iterations: usize,
+
+    // Output configuration
+    /// Output directory for tuning logs (AutoTuner logs will be in {output_dir}/autotuner/)
+    pub output_dir: Option<std::path::PathBuf>,
 
     /// Seed for reproducibility
     pub seed: u64,
@@ -370,24 +386,35 @@ impl Default for LttTunerConfig {
             // Linear phase: 4×3 = 12 trials
             lambda_values: ltt_defaults::DEFAULT_LAMBDA_GRID.to_vec(),
             l1_ratio_values: ltt_defaults::DEFAULT_L1_RATIO_GRID.to_vec(), // Ridge, ElasticNet, LASSO
-            // Tree phase: 3×3×3 = 27 trials
+            // Tree phase: 3×3×3×3×3 = 243 trials (with subsample and colsample)
             max_depth_values: ltt_defaults::DEFAULT_MAX_DEPTH_GRID.to_vec(),
             learning_rate_values: ltt_defaults::DEFAULT_LR_GRID.to_vec(),
             num_rounds_values: ltt_defaults::DEFAULT_ROUNDS_GRID.to_vec(),
+            subsample_values: ltt_defaults::DEFAULT_SUBSAMPLE_GRID.to_vec(),
+            colsample_values: ltt_defaults::DEFAULT_COLSAMPLE_GRID.to_vec(),
             // Shrinkage factor: 5 values centered around typical optimal (0.5-0.9)
             shrinkage_factor_values: ltt_defaults::DEFAULT_SHRINKAGE_GRID.to_vec(),
             // Extrapolation damping: usually 0 unless OOD is a concern
             extrapolation_damping_values: ltt_defaults::DEFAULT_EXTRAPOLATION_DAMPING_GRID.to_vec(),
             enable_joint_refinement: true,
+            tree_tuner_iterations: 2, // Standard: 2 iterations (grid + 1 zoom)
+            output_dir: None,
             seed: seeds_defaults::DEFAULT_SEED,
         }
     }
 }
 
 impl LttTunerConfig {
+    /// Set the output directory for tuning logs
+    pub fn with_output_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.output_dir = Some(dir);
+        self
+    }
+
     /// Apply a preset configuration.
     pub fn with_preset(self, preset: LttTunerPreset) -> Self {
-        match preset {
+        let output_dir = self.output_dir.clone(); // Preserve output_dir
+        let mut config = match preset {
             LttTunerPreset::Quick => Self {
                 val_ratio: ltt_defaults::DEFAULT_LTT_VAL_RATIO,
                 lambda_values: ltt_defaults::QUICK_LAMBDA_GRID.to_vec(),
@@ -395,11 +422,15 @@ impl LttTunerConfig {
                 max_depth_values: ltt_defaults::QUICK_MAX_DEPTH_GRID.to_vec(),
                 learning_rate_values: ltt_defaults::QUICK_LR_GRID.to_vec(),
                 num_rounds_values: ltt_defaults::QUICK_ROUNDS_GRID.to_vec(),
+                subsample_values: ltt_defaults::QUICK_SUBSAMPLE_GRID.to_vec(),
+                colsample_values: ltt_defaults::QUICK_COLSAMPLE_GRID.to_vec(),
                 // Quick: 3 shrinkage values
                 shrinkage_factor_values: ltt_defaults::QUICK_SHRINKAGE_GRID.to_vec(),
                 extrapolation_damping_values: ltt_defaults::QUICK_EXTRAPOLATION_DAMPING_GRID
                     .to_vec(),
                 enable_joint_refinement: false, // Skip for quick mode
+                tree_tuner_iterations: 2, // Quick: 2 iterations to match regular AutoTuner::Quick
+                output_dir: None,
                 seed: seeds_defaults::DEFAULT_SEED,
             },
             LttTunerPreset::Standard => Self::default(),
@@ -410,11 +441,15 @@ impl LttTunerConfig {
                 max_depth_values: ltt_defaults::THOROUGH_MAX_DEPTH_GRID.to_vec(),
                 learning_rate_values: ltt_defaults::THOROUGH_LR_GRID.to_vec(),
                 num_rounds_values: ltt_defaults::THOROUGH_ROUNDS_GRID.to_vec(),
+                subsample_values: ltt_defaults::THOROUGH_SUBSAMPLE_GRID.to_vec(),
+                colsample_values: ltt_defaults::THOROUGH_COLSAMPLE_GRID.to_vec(),
                 // Thorough: 7 shrinkage values
                 shrinkage_factor_values: ltt_defaults::THOROUGH_SHRINKAGE_GRID.to_vec(),
                 extrapolation_damping_values: ltt_defaults::THOROUGH_EXTRAPOLATION_DAMPING_GRID
                     .to_vec(),
                 enable_joint_refinement: true,
+                tree_tuner_iterations: 3, // Thorough: grid + 2 zoom iterations
+                output_dir: None,
                 seed: seeds_defaults::DEFAULT_SEED,
             },
             LttTunerPreset::ShrinkageOnly => {
@@ -426,10 +461,14 @@ impl LttTunerConfig {
                 config.max_depth_values = vec![tree_defaults.max_depth];
                 config.learning_rate_values = vec![tree_defaults.learning_rate];
                 config.num_rounds_values = vec![tree_defaults.num_rounds];
+                config.subsample_values = vec![tree_defaults.subsample];
+                config.colsample_values = vec![tree_defaults.colsample_bytree];
                 config.enable_joint_refinement = false;
                 config
             }
-        }
+        };
+        config.output_dir = output_dir; // Restore output_dir
+        config
     }
 
     /// Validate configuration parameters
@@ -538,6 +577,7 @@ impl LttTuner {
         features: &[f32],
         num_features: usize,
         targets: &[f32],
+        linear_indices: &[usize],
     ) -> Result<LttTuningResult> {
         // === Comprehensive input validation ===
         self.validate_inputs(features, num_features, targets)?;
@@ -603,10 +643,21 @@ impl LttTuner {
             .zip(linear_train_preds.iter())
             .map(|(&t, &p)| t - best_shrinkage * p)
             .collect();
+        let val_residuals: Vec<f32> = val_targets
+            .iter()
+            .zip(linear_val_preds.iter())
+            .map(|(&t, &p)| t - best_shrinkage * p)
+            .collect();
 
         // === PHASE 2: Tune tree model on shrinkage-adjusted residuals ===
         let phase2_start = Instant::now();
-        let best_tree = self.tune_tree_phase(&train_residuals, &mut history)?;
+        let best_tree = self.tune_tree_phase(
+            &split,
+            &train_residuals,
+            &val_residuals,
+            linear_indices,
+            &mut history,
+        )?;
         phase_times.tree_phase = phase2_start.elapsed();
 
         // === PHASE 3: Joint refinement (extrapolation damping, optional) ===
@@ -617,8 +668,8 @@ impl LttTuner {
             phase_times.joint_phase = phase3_start.elapsed();
         }
 
-        // Compute final RMSE
-        let final_rmse = self.compute_final_rmse(&final_linear, &split)?;
+        // Compute final RMSE (combined LTT: shrinkage*linear + tree)
+        let final_rmse = self.compute_final_rmse(&final_linear, &best_tree, &split)?;
 
         Ok(LttTuningResult {
             linear_params: final_linear,
@@ -1000,86 +1051,157 @@ impl LttTuner {
 
     /// Phase 2: Tune tree model hyperparameters on residuals
     ///
-    /// Uses heuristic scoring based on residual characteristics to select
-    /// optimal tree configuration. This is a simplified version that avoids
-    /// training actual trees during tuning.
+    /// Uses AutoTuner to perform real model training and validation on residuals.
+    /// This replaces the old heuristic scoring approach with proper hyperparameter
+    /// optimization.
     ///
-    /// # Heuristic Strategy
+    /// Trees only use features NOT used by linear model (e.g., categorical features,
+    /// excluding polynomial/interaction features that linear already used).
     ///
-    /// - High variance residuals (std > 1.0):
-    ///   - Prefer deeper trees and more rounds (capture complexity)
-    ///   - Lower learning rate for stability
+    /// # Arguments
     ///
-    /// - Low variance residuals:
-    ///   - Simpler trees suffice
-    ///   - Higher learning rate acceptable
-    ///   - Fewer rounds needed
+    /// * `split` - Train/validation data split (features and original targets)
+    /// * `train_residuals` - Training residuals from linear model (used as targets for tree)
+    /// * `val_residuals` - Validation residuals from linear model
+    /// * `linear_indices` - Feature indices used by linear model
+    /// * `history` - Tuning history to append tree trials to
     ///
-    /// A full implementation would train actual GBDTModel on residuals.
+    /// # Returns
+    ///
+    /// Best tree hyperparameters found by AutoTuner
     fn tune_tree_phase(
         &self,
-        residuals: &[f32],
+        split: &DataSplit,
+        train_residuals: &[f32],
+        val_residuals: &[f32],
+        linear_indices: &[usize],
         history: &mut LttTuningHistory,
     ) -> Result<TreeHyperparams> {
-        let mut best_params = TreeHyperparams::default();
-        let mut best_score = f32::NEG_INFINITY;
+        // Compute tree_indices = all features NOT in linear_indices
+        // Linear model uses polynomial/interaction features → tree uses categorical/other features
+        let all_indices: std::collections::HashSet<usize> =
+            (0..split.num_features).collect();
+        let linear_set: std::collections::HashSet<usize> =
+            linear_indices.iter().copied().collect();
+        let mut tree_indices: Vec<usize> = all_indices
+            .difference(&linear_set)
+            .copied()
+            .collect();
+        tree_indices.sort_unstable(); // Keep deterministic order
 
-        // Compute residual statistics to inform tree param selection
-        let residual_std = crate::analysis::compute_std(residuals);
-        let residual_range = crate::analysis::compute_range(residuals);
-        let is_high_variance = residual_std > ltt_defaults::HIGH_VARIANCE_THRESHOLD;
+        // Create BinnedDatasets with residuals as targets (all features initially)
+        let (train_binned_full, val_binned_full, feature_info_full) =
+            Self::build_probe_binned_datasets(split);
 
-        for &max_depth in &self.config.max_depth_values {
-            for &learning_rate in &self.config.learning_rate_values {
-                for &num_rounds in &self.config.num_rounds_values {
-                    // Compute complexity score based on residual characteristics
-                    let complexity_score = if is_high_variance {
-                        // High variance: prefer deeper trees, more rounds, lower LR
-                        (max_depth as f32 * ltt_defaults::DEPTH_WEIGHT_HIGH_VAR)
-                            + (num_rounds as f32 * ltt_defaults::ROUNDS_WEIGHT_HIGH_VAR)
-                            - (learning_rate * ltt_defaults::LR_PENALTY_HIGH_VAR)
-                    } else {
-                        // Low variance: simpler trees, higher LR, fewer rounds
-                        (max_depth as f32 * ltt_defaults::DEPTH_WEIGHT_LOW_VAR)
-                            + (learning_rate * ltt_defaults::LR_WEIGHT_LOW_VAR)
-                            - (num_rounds as f32 * ltt_defaults::ROUNDS_PENALTY_LOW_VAR)
-                    };
+        // Build full datasets first, then filter to tree_indices
+        let train_dataset_full = BinnedDataset::new(
+            split.train_targets.len(),
+            train_binned_full,
+            train_residuals.to_vec(),
+            feature_info_full.clone(),
+        );
+        let val_dataset_full = BinnedDataset::new(
+            split.val_targets.len(),
+            val_binned_full,
+            val_residuals.to_vec(),
+            feature_info_full,
+        );
 
-                    // Apply penalties for extreme configurations
-                    let depth_penalty = if max_depth > ltt_defaults::MAX_DEPTH_THRESHOLD {
-                        ltt_defaults::EXTREME_CONFIG_PENALTY
-                    } else {
-                        0.0
-                    };
-                    let lr_penalty = if learning_rate < ltt_defaults::MIN_LR_THRESHOLD {
-                        ltt_defaults::EXTREME_CONFIG_PENALTY
-                    } else {
-                        0.0
-                    };
+        // Filter to only tree features (exclude linear model features)
+        let train_dataset = train_dataset_full.subset_features(&tree_indices);
+        let val_dataset = val_dataset_full.subset_features(&tree_indices);
 
-                    let score = complexity_score - depth_penalty - lr_penalty;
-                    let simulated_rmse = residual_range / (1.0 + score.abs());
+        // Configure AutoTuner with tree parameter space
+        use crate::tuner::autotuner::AutoTuner;
+        use crate::tuner::config::{
+            EvalStrategy, OptimizationMetric, ParamBounds, ParameterSpace, TaskType, TunerConfig,
+            TunerPreset, TunableParam,
+        };
 
-                    history.tree_trials.push(TreeTrial {
-                        max_depth,
-                        learning_rate,
-                        num_rounds,
-                        residual_rmse: simulated_rmse,
-                    });
+        // Use SpacePreset::Regression as base, then extend with Colsample
+        // Regression preset includes: MaxDepth, LearningRate, Subsample, Lambda, EntropyWeight
+        // We add:
+        // - Colsample: [0.5, 1.0] - Important feature subsampling regularization
+        //
+        // Note: We do NOT tune NumRounds. Instead, we set a high max (e.g., 1000) and use
+        // early stopping to find the optimal tree count per config. This is standard practice:
+        // early stopping is more adaptive than grid-searching num_rounds.
+        //
+        // LttTunerConfig's grid values (QUICK_LR_GRID=[0.05, 0.1], etc.) are only used
+        // for the initial linear phase grid search, NOT for the tree phase AutoTuner.
+        use crate::tuner::config::SpacePreset;
+        let space = ParameterSpace::with_preset(SpacePreset::Regression)
+            .with_param(
+                TunableParam::Colsample,
+                ParamBounds::continuous(0.5, 1.0),
+                1.0,
+            );
 
-                    if score > best_score {
-                        best_score = score;
-                        best_params = TreeHyperparams {
-                            max_depth,
-                            learning_rate,
-                            num_rounds,
-                            min_child_weight: 1.0,
-                            subsample: 1.0,
-                            colsample_bytree: 1.0,
-                        };
-                    }
-                }
-            }
+        // Map LttTunerPreset to TunerPreset for iteration counts:
+        // - Quick → Quick (2 iterations)
+        // - Standard → Balanced (5 iterations)
+        // - Thorough → Thorough (7 iterations)
+        let tuner_preset = match self.config.tree_tuner_iterations {
+            1 => TunerPreset::SmokeTest, // For testing only
+            2 => TunerPreset::Quick,     // Quick: 2 iterations
+            3..=4 => TunerPreset::Balanced, // Standard: 3-4 iterations → Balanced
+            _ => TunerPreset::Thorough,  // Thorough: 5+ iterations
+        };
+
+        // Configure tuner with custom space + preset settings
+        // Note: When using tune_with_validation(), the validation_ratio is just a dummy value
+        // needed for config validation. It won't actually be used since we provide pre-split data.
+        let mut tuner_config = TunerConfig::new()
+            .with_preset(tuner_preset)
+            .with_space(space) // Override preset's default space
+            .with_eval_strategy(EvalStrategy::Holdout {
+                validation_ratio: 0.2, // Dummy value (won't be used, but must be non-zero for validation)
+                folds: 1,              // Single fold
+            })
+            .with_optimization_metric(OptimizationMetric::ValidationLoss)
+            .with_task_type(TaskType::Regression)
+            .with_iterations(self.config.tree_tuner_iterations) // Override preset iterations if specified
+            .with_parallel(true)
+            .with_seed(self.config.seed)
+            .with_verbose(false); // LttTuner controls verbosity
+
+        // Configure output directory for AutoTuner logs: {output_dir}/autotuner/
+        if let Some(ref output_dir) = self.config.output_dir {
+            let autotuner_dir = output_dir.join("autotuner");
+            tuner_config = tuner_config.with_output_dir(&autotuner_dir);
+        }
+
+        // Create base GBDT config
+        let base_config = GBDTConfig::new()
+            .with_mse_loss()
+            .with_seed(self.config.seed);
+
+        // Run AutoTuner
+        let mut tuner = AutoTuner::<GBDTModel>::new(base_config).with_config(tuner_config);
+        let (best_gbdt_config, tuner_history) =
+            tuner.tune_with_validation(&train_dataset, &val_dataset)?;
+
+        // Extract TreeHyperparams from best GBDTConfig
+        let best_params = TreeHyperparams {
+            max_depth: best_gbdt_config.max_depth as u32,
+            learning_rate: best_gbdt_config.learning_rate,
+            num_rounds: best_gbdt_config.num_rounds as u32,
+            min_child_weight: best_gbdt_config.min_hessian_leaf,
+            subsample: best_gbdt_config.subsample,
+            colsample_bytree: best_gbdt_config.colsample,
+        };
+
+        // Convert AutoTuner history to LttTuningHistory format
+        for trial in tuner_history.trials() {
+            // Extract validation RMSE from trial (val_loss is MSE, need sqrt)
+            let residual_rmse = trial.val_loss.sqrt(); // MSE -> RMSE
+
+            history.tree_trials.push(TreeTrial {
+                max_depth: *trial.params.get("max_depth").unwrap() as u32,
+                learning_rate: *trial.params.get("learning_rate").unwrap(),
+                num_trees: trial.num_trees as u32,
+                residual_rmse,
+            });
         }
 
         Ok(best_params)
@@ -1126,15 +1248,85 @@ impl LttTuner {
         Ok(best_params)
     }
 
-    /// Compute final RMSE with best parameters
+    /// Compute final RMSE with best parameters (full LTT: shrinkage*linear + tree)
     fn compute_final_rmse(
         &self,
         linear_params: &LinearHyperparams,
+        tree_params: &TreeHyperparams,
         split: &DataSplit,
     ) -> Result<f32> {
-        let config = linear_params.to_config();
-        let eval_result = Self::evaluate_linear_config(config, split)?;
-        Ok(eval_result.rmse)
+        // Evaluate full LTT model: pred = shrinkage_factor * linear_pred + tree_pred
+
+        // 1. Train linear model and get predictions
+        let linear_config = linear_params.to_config();
+        let mut linear_booster = LinearBooster::new(split.num_features, linear_config);
+
+        let _train_preds = linear_booster.fit_direct(
+            split.train_features,
+            split.num_features,
+            split.train_targets,
+        )?;
+
+        let linear_val_preds = linear_booster.predict_batch(split.val_features, split.num_features);
+
+        // 2. Compute shrinkage-adjusted residuals for tree training
+        let shrinkage = linear_params.shrinkage_factor;
+        let train_residuals: Vec<f32> = split
+            .train_targets
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| {
+                let linear_pred = linear_booster.predict_row(split.train_features, split.num_features, i);
+                t - shrinkage * linear_pred
+            })
+            .collect();
+
+        // 3. Build binned dataset for tree training
+        let (train_binned, val_binned, feature_info) = Self::build_probe_binned_datasets(split);
+        let train_dataset = BinnedDataset::new(
+            split.train_targets.len(),
+            train_binned,
+            train_residuals,
+            feature_info.clone(),
+        );
+
+        // 4. Train tree model
+        let tree_config = GBDTConfig::new()
+            .with_max_depth(tree_params.max_depth as usize)
+            .with_learning_rate(tree_params.learning_rate)
+            .with_num_rounds(tree_params.num_rounds as usize)
+            .with_min_hessian_leaf(tree_params.min_child_weight)
+            .with_subsample(tree_params.subsample)?
+            .with_colsample(tree_params.colsample_bytree)?
+            .with_mse_loss();
+        let tree_model = GBDTModel::train_binned(&train_dataset, tree_config)?;
+
+        // 5. Get tree predictions on validation
+        let val_dataset = BinnedDataset::new(
+            split.val_targets.len(),
+            val_binned,
+            vec![0.0; split.val_targets.len()], // dummy targets
+            feature_info,
+        );
+        let tree_val_preds = tree_model.predict(&val_dataset);
+
+        // 6. Combine predictions: shrinkage*linear + tree
+        let combined_preds: Vec<f32> = linear_val_preds
+            .iter()
+            .zip(tree_val_preds.iter())
+            .map(|(&lp, &tp)| shrinkage * lp + tp)
+            .collect();
+
+        // 7. Compute RMSE
+        let mse: f32 = split
+            .val_targets
+            .iter()
+            .zip(combined_preds.iter())
+            .map(|(&t, &p)| (t - p).powi(2))
+            .sum::<f32>()
+            / split.val_targets.len() as f32;
+
+        Ok(mse.sqrt())
     }
 }
 
@@ -1220,8 +1412,9 @@ mod tests {
         let tuner = LttTuner::with_defaults();
         let features = vec![1.0, 2.0, 3.0];
         let targets: Vec<f32> = vec![];
+        let linear_indices: Vec<usize> = vec![0];
 
-        let result = tuner.tune(&features, 1, &targets);
+        let result = tuner.tune(&features, 1, &targets, &linear_indices);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty"));
     }
@@ -1231,8 +1424,9 @@ mod tests {
         let tuner = LttTuner::with_defaults();
         let features = vec![1.0, 2.0, 3.0];
         let targets = vec![1.0, 2.0, 3.0];
+        let linear_indices: Vec<usize> = vec![];
 
-        let result = tuner.tune(&features, 0, &targets);
+        let result = tuner.tune(&features, 0, &targets, &linear_indices);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("num_features"));
     }
@@ -1242,8 +1436,9 @@ mod tests {
         let tuner = LttTuner::with_defaults();
         let features = vec![1.0, 2.0, 3.0]; // 3 elements
         let targets = vec![1.0, 2.0]; // 2 rows, but features suggest 3×1
+        let linear_indices: Vec<usize> = vec![0];
 
-        let result = tuner.tune(&features, 1, &targets);
+        let result = tuner.tune(&features, 1, &targets, &linear_indices);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("mismatch"));
     }
@@ -1265,9 +1460,10 @@ mod tests {
 
         let config = LttTunerConfig::default().with_preset(LttTunerPreset::Quick);
         let tuner = LttTuner::new(config);
+        let linear_indices: Vec<usize> = (0..num_features).collect();
 
         let result = tuner
-            .tune(&features, num_features, &targets)
+            .tune(&features, num_features, &targets, &linear_indices)
             .expect("LTT tuner should successfully fit linear data");
 
         // Should find reasonable hyperparameters

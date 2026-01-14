@@ -693,15 +693,16 @@ pub use learner::{
     LinearTreeConfig, TreeBooster, TreeConfig, TreePreset, WeakLearner,
 };
 pub use loss::{
-    sigmoid, softmax, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss, MultiLabelFocalLoss,
-    MultiLabelLogLoss, PseudoHuberLoss,
+    sigmoid, softmax, BetaLoss, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss,
+    MultiLabelFocalLoss, MultiLabelLogLoss, PseudoHuberLoss,
 };
 pub use model::{
     AutoBuilder, AutoConfig, AutoEnsembleConfig, AutoEnsembleMethod, AutoModel,
     AutoModelUpdateReport, BoostingMode, BuildPhaseTimes, BuildResult, ConsoleProgress,
-    IncrementalUpdateReport, ModeSelection, ProgressCallback, ProgressUpdate, QuietProgress,
-    StackingStrategy, TrainingPhase, TreeTunerPreset, TuningLevel, UniversalConfig, UniversalModel,
-    UniversalPreset,
+    CustomFeature, FeatureOp, FormulaBuilder, IncrementalUpdateReport, ModeSelection,
+    Pipeline, PipelineStep, PipelineStepKind, ProgressCallback, ProgressUpdate, QuietProgress,
+    StackingStrategy, TargetBoundConfig, TrainingPhase, TreeTunerPreset, TuningLevel,
+    UniversalConfig, UniversalModel, UniversalPreset,
 };
 pub use monitoring::{AlertLevel, CVHoldoutTracker, ShiftDetector, ShiftResult};
 
@@ -711,9 +712,10 @@ pub use analysis::{
     AnalysisReport, Confidence, DatasetAnalysis, Recommendation,
 };
 pub use preprocessing::{
-    EncodingMap, FrequencyEncoder, ImputeStrategy, IndicatorImputer, LabelEncoder, MinMaxScaler,
-    OneHotEncoder, OrderedTargetEncoder, PipelineBuilder, Preprocessor, RobustScaler, Scaler,
-    SimpleImputer, SmartPreprocessConfig, SmartPreprocessPreset, StandardScaler, UnknownStrategy,
+    EncodingMap, FrequencyEncoder, IdentityTransform, ImputeStrategy, IndicatorImputer,
+    LabelEncoder, LogitTransform, MinMaxScaler, OneHotEncoder, OrderedTargetEncoder,
+    PipelineBuilder, Preprocessor, RobustScaler, Scaler, SimpleImputer, SmartPreprocessConfig,
+    SmartPreprocessPreset, StandardScaler, TargetTransform, TargetTransformKind, UnknownStrategy,
     YeoJohnsonTransform,
 };
 pub use tree::{InteractionConstraints, MonotonicConstraint};
@@ -739,6 +741,9 @@ pub enum TreeBoostError {
 
     #[error("Backend error: {0}")]
     Backend(String),
+
+    #[error("Pipeline error: {0}")]
+    Pipeline(String),
 
     #[error("Polars error: {0}")]
     Polars(#[from] polars::error::PolarsError),
