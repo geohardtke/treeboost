@@ -344,9 +344,12 @@ impl ColumnProfile {
 
         let is_constant = cardinality <= 1;
 
-        // ID-like detection: high cardinality + monotonic (for numeric)
+        // ID-like detection: Use precise row ID check for numeric columns
+        // This avoids false positives where valid continuous features (e.g., [0.0, 0.1, 0.2, ...])
+        // were incorrectly classified as IDs just because they were monotonic and high-cardinality
         let is_id_like = if dtype == ColumnDataType::Numeric && cardinality_ratio > 0.9 {
-            Self::check_monotonic(column)
+            // Check both data pattern AND column name to avoid false positives
+            Self::check_is_row_id(column) && Self::has_id_like_name(&name)
         } else {
             cardinality_ratio > 0.95 // For non-numeric, just use very high cardinality
         };
@@ -458,8 +461,45 @@ impl ColumnProfile {
         }
     }
 
-    /// Check if column values are monotonically increasing
-    fn check_monotonic(column: &Column) -> bool {
+    /// Check if column name suggests it's an ID column
+    ///
+    /// Common patterns: id, ID, index, idx, row_id, _id, etc.
+    fn has_id_like_name(name: &str) -> bool {
+        let lower = name.to_lowercase();
+
+        // Exact matches
+        if lower == "id"
+            || lower == "index"
+            || lower == "idx"
+            || lower == "row"
+            || lower == "row_id"
+            || lower == "rowid"
+            || lower == "row_num"
+            || lower == "row_number"
+        {
+            return true;
+        }
+
+        // Patterns
+        if lower.ends_with("_id")
+            || lower.ends_with("id")
+            || lower.starts_with("id_")
+            || lower.ends_with("_index")
+        {
+            return true;
+        }
+
+        false
+    }
+
+    /// Check if column is a row ID (sequential integers starting from 0 or 1)
+    ///
+    /// True row IDs have these properties:
+    /// - Integer values (or floats with .0)
+    /// - Start from 0 or 1
+    /// - Increment by exactly 1
+    /// - Strongly correlated with row index
+    fn check_is_row_id(column: &Column) -> bool {
         let Ok(values) = column.cast(&PolarsDataType::Float64) else {
             return false;
         };
@@ -467,28 +507,49 @@ impl ColumnProfile {
             return false;
         };
 
-        let mut prev: Option<f64> = None;
-        let mut increasing = true;
+        let mut row_idx = 0;
+        let mut expected_val = None;
+        let mut is_sequential = true;
         let mut sample_count = 0;
-        let max_samples = 1000; // Sample for efficiency
+        let max_samples = 1000;
 
         for opt_val in ca.into_iter() {
             if sample_count >= max_samples {
                 break;
             }
+
             if let Some(val) = opt_val {
-                if let Some(p) = prev {
-                    if val < p {
-                        increasing = false;
+                // Check if value is an integer (allow small floating point error)
+                if (val - val.round()).abs() > 1e-9 {
+                    return false; // Not an integer, can't be a row ID
+                }
+
+                let int_val = val.round() as i64;
+
+                // Initialize expected value on first sample
+                if expected_val.is_none() {
+                    // Row IDs typically start from 0 or 1
+                    if int_val != row_idx && int_val != row_idx + 1 {
+                        return false;
+                    }
+                    expected_val = Some(int_val);
+                }
+
+                // Check if value matches expected sequential value
+                if let Some(expected) = expected_val {
+                    let expected_at_this_row = expected + row_idx;
+                    if int_val != expected_at_this_row {
+                        is_sequential = false;
                         break;
                     }
                 }
-                prev = Some(val);
+
                 sample_count += 1;
             }
+            row_idx += 1;
         }
 
-        increasing && sample_count > 10
+        is_sequential && sample_count > 10
     }
 
     /// Check if this column should be dropped
