@@ -1079,14 +1079,9 @@ impl LttTuner {
     ) -> Result<TreeHyperparams> {
         // Compute tree_indices = all features NOT in linear_indices
         // Linear model uses polynomial/interaction features → tree uses categorical/other features
-        let all_indices: std::collections::HashSet<usize> =
-            (0..split.num_features).collect();
-        let linear_set: std::collections::HashSet<usize> =
-            linear_indices.iter().copied().collect();
-        let mut tree_indices: Vec<usize> = all_indices
-            .difference(&linear_set)
-            .copied()
-            .collect();
+        let all_indices: std::collections::HashSet<usize> = (0..split.num_features).collect();
+        let linear_set: std::collections::HashSet<usize> = linear_indices.iter().copied().collect();
+        let mut tree_indices: Vec<usize> = all_indices.difference(&linear_set).copied().collect();
         tree_indices.sort_unstable(); // Keep deterministic order
 
         // Create BinnedDatasets with residuals as targets (all features initially)
@@ -1114,8 +1109,8 @@ impl LttTuner {
         // Configure AutoTuner with tree parameter space
         use crate::tuner::autotuner::AutoTuner;
         use crate::tuner::config::{
-            EvalStrategy, OptimizationMetric, ParamBounds, ParameterSpace, TaskType, TunerConfig,
-            TunerPreset, TunableParam,
+            EvalStrategy, OptimizationMetric, ParamBounds, ParameterSpace, TaskType, TunableParam,
+            TunerConfig, TunerPreset,
         };
 
         // Use SpacePreset::Regression as base, then extend with Colsample
@@ -1130,22 +1125,21 @@ impl LttTuner {
         // LttTunerConfig's grid values (QUICK_LR_GRID=[0.05, 0.1], etc.) are only used
         // for the initial linear phase grid search, NOT for the tree phase AutoTuner.
         use crate::tuner::config::SpacePreset;
-        let space = ParameterSpace::with_preset(SpacePreset::Regression)
-            .with_param(
-                TunableParam::Colsample,
-                ParamBounds::continuous(0.5, 1.0),
-                1.0,
-            );
+        let space = ParameterSpace::with_preset(SpacePreset::Regression).with_param(
+            TunableParam::Colsample,
+            ParamBounds::continuous(0.5, 1.0),
+            1.0,
+        );
 
         // Map LttTunerPreset to TunerPreset for iteration counts:
         // - Quick → Quick (2 iterations)
         // - Standard → Balanced (5 iterations)
         // - Thorough → Thorough (7 iterations)
         let tuner_preset = match self.config.tree_tuner_iterations {
-            1 => TunerPreset::SmokeTest, // For testing only
-            2 => TunerPreset::Quick,     // Quick: 2 iterations
+            1 => TunerPreset::SmokeTest,    // For testing only
+            2 => TunerPreset::Quick,        // Quick: 2 iterations
             3..=4 => TunerPreset::Balanced, // Standard: 3-4 iterations → Balanced
-            _ => TunerPreset::Thorough,  // Thorough: 5+ iterations
+            _ => TunerPreset::Thorough,     // Thorough: 5+ iterations
         };
 
         // Configure tuner with custom space + preset settings
@@ -1276,7 +1270,8 @@ impl LttTuner {
             .iter()
             .enumerate()
             .map(|(i, &t)| {
-                let linear_pred = linear_booster.predict_row(split.train_features, split.num_features, i);
+                let linear_pred =
+                    linear_booster.predict_row(split.train_features, split.num_features, i);
                 t - shrinkage * linear_pred
             })
             .collect();

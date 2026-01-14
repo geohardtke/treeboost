@@ -23,9 +23,6 @@ pub use config::{
     FeatureEngineeringMode, PreprocessingMode, TargetBoundConfig, TreeTunerConfig, TreeTunerPreset,
     TreeTuningResult, TuningLevel,
 };
-pub use progress::{
-    ConsoleProgress, ProgressCallback, ProgressUpdate, QuietProgress, TrainingPhase,
-};
 pub use pipeline::{
     BinNumericFeaturesState, BinNumericFeaturesStep, CategoryEncoding, CustomFeature,
     CustomFeaturesStep, DropColumnsStep, EncodeCategoricalsState, EncodeCategoricalsStep,
@@ -36,6 +33,9 @@ pub use pipeline::{
 pub use predictor::{
     EnsemblePredictor, EnsembleStrategy, FormulaPredictor, GatedPredictor, GatingConfig,
     ModelPredictor,
+};
+pub use progress::{
+    ConsoleProgress, ProgressCallback, ProgressUpdate, QuietProgress, TrainingPhase,
 };
 pub use universal::{
     BoostingMode, IncrementalUpdateReport, ModeSelection, StackingStrategy, UniversalConfig,

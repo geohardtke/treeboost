@@ -282,11 +282,9 @@ impl GBDTModel {
 
         for tree in &self.trees {
             if let Some(scalar_tree) = tree.try_as_scalar() {
-                self.tree_shap_path(
-                    scalar_tree,
-                    &mut shap_values,
-                    |feat_idx| dataset.get_bin(sample_idx, feat_idx),
-                );
+                self.tree_shap_path(scalar_tree, &mut shap_values, |feat_idx| {
+                    dataset.get_bin(sample_idx, feat_idx)
+                });
             }
         }
 

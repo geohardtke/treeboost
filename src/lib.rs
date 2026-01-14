@@ -701,10 +701,10 @@ pub use model::{
     AutoBuilder, AutoConfig, AutoEnsembleConfig, AutoEnsembleMethod, AutoModel,
     AutoModelUpdateReport, BoostingMode, BuildPhaseTimes, BuildResult, ConsoleProgress,
     CustomFeature, EnsemblePredictor, EnsembleStrategy, FeatureOp, FormulaBuilder,
-    FormulaPredictor, GatedPredictor, GatingConfig, IncrementalUpdateReport, ModelPredictor,
-    ModeSelection, Pipeline, PipelineStep, PipelineStepKind, ProgressCallback,
-    ProgressUpdate, QuietProgress, StackingStrategy, TargetBoundConfig, TrainingPhase,
-    TreeTunerPreset, TuningLevel, UniversalConfig, UniversalModel, UniversalPreset,
+    FormulaPredictor, GatedPredictor, GatingConfig, IncrementalUpdateReport, ModeSelection,
+    ModelPredictor, Pipeline, PipelineStep, PipelineStepKind, ProgressCallback, ProgressUpdate,
+    QuietProgress, StackingStrategy, TargetBoundConfig, TrainingPhase, TreeTunerPreset,
+    TuningLevel, UniversalConfig, UniversalModel, UniversalPreset,
 };
 pub use monitoring::{AlertLevel, CVHoldoutTracker, ShiftDetector, ShiftResult};
 

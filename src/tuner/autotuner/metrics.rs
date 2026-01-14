@@ -22,7 +22,11 @@ use super::types::BINARY_CLASSIFICATION_THRESHOLD;
 /// alternative evaluation metric.
 ///
 /// Returns `None` for regression tasks or if predictions/targets are misaligned.
-pub(super) fn compute_f1_score(task_type: &TaskType, predictions: &[f32], targets: &[f32]) -> Option<f32> {
+pub(super) fn compute_f1_score(
+    task_type: &TaskType,
+    predictions: &[f32],
+    targets: &[f32],
+) -> Option<f32> {
     // Only compute for binary classification (use TunerConfig's task_type)
     if !task_type.is_binary() {
         return None;

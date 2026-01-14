@@ -3,9 +3,7 @@
 //! This module provides a fluent API for configuring AutoTuner instances
 //! with various options like search space, iterations, evaluation strategy, etc.
 
-use crate::tuner::config::{
-    EvalStrategy, ParameterSpace, TunerConfig,
-};
+use crate::tuner::config::{EvalStrategy, ParameterSpace, TunerConfig};
 use crate::tuner::traits::TunableModel;
 use crate::tuner::trial::TrialResult;
 
@@ -33,7 +31,8 @@ impl<M: TunableModel> AutoTuner<M> {
     /// Set the tuner configuration
     pub fn with_config(mut self, config: TunerConfig) -> Self {
         // Update history to use the configured optimization metric
-        self.history = crate::tuner::history::SearchHistory::with_metric(config.optimization_metric);
+        self.history =
+            crate::tuner::history::SearchHistory::with_metric(config.optimization_metric);
         self.config = config;
         self
     }

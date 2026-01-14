@@ -117,10 +117,7 @@ impl BetaLoss {
             )));
         }
 
-        Ok(Self {
-            phi,
-            epsilon: 1e-7,
-        })
+        Ok(Self { phi, epsilon: 1e-7 })
     }
 
     /// Create BetaLoss with custom epsilon for numerical stability
@@ -200,7 +197,8 @@ impl BetaLoss {
         let log_gamma_beta = Self::log_gamma(beta);
         let log_gamma_phi = Self::log_gamma(self.phi);
 
-        log_gamma_alpha + log_gamma_beta - log_gamma_phi
+        log_gamma_alpha + log_gamma_beta
+            - log_gamma_phi
             - (alpha - 1.0) * y_safe.ln()
             - (beta - 1.0) * (1.0 - y_safe).ln()
     }
@@ -344,11 +342,7 @@ mod tests {
     fn test_digamma_values() {
         // Test known values (approximate)
         let psi_1 = BetaLoss::digamma(1.0);
-        assert!(
-            (psi_1 + 0.5772).abs() < 0.01,
-            "ψ(1) ≈ -γ, got {}",
-            psi_1
-        );
+        assert!((psi_1 + 0.5772).abs() < 0.01, "ψ(1) ≈ -γ, got {}", psi_1);
 
         let psi_2 = BetaLoss::digamma(2.0);
         assert!(

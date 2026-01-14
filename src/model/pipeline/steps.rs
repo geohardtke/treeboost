@@ -49,8 +49,8 @@ use super::PipelineStep;
 use crate::dataset::binning::QuantileBinner;
 use crate::encoding::{CategoryFilter, CategoryMapping, EncodingMap, OrderedTargetEncoder};
 use crate::features::{
-    PolynomialGenerator, InteractionGenerator, RatioGenerator,
-    dataframe::{apply_polynomial_features, apply_interaction_features, apply_ratio_features},
+    dataframe::{apply_interaction_features, apply_polynomial_features, apply_ratio_features},
+    InteractionGenerator, PolynomialGenerator, RatioGenerator,
 };
 use crate::preprocessing::TargetTransformKind;
 use crate::{Result, TreeBoostError};
@@ -147,12 +147,16 @@ pub struct EncodeCategoricalsState {
 
 impl EncodeCategoricalsState {
     pub fn new() -> Self {
-        Self { encodings: Vec::new() }
+        Self {
+            encodings: Vec::new(),
+        }
     }
 
     pub fn from_step(step: &EncodeCategoricalsStep) -> Self {
         Self {
-            encodings: step.encodings.iter()
+            encodings: step
+                .encodings
+                .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
         }
@@ -160,9 +164,7 @@ impl EncodeCategoricalsState {
 
     pub fn to_step(&self) -> EncodeCategoricalsStep {
         let mut step = EncodeCategoricalsStep::new();
-        step.encodings = self.encodings.iter()
-            .cloned()
-            .collect();
+        step.encodings = self.encodings.iter().cloned().collect();
         step
     }
 
@@ -205,7 +207,9 @@ impl BinNumericFeaturesState {
     pub fn from_step(step: &BinNumericFeaturesStep) -> Self {
         Self {
             num_bins: step.num_bins,
-            boundaries: step.boundaries.iter()
+            boundaries: step
+                .boundaries
+                .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
         }
@@ -213,9 +217,7 @@ impl BinNumericFeaturesState {
 
     pub fn to_step(&self) -> BinNumericFeaturesStep {
         let mut step = BinNumericFeaturesStep::new(self.num_bins);
-        step.boundaries = self.boundaries.iter()
-            .cloned()
-            .collect();
+        step.boundaries = self.boundaries.iter().cloned().collect();
         step
     }
 
@@ -257,7 +259,11 @@ impl DropColumnsStep {
         }
 
         // Drop columns that exist in the DataFrame (ignore missing ones)
-        let df_cols: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+        let df_cols: Vec<String> = df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let existing_cols: Vec<String> = self
             .columns
             .iter()
@@ -278,7 +284,9 @@ impl DropColumnsStep {
 // ============================================================================
 
 /// Trigonometric function type for feature engineering
-#[derive(Debug, Clone, Copy, PartialEq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
+)]
 pub enum TrigFunc {
     Sin,
     Cos,
@@ -369,7 +377,9 @@ impl LutMapping {
 
     /// Get the output column name
     pub fn output_name(&self) -> String {
-        self.name.clone().unwrap_or_else(|| format!("{}_lut", self.column))
+        self.name
+            .clone()
+            .unwrap_or_else(|| format!("{}_lut", self.column))
     }
 
     /// Get the numeric value for a category
@@ -543,13 +553,19 @@ impl PipelineStep for EngineerFeaturesStep {
 
     fn serialize_state(&self) -> Result<serde_json::Value> {
         Ok(serde_json::to_value(self).map_err(|e| {
-            TreeBoostError::Serialization(format!("Failed to serialize EngineerFeaturesStep: {}", e))
+            TreeBoostError::Serialization(format!(
+                "Failed to serialize EngineerFeaturesStep: {}",
+                e
+            ))
         })?)
     }
 
     fn deserialize_state(&mut self, state: serde_json::Value) -> Result<()> {
         let deserialized: Self = serde_json::from_value(state).map_err(|e| {
-            TreeBoostError::Serialization(format!("Failed to deserialize EngineerFeaturesStep: {}", e))
+            TreeBoostError::Serialization(format!(
+                "Failed to deserialize EngineerFeaturesStep: {}",
+                e
+            ))
         })?;
         *self = deserialized;
         Ok(())
@@ -622,7 +638,10 @@ pub struct FeatureExpr {
 impl FeatureExpr {
     /// Create from a single leaf operation
     fn leaf(op: FlatOp) -> Self {
-        Self { ops: vec![op], root: 0 }
+        Self {
+            ops: vec![op],
+            root: 0,
+        }
     }
 
     /// Add an operation and return its index
@@ -642,7 +661,11 @@ impl FeatureExpr {
                 FlatOp::Mul(l, r) => FlatOp::Mul(l + offset, r + offset),
                 FlatOp::Div(l, r) => FlatOp::Div(l + offset, r + offset),
                 FlatOp::Abs(e) => FlatOp::Abs(e + offset),
-                FlatOp::Clamp { expr, min, max } => FlatOp::Clamp { expr: expr + offset, min, max },
+                FlatOp::Clamp { expr, min, max } => FlatOp::Clamp {
+                    expr: expr + offset,
+                    min,
+                    max,
+                },
                 other => other, // Leaf ops don't have indices
             };
             self.ops.push(remapped);
@@ -693,66 +716,89 @@ impl FeatureExpr {
                 FlatOp::Div(l, r) => {
                     let lv = eval_op(*l, ops, cache, df, n)?;
                     let rv = eval_op(*r, ops, cache, df, n)?;
-                    lv.iter().zip(rv.iter()).map(|(a, b)| {
-                        if b.abs() < 1e-10 { 0.0 } else { a / b }
-                    }).collect()
+                    lv.iter()
+                        .zip(rv.iter())
+                        .map(|(a, b)| if b.abs() < 1e-10 { 0.0 } else { a / b })
+                        .collect()
                 }
-                FlatOp::Lut { column, mapping, default } => {
+                FlatOp::Lut {
+                    column,
+                    mapping,
+                    default,
+                } => {
                     let series = df.column(column)?;
                     let str_series = series.cast(&DataType::String)?;
                     let str_chunked = str_series.str()?;
-                    str_chunked.into_iter().map(|opt| {
-                        let cat = opt.unwrap_or("");
-                        mapping.iter()
-                            .find(|(k, _)| k == cat)
-                            .map(|(_, v)| *v)
-                            .unwrap_or(*default)
-                    }).collect()
+                    str_chunked
+                        .into_iter()
+                        .map(|opt| {
+                            let cat = opt.unwrap_or("");
+                            mapping
+                                .iter()
+                                .find(|(k, _)| k == cat)
+                                .map(|(_, v)| *v)
+                                .unwrap_or(*default)
+                        })
+                        .collect()
                 }
                 FlatOp::Sin { column, period } => {
                     let series = df.column(column)?;
                     let casted = series.cast(&DataType::Float64)?;
                     let values = casted.f64()?;
                     let two_pi = 2.0 * std::f64::consts::PI;
-                    values.into_iter().map(|v| {
-                        (two_pi * v.unwrap_or(0.0) / period).sin()
-                    }).collect()
+                    values
+                        .into_iter()
+                        .map(|v| (two_pi * v.unwrap_or(0.0) / period).sin())
+                        .collect()
                 }
                 FlatOp::Cos { column, period } => {
                     let series = df.column(column)?;
                     let casted = series.cast(&DataType::Float64)?;
                     let values = casted.f64()?;
                     let two_pi = 2.0 * std::f64::consts::PI;
-                    values.into_iter().map(|v| {
-                        (two_pi * v.unwrap_or(0.0) / period).cos()
-                    }).collect()
+                    values
+                        .into_iter()
+                        .map(|v| (two_pi * v.unwrap_or(0.0) / period).cos())
+                        .collect()
                 }
                 FlatOp::Log1p(column) => {
                     let series = df.column(column)?;
                     let casted = series.cast(&DataType::Float64)?;
                     let values = casted.f64()?;
-                    values.into_iter().map(|v| (1.0 + v.unwrap_or(0.0)).ln()).collect()
+                    values
+                        .into_iter()
+                        .map(|v| (1.0 + v.unwrap_or(0.0)).ln())
+                        .collect()
                 }
                 FlatOp::Square(column) => {
                     let series = df.column(column)?;
                     let casted = series.cast(&DataType::Float64)?;
                     let values = casted.f64()?;
-                    values.into_iter().map(|v| {
-                        let x = v.unwrap_or(0.0);
-                        x * x
-                    }).collect()
+                    values
+                        .into_iter()
+                        .map(|v| {
+                            let x = v.unwrap_or(0.0);
+                            x * x
+                        })
+                        .collect()
                 }
                 FlatOp::Sqrt(column) => {
                     let series = df.column(column)?;
                     let casted = series.cast(&DataType::Float64)?;
                     let values = casted.f64()?;
-                    values.into_iter().map(|v| v.unwrap_or(0.0).max(0.0).sqrt()).collect()
+                    values
+                        .into_iter()
+                        .map(|v| v.unwrap_or(0.0).max(0.0).sqrt())
+                        .collect()
                 }
                 FlatOp::Pow(column, power) => {
                     let series = df.column(column)?;
                     let casted = series.cast(&DataType::Float64)?;
                     let values = casted.f64()?;
-                    values.into_iter().map(|v| v.unwrap_or(0.0).powf(*power)).collect()
+                    values
+                        .into_iter()
+                        .map(|v| v.unwrap_or(0.0).powf(*power))
+                        .collect()
                 }
                 FlatOp::Abs(e) => {
                     let ev = eval_op(*e, ops, cache, df, n)?;
@@ -783,12 +829,16 @@ pub struct FeatureOp {
 impl FeatureOp {
     /// Create a column reference
     pub fn col(name: impl Into<String>) -> Self {
-        Self { expr: FeatureExpr::leaf(FlatOp::Col(name.into())) }
+        Self {
+            expr: FeatureExpr::leaf(FlatOp::Col(name.into())),
+        }
     }
 
     /// Create a constant
     pub fn constant(value: f64) -> Self {
-        Self { expr: FeatureExpr::leaf(FlatOp::Const(value)) }
+        Self {
+            expr: FeatureExpr::leaf(FlatOp::Const(value)),
+        }
     }
 
     /// Create a LUT mapping
@@ -798,49 +848,71 @@ impl FeatureOp {
                 column: column.into(),
                 mapping: mapping.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
                 default: 0.0,
-            })
+            }),
         }
     }
 
     /// Create a LUT with custom default
-    pub fn lut_with_default(column: impl Into<String>, mapping: &[(&str, f64)], default: f64) -> Self {
+    pub fn lut_with_default(
+        column: impl Into<String>,
+        mapping: &[(&str, f64)],
+        default: f64,
+    ) -> Self {
         Self {
             expr: FeatureExpr::leaf(FlatOp::Lut {
                 column: column.into(),
                 mapping: mapping.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
                 default,
-            })
+            }),
         }
     }
 
     /// Sin: sin(2π * col / period)
     pub fn sin(column: impl Into<String>, period: f64) -> Self {
-        Self { expr: FeatureExpr::leaf(FlatOp::Sin { column: column.into(), period }) }
+        Self {
+            expr: FeatureExpr::leaf(FlatOp::Sin {
+                column: column.into(),
+                period,
+            }),
+        }
     }
 
     /// Cos: cos(2π * col / period)
     pub fn cos(column: impl Into<String>, period: f64) -> Self {
-        Self { expr: FeatureExpr::leaf(FlatOp::Cos { column: column.into(), period }) }
+        Self {
+            expr: FeatureExpr::leaf(FlatOp::Cos {
+                column: column.into(),
+                period,
+            }),
+        }
     }
 
     /// Log1p: log(1 + col)
     pub fn log1p(column: impl Into<String>) -> Self {
-        Self { expr: FeatureExpr::leaf(FlatOp::Log1p(column.into())) }
+        Self {
+            expr: FeatureExpr::leaf(FlatOp::Log1p(column.into())),
+        }
     }
 
     /// Square: col^2
     pub fn square(column: impl Into<String>) -> Self {
-        Self { expr: FeatureExpr::leaf(FlatOp::Square(column.into())) }
+        Self {
+            expr: FeatureExpr::leaf(FlatOp::Square(column.into())),
+        }
     }
 
     /// Sqrt: sqrt(col)
     pub fn sqrt(column: impl Into<String>) -> Self {
-        Self { expr: FeatureExpr::leaf(FlatOp::Sqrt(column.into())) }
+        Self {
+            expr: FeatureExpr::leaf(FlatOp::Sqrt(column.into())),
+        }
     }
 
     /// Power: col^power
     pub fn pow(column: impl Into<String>, power: f64) -> Self {
-        Self { expr: FeatureExpr::leaf(FlatOp::Pow(column.into(), power)) }
+        Self {
+            expr: FeatureExpr::leaf(FlatOp::Pow(column.into(), power)),
+        }
     }
 
     /// Multiply column by constant (convenience)
@@ -893,7 +965,11 @@ impl FeatureOp {
 
     /// Clamp to [min, max]
     pub fn clamp(mut self, min: f64, max: f64) -> Self {
-        let new_root = self.expr.push(FlatOp::Clamp { expr: self.expr.root, min, max });
+        let new_root = self.expr.push(FlatOp::Clamp {
+            expr: self.expr.root,
+            min,
+            max,
+        });
         self.expr.root = new_root;
         self
     }
@@ -1068,7 +1144,10 @@ impl PipelineStep for CustomFeaturesStep {
 
     fn deserialize_state(&mut self, state: serde_json::Value) -> Result<()> {
         let deserialized: Self = serde_json::from_value(state).map_err(|e| {
-            TreeBoostError::Serialization(format!("Failed to deserialize CustomFeaturesStep: {}", e))
+            TreeBoostError::Serialization(format!(
+                "Failed to deserialize CustomFeaturesStep: {}",
+                e
+            ))
         })?;
         *self = deserialized;
         Ok(())
@@ -1137,13 +1216,19 @@ impl PipelineStep for EngineerTimeSeriesFeaturesStep {
 
     fn serialize_state(&self) -> Result<serde_json::Value> {
         Ok(serde_json::to_value(self).map_err(|e| {
-            TreeBoostError::Serialization(format!("Failed to serialize EngineerTimeSeriesFeaturesStep: {}", e))
+            TreeBoostError::Serialization(format!(
+                "Failed to serialize EngineerTimeSeriesFeaturesStep: {}",
+                e
+            ))
         })?)
     }
 
     fn deserialize_state(&mut self, state: serde_json::Value) -> Result<()> {
         let deserialized: Self = serde_json::from_value(state).map_err(|e| {
-            TreeBoostError::Serialization(format!("Failed to deserialize EngineerTimeSeriesFeaturesStep: {}", e))
+            TreeBoostError::Serialization(format!(
+                "Failed to deserialize EngineerTimeSeriesFeaturesStep: {}",
+                e
+            ))
         })?;
         *self = deserialized;
         Ok(())
@@ -1186,7 +1271,10 @@ impl EncodeCategoricalsStep {
         // Cast to String handles both String and Categorical types
         let str_series = series.cast(&DataType::String)?;
         let str_chunked = str_series.str()?;
-        Ok(str_chunked.into_iter().map(|opt| opt.unwrap_or("").to_string()).collect())
+        Ok(str_chunked
+            .into_iter()
+            .map(|opt| opt.unwrap_or("").to_string())
+            .collect())
     }
 }
 
@@ -1207,12 +1295,7 @@ impl PipelineStep for EncodeCategoricalsStep {
         let categorical_columns: Vec<String> = df
             .get_columns()
             .iter()
-            .filter(|col| {
-                matches!(
-                    col.dtype(),
-                    DataType::String | DataType::Categorical(_, _)
-                )
-            })
+            .filter(|col| matches!(col.dtype(), DataType::String | DataType::Categorical(_, _)))
             .map(|col| col.name().to_string())
             .collect();
 
@@ -1307,7 +1390,10 @@ impl PipelineStep for EncodeCategoricalsStep {
             encodings_json.insert(
                 col_name.clone(),
                 serde_json::to_value(encoding).map_err(|e| {
-                    TreeBoostError::Serialization(format!("Failed to serialize encoding for {}: {}", col_name, e))
+                    TreeBoostError::Serialization(format!(
+                        "Failed to serialize encoding for {}: {}",
+                        col_name, e
+                    ))
                 })?,
             );
         }
@@ -1318,14 +1404,20 @@ impl PipelineStep for EncodeCategoricalsStep {
         if let serde_json::Value::Object(map) = state {
             self.encodings.clear();
             for (col_name, encoding_json) in map {
-                let encoding: CategoryEncoding = serde_json::from_value(encoding_json).map_err(|e| {
-                    TreeBoostError::Serialization(format!("Failed to deserialize encoding for {}: {}", col_name, e))
-                })?;
+                let encoding: CategoryEncoding =
+                    serde_json::from_value(encoding_json).map_err(|e| {
+                        TreeBoostError::Serialization(format!(
+                            "Failed to deserialize encoding for {}: {}",
+                            col_name, e
+                        ))
+                    })?;
                 self.encodings.insert(col_name, encoding);
             }
             Ok(())
         } else {
-            Err(TreeBoostError::Serialization("Expected JSON object for encodings".to_string()))
+            Err(TreeBoostError::Serialization(
+                "Expected JSON object for encodings".to_string(),
+            ))
         }
     }
 
@@ -1382,7 +1474,10 @@ impl PipelineStep for TransformTargetStep {
 
     fn deserialize_state(&mut self, state: serde_json::Value) -> Result<()> {
         self.transform = serde_json::from_value(state).map_err(|e| {
-            TreeBoostError::Serialization(format!("Failed to deserialize TransformTargetStep: {}", e))
+            TreeBoostError::Serialization(format!(
+                "Failed to deserialize TransformTargetStep: {}",
+                e
+            ))
         })?;
         Ok(())
     }
@@ -1476,9 +1571,7 @@ impl PipelineStep for BinNumericFeaturesStep {
             self.boundaries.clear();
             for (col_name, boundaries_json) in boundaries {
                 if let Some(arr) = boundaries_json.as_array() {
-                    let bounds: Vec<f64> = arr.iter()
-                        .filter_map(|v| v.as_f64())
-                        .collect();
+                    let bounds: Vec<f64> = arr.iter().filter_map(|v| v.as_f64()).collect();
                     self.boundaries.insert(col_name.clone(), bounds);
                 }
             }
@@ -1517,7 +1610,8 @@ impl PipelineStep for ExtractLinearFeaturesStep {
 
     fn fit_transform(&mut self, df: DataFrame, _targets: Option<&[f32]>) -> Result<DataFrame> {
         // Record all feature names for debugging
-        self.all_feature_names = df.get_column_names()
+        self.all_feature_names = df
+            .get_column_names()
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -1538,13 +1632,19 @@ impl PipelineStep for ExtractLinearFeaturesStep {
 
     fn serialize_state(&self) -> Result<serde_json::Value> {
         Ok(serde_json::to_value(self).map_err(|e| {
-            TreeBoostError::Serialization(format!("Failed to serialize ExtractLinearFeaturesStep: {}", e))
+            TreeBoostError::Serialization(format!(
+                "Failed to serialize ExtractLinearFeaturesStep: {}",
+                e
+            ))
         })?)
     }
 
     fn deserialize_state(&mut self, state: serde_json::Value) -> Result<()> {
         let deserialized: Self = serde_json::from_value(state).map_err(|e| {
-            TreeBoostError::Serialization(format!("Failed to deserialize ExtractLinearFeaturesStep: {}", e))
+            TreeBoostError::Serialization(format!(
+                "Failed to deserialize ExtractLinearFeaturesStep: {}",
+                e
+            ))
         })?;
         *self = deserialized;
         Ok(())
@@ -1554,4 +1654,3 @@ impl PipelineStep for ExtractLinearFeaturesStep {
         Box::new(self.clone())
     }
 }
-

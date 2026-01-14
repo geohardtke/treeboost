@@ -102,8 +102,8 @@ impl UniversalModel {
             }
             BoostingMode::LinearThenTree => Self::train_linear_then_tree(
                 dataset,
-                raw_features_opt.as_deref(),  // Use raw features from dataset if available
-                linear_indices_opt.as_deref(),  // Pass linear_feature_indices from config
+                raw_features_opt.as_deref(), // Use raw features from dataset if available
+                linear_indices_opt.as_deref(), // Pass linear_feature_indices from config
                 config,
                 loss_fn,
                 None,
@@ -561,14 +561,10 @@ impl UniversalModel {
         // Linear model uses polynomial/interaction features → tree uses categorical/other features
         let residual_dataset = if let Some(ref linear_idx) = linear_indices {
             // Compute tree_indices = all features NOT in linear_indices
-            let all_indices: std::collections::HashSet<usize> =
-                (0..num_features).collect();
-            let linear_set: std::collections::HashSet<usize> =
-                linear_idx.iter().copied().collect();
-            let mut tree_indices: Vec<usize> = all_indices
-                .difference(&linear_set)
-                .copied()
-                .collect();
+            let all_indices: std::collections::HashSet<usize> = (0..num_features).collect();
+            let linear_set: std::collections::HashSet<usize> = linear_idx.iter().copied().collect();
+            let mut tree_indices: Vec<usize> =
+                all_indices.difference(&linear_set).copied().collect();
             tree_indices.sort_unstable(); // Keep deterministic order
 
             // Filter to only tree features

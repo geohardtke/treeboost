@@ -10,12 +10,19 @@ use crate::tuner::config::{GridStrategy, ParamBounds, ParamDef, ParameterSpace};
 /// Generate a grid of candidate configurations around current centers
 ///
 /// Dispatches to the appropriate strategy (Cartesian, LHS, or Random) based on configuration.
-pub(super) fn generate_grid(space: &ParameterSpace, grid_strategy: &GridStrategy, seed: u64, spread: f32) -> Vec<HashMap<String, f32>> {
+pub(super) fn generate_grid(
+    space: &ParameterSpace,
+    grid_strategy: &GridStrategy,
+    seed: u64,
+    spread: f32,
+) -> Vec<HashMap<String, f32>> {
     match grid_strategy {
         GridStrategy::Cartesian { points_per_dim } => {
             generate_cartesian_grid(space, spread, *points_per_dim)
         }
-        GridStrategy::LatinHypercube { n_samples } => generate_lhs_grid(space, spread, *n_samples, seed),
+        GridStrategy::LatinHypercube { n_samples } => {
+            generate_lhs_grid(space, spread, *n_samples, seed)
+        }
         GridStrategy::Random { n_samples } => generate_random_grid(space, spread, *n_samples, seed),
     }
 }
@@ -187,7 +194,12 @@ pub(crate) fn generate_param_values(param: &ParamDef, spread: f32, points: usize
 /// LHS ensures good space-filling by dividing each parameter's range into n equal strata
 /// and sampling exactly once from each stratum. This provides better coverage than
 /// pure random sampling with the same number of samples.
-pub(crate) fn generate_lhs_grid(space: &ParameterSpace, spread: f32, n_samples: usize, seed: u64) -> Vec<HashMap<String, f32>> {
+pub(crate) fn generate_lhs_grid(
+    space: &ParameterSpace,
+    spread: f32,
+    n_samples: usize,
+    seed: u64,
+) -> Vec<HashMap<String, f32>> {
     use rand::rngs::StdRng;
     use rand::seq::SliceRandom;
     use rand::{Rng, SeedableRng};
@@ -256,7 +268,12 @@ pub(crate) fn generate_lhs_grid(space: &ParameterSpace, spread: f32, n_samples: 
 }
 
 /// Generate random sampling grid with proper deterministic PRNG
-pub(crate) fn generate_random_grid(space: &ParameterSpace, spread: f32, n_samples: usize, seed: u64) -> Vec<HashMap<String, f32>> {
+pub(crate) fn generate_random_grid(
+    space: &ParameterSpace,
+    spread: f32,
+    n_samples: usize,
+    seed: u64,
+) -> Vec<HashMap<String, f32>> {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 

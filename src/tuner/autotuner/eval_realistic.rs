@@ -8,13 +8,13 @@ use std::collections::HashMap;
 use polars::prelude::DataFrame;
 
 use crate::dataset::{split_holdout, split_kfold, BinnedDataset};
-use crate::tuner::traits::TunableModel;
 use crate::tuner::realistic::{
     encode_train_val_split, split_dataframe_by_indices, RealisticModeConfig,
 };
+use crate::tuner::traits::TunableModel;
 use crate::Result;
 
-use super::types::{EvalMetrics, check_conformal_support, aggregate_fold_results};
+use super::types::{aggregate_fold_results, check_conformal_support, EvalMetrics};
 
 /// Evaluate using holdout with optional k-fold (realistic mode)
 pub(super) fn evaluate_holdout_realistic_with_folds<M: TunableModel>(
@@ -49,8 +49,7 @@ fn evaluate_holdout_realistic<M: TunableModel>(
 ) -> Result<EvalMetrics> {
     // Split data
     let split = split_holdout(raw_data.height(), validation_ratio, 0.0, tuner.seed());
-    let (train_df, val_df) =
-        split_dataframe_by_indices(raw_data, &split.train, &split.validation)?;
+    let (train_df, val_df) = split_dataframe_by_indices(raw_data, &split.train, &split.validation)?;
 
     // Encode with per-split pipeline (no target leakage)
     let (train_dataset, val_dataset, val_targets) =
@@ -123,8 +122,7 @@ pub(super) fn evaluate_conformal_realistic_with_folds<M: TunableModel>(
             let (train_idx, val_idx) = kfold.get_fold(fold_idx);
 
             // Split and encode with per-fold pipeline
-            let (train_df, val_df) =
-                split_dataframe_by_indices(raw_data, &train_idx, &val_idx)?;
+            let (train_df, val_df) = split_dataframe_by_indices(raw_data, &train_idx, &val_idx)?;
             let (train_dataset, cal_dataset, cal_targets) =
                 encode_train_val_split(train_df, val_df, realistic_cfg)?;
 
@@ -158,8 +156,7 @@ fn evaluate_conformal_realistic<M: TunableModel>(
 ) -> Result<EvalMetrics> {
     // Split data
     let split = split_holdout(raw_data.height(), calibration_ratio, 0.0, tuner.seed());
-    let (train_df, cal_df) =
-        split_dataframe_by_indices(raw_data, &split.train, &split.validation)?;
+    let (train_df, cal_df) = split_dataframe_by_indices(raw_data, &split.train, &split.validation)?;
 
     // Encode with per-split pipeline (no target leakage)
     let (train_dataset, cal_dataset, cal_targets) =
@@ -239,7 +236,12 @@ fn train_and_evaluate_conformal<M: TunableModel>(
     let model = M::train(train_dataset, &config)?;
 
     // Extract conformal metrics (evaluate on validation set)
-    Ok(extract_conformal_result(tuner, &model, val_dataset, val_targets))
+    Ok(extract_conformal_result(
+        tuner,
+        &model,
+        val_dataset,
+        val_targets,
+    ))
 }
 
 /// Compute evaluation metrics for a trained model (realistic mode)
@@ -258,8 +260,12 @@ fn compute_eval_metrics<M: TunableModel>(
     let val_metric = metric.compute(&val_preds, val_targets);
 
     // Compute additional metrics (F1, ROC-AUC, Rank IC) using centralized helper
-    let (f1_score, roc_auc, rank_ic) =
-        super::metrics::compute_additional_metrics(&tuner.task_type(), &val_preds, val_targets, val_dataset.era_indices());
+    let (f1_score, roc_auc, rank_ic) = super::metrics::compute_additional_metrics(
+        &tuner.task_type(),
+        &val_preds,
+        val_targets,
+        val_dataset.era_indices(),
+    );
 
     EvalMetrics {
         val_metric,
@@ -283,8 +289,12 @@ fn extract_conformal_result<M: TunableModel>(
     let mse = super::metrics::select_metric(&tuner.task_type()).compute(&predictions, eval_targets);
 
     // Compute additional metrics based on task type
-    let (f1_score, roc_auc, rank_ic) =
-        super::metrics::compute_additional_metrics(&tuner.task_type(), &predictions, eval_targets, eval_dataset.era_indices());
+    let (f1_score, roc_auc, rank_ic) = super::metrics::compute_additional_metrics(
+        &tuner.task_type(),
+        &predictions,
+        eval_targets,
+        eval_dataset.era_indices(),
+    );
 
     EvalMetrics {
         val_metric: conformal_q,

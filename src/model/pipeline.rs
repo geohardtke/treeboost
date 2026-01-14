@@ -148,7 +148,9 @@ impl Pipeline {
     pub fn add_step_boxed(&mut self, _step: Box<dyn PipelineStep>) {
         // This method is for backwards compatibility during transition
         // New code should use add_step() with PipelineStepKind directly
-        eprintln!("[Pipeline] Warning: add_step_boxed is deprecated, use add_step with PipelineStepKind");
+        eprintln!(
+            "[Pipeline] Warning: add_step_boxed is deprecated, use add_step with PipelineStepKind"
+        );
     }
 
     /// Get the number of steps in the pipeline
@@ -194,7 +196,11 @@ impl Pipeline {
     ///
     /// # Returns
     /// Tuple of (transformed DataFrame, target values)
-    pub fn fit_transform(&mut self, df: DataFrame, target_col: &str) -> Result<(DataFrame, Vec<f32>)> {
+    pub fn fit_transform(
+        &mut self,
+        df: DataFrame,
+        target_col: &str,
+    ) -> Result<(DataFrame, Vec<f32>)> {
         self.target_column = Some(target_col.to_string());
 
         // Extract targets first
@@ -340,11 +346,9 @@ mod tests {
         let mut pipeline = Pipeline::new();
 
         // Add a feature engineering step
-        pipeline.add_step(PipelineStepKind::EngineerFeatures(EngineerFeaturesStep::new(
-            vec!["col1".to_string()],
-            vec![],
-            vec![],
-        )));
+        pipeline.add_step(PipelineStepKind::EngineerFeatures(
+            EngineerFeaturesStep::new(vec!["col1".to_string()], vec![], vec![]),
+        ));
 
         // Serialize to JSON
         let json = pipeline.to_json().unwrap();

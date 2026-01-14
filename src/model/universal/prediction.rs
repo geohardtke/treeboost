@@ -50,7 +50,8 @@ impl UniversalModel {
                 // Add linear contribution with shrinkage
                 if let Some(ref linear) = self.linear_booster {
                     // Get raw features from dataset (packed during pipeline processing)
-                    let raw_features_full = dataset.raw_features()
+                    let raw_features_full = dataset
+                        .raw_features()
                         .map(|r| r.to_vec())
                         .unwrap_or_else(|| Self::extract_raw_features(dataset));
 
@@ -62,18 +63,19 @@ impl UniversalModel {
                     };
 
                     // Filter features for linear model if indices are specified
-                    let (raw_features, num_linear_features) = if let Some(ref indices) = self.linear_feature_indices {
-                        let filtered = extract_selected_features(
-                            &raw_features_full,
-                            num_rows,
-                            num_raw_features,  // Use actual raw feature count (34), not tree feature count (26)
-                            Some(indices.as_slice()),
-                        );
-                        (filtered, indices.len())
-                    } else {
-                        // No filtering - use all features (backward compat)
-                        (raw_features_full, num_raw_features)
-                    };
+                    let (raw_features, num_linear_features) =
+                        if let Some(ref indices) = self.linear_feature_indices {
+                            let filtered = extract_selected_features(
+                                &raw_features_full,
+                                num_rows,
+                                num_raw_features, // Use actual raw feature count (34), not tree feature count (26)
+                                Some(indices.as_slice()),
+                            );
+                            (filtered, indices.len())
+                        } else {
+                            // No filtering - use all features (backward compat)
+                            (raw_features_full, num_raw_features)
+                        };
 
                     let linear_preds = linear.predict_batch(&raw_features, num_linear_features);
                     self.apply_linear_shrinkage(&mut preds, &linear_preds);
@@ -86,19 +88,13 @@ impl UniversalModel {
                         (0..self.num_features).collect();
                     let linear_set: std::collections::HashSet<usize> =
                         linear_idx.iter().copied().collect();
-                    let mut tree_indices: Vec<usize> = all_indices
-                        .difference(&linear_set)
-                        .copied()
-                        .collect();
+                    let mut tree_indices: Vec<usize> =
+                        all_indices.difference(&linear_set).copied().collect();
                     tree_indices.sort_unstable(); // Keep deterministic order
-
-                    eprintln!("[PRED DEBUG] Dataset features: {}, Linear features: {}, Tree features: {}",
-                              self.num_features, linear_set.len(), tree_indices.len());
 
                     // Filter to only tree features
                     std::borrow::Cow::Owned(dataset.subset_features(&tree_indices))
                 } else {
-                    eprintln!("[PRED DEBUG] No feature filtering (backward compat)");
                     // No filtering (backward compat)
                     std::borrow::Cow::Borrowed(dataset)
                 };
@@ -109,30 +105,16 @@ impl UniversalModel {
                 if let Some(ref ensemble) = self.gbdt_ensemble {
                     let tree_preds = self.predict_ensemble(&tree_dataset, ensemble);
                     // Ensemble already accounts for base predictions internally
-                    eprintln!("[PRED DEBUG] Ensemble predictions - mean: {:.4}, min: {:.4}, max: {:.4}",
-                              tree_preds.iter().sum::<f32>() / tree_preds.len() as f32,
-                              tree_preds.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-                              tree_preds.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
                     for i in 0..num_rows {
                         preds[i] += tree_preds[i];
                     }
                 } else if let Some(ref gbdt) = self.gbdt_model {
                     let tree_preds = gbdt.predict(&tree_dataset);
                     let gbdt_base = gbdt.base_prediction();
-                    eprintln!("[PRED DEBUG] GBDT predictions - base: {:.4}, mean: {:.4}, min: {:.4}, max: {:.4}",
-                              gbdt_base,
-                              tree_preds.iter().sum::<f32>() / tree_preds.len() as f32,
-                              tree_preds.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-                              tree_preds.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
                     for i in 0..num_rows {
                         preds[i] += tree_preds[i] - gbdt_base;
                     }
                 }
-
-                eprintln!("[PRED DEBUG] Final LTT preds (before inverse transform) - mean: {:.4}, min: {:.4}, max: {:.4}",
-                          preds.iter().sum::<f32>() / preds.len() as f32,
-                          preds.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-                          preds.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
 
                 preds
             }
@@ -226,19 +208,8 @@ impl UniversalModel {
 
                     let linear_preds = linear.predict_batch(&linear_features, num_lin_feats);
 
-                    // Debug linear predictions
-                    let lin_mean = linear_preds.iter().sum::<f32>() / linear_preds.len() as f32;
-                    let lin_min = linear_preds.iter().cloned().fold(f32::INFINITY, f32::min);
-                    let lin_max = linear_preds.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                    eprintln!("[PRED DEBUG] Linear preds - mean: {:.4}, min: {:.4}, max: {:.4}",
-                             lin_mean, lin_min, lin_max);
-
                     // Apply shrinkage factor (ensemble weighting)
                     self.apply_linear_shrinkage(&mut preds, &linear_preds);
-
-                    // Debug after shrinkage
-                    let preds_after_linear_mean = preds.iter().sum::<f32>() / preds.len() as f32;
-                    eprintln!("[PRED DEBUG] After linear shrinkage - mean: {:.4}", preds_after_linear_mean);
                 }
 
                 // Add tree contribution (either ensemble or single GBDT, trees use binned data)
@@ -252,24 +223,10 @@ impl UniversalModel {
                     let tree_preds = gbdt.predict(dataset);
                     let gbdt_base = gbdt.base_prediction();
 
-                    // Debug GBDT predictions
-                    let gbdt_mean = tree_preds.iter().sum::<f32>() / tree_preds.len() as f32;
-                    let gbdt_min = tree_preds.iter().cloned().fold(f32::INFINITY, f32::min);
-                    let gbdt_max = tree_preds.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                    eprintln!("[PRED DEBUG] GBDT predictions - base: {:.4}, mean: {:.4}, min: {:.4}, max: {:.4}",
-                             gbdt_base, gbdt_mean, gbdt_min, gbdt_max);
-
                     for i in 0..num_rows {
                         preds[i] += tree_preds[i] - gbdt_base;
                     }
                 }
-
-                // Debug final predictions before inverse transform
-                let final_mean = preds.iter().sum::<f32>() / preds.len() as f32;
-                let final_min = preds.iter().cloned().fold(f32::INFINITY, f32::min);
-                let final_max = preds.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                eprintln!("[PRED DEBUG] Final LTT preds (before inverse transform) - mean: {:.4}, min: {:.4}, max: {:.4}",
-                         final_mean, final_min, final_max);
 
                 preds
             }
@@ -381,12 +338,6 @@ impl UniversalModel {
         // Step 1: Apply Pipeline transformations (feature engineering, encoding)
         let transformed_df = pipeline.transform(df.clone())?;
 
-        eprintln!(
-            "[PREDICT_DF] DataFrame transformed: {} rows, {} columns",
-            transformed_df.height(),
-            transformed_df.width()
-        );
-
         let num_rows = transformed_df.height();
         let num_features = transformed_df.width();
 
@@ -409,13 +360,6 @@ impl UniversalModel {
                 raw_features.push(val);
             }
         }
-
-        eprintln!(
-            "[PREDICT_DF] Extracted raw_features: {} values ({} rows x {} features)",
-            raw_features.len(),
-            num_rows,
-            num_features
-        );
 
         // Step 3: Create BinnedDataset with simple uniform binning
         // For LinearThenTree, raw_features are primary; trees use binned backup.
@@ -477,14 +421,9 @@ impl UniversalModel {
 
         // Create BinnedDataset with dummy targets
         let dummy_targets = vec![0.0f32; num_rows];
-        let binned_dataset = BinnedDataset::new(num_rows, binned_row_major, dummy_targets, feature_info);
+        let binned_dataset =
+            BinnedDataset::new(num_rows, binned_row_major, dummy_targets, feature_info);
         let binned_dataset = binned_dataset.with_raw_features(raw_features.clone());
-
-        eprintln!(
-            "[PREDICT_DF] BinnedDataset created: {} rows, {} features",
-            binned_dataset.num_rows(),
-            binned_dataset.num_features()
-        );
 
         // Step 4: Make predictions using the appropriate method
         let predictions = match self.config.mode {
@@ -497,11 +436,6 @@ impl UniversalModel {
                 self.predict(&binned_dataset)
             }
         };
-
-        eprintln!(
-            "[PREDICT_DF] Predictions generated: {} values",
-            predictions.len()
-        );
 
         // Predictions are already inverse-transformed by predict() / predict_with_raw_features()
         Ok(predictions)
@@ -899,7 +833,8 @@ impl UniversalModel {
                 .unwrap_or(&[]);
 
             // Get raw features from dataset (packed during pipeline processing)
-            let raw_features_full = dataset.raw_features()
+            let raw_features_full = dataset
+                .raw_features()
                 .map(|r| r.to_vec())
                 .unwrap_or_else(|| Self::extract_raw_features(dataset));
 
@@ -911,20 +846,21 @@ impl UniversalModel {
             };
 
             // Filter features for linear model if indices are specified
-            let (raw_features, num_raw_features) = if let Some(ref indices) = self.linear_feature_indices {
-                let filtered = extract_selected_features(
-                    &raw_features_full,
-                    num_rows,
-                    num_raw_feats_total,  // Use actual raw feature count, not tree feature count
-                    Some(indices.as_slice()),
-                );
-                let num_selected = indices.len();
-                (filtered, num_selected)
-            } else {
-                // No filtering - use all features (backward compat)
-                let num = self.num_linear_features.unwrap_or(num_raw_feats_total);
-                (raw_features_full, num)
-            };
+            let (raw_features, num_raw_features) =
+                if let Some(ref indices) = self.linear_feature_indices {
+                    let filtered = extract_selected_features(
+                        &raw_features_full,
+                        num_rows,
+                        num_raw_feats_total, // Use actual raw feature count, not tree feature count
+                        Some(indices.as_slice()),
+                    );
+                    let num_selected = indices.len();
+                    (filtered, num_selected)
+                } else {
+                    // No filtering - use all features (backward compat)
+                    let num = self.num_linear_features.unwrap_or(num_raw_feats_total);
+                    (raw_features_full, num)
+                };
 
             // Combine: base + shrinkage*linear + tree per label
             let shrinkage = self.config.linear_config.shrinkage_factor;

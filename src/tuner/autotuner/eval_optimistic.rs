@@ -8,12 +8,12 @@
 use std::collections::HashMap;
 
 use crate::dataset::{split_holdout, split_kfold, BinnedDataset};
-use crate::tuner::traits::TunableModel;
 use crate::tuner::config::OptimizationMetric;
+use crate::tuner::traits::TunableModel;
 use crate::Result;
 
-use super::types::{EvalMetrics, EvalResult, check_conformal_support, aggregate_fold_results};
 use super::metrics::{compute_additional_metrics, select_metric};
+use super::types::{aggregate_fold_results, check_conformal_support, EvalMetrics, EvalResult};
 
 /// Evaluate using holdout validation with optional k-fold
 ///
@@ -115,29 +115,32 @@ fn evaluate_holdout<M: TunableModel>(
     let val_dataset = dataset.subset_by_indices(&split.validation);
     let val_predictions = model.predict(&val_dataset);
 
-    let val_targets: Vec<f32> = split.validation.iter()
-        .map(|&i| targets[i])
-        .collect();
+    let val_targets: Vec<f32> = split.validation.iter().map(|&i| targets[i]).collect();
     let val_metric = metric.compute(&val_predictions, &val_targets);
 
     // Still need training metric for overfitting detection
     // For train metric, compute using all data but extract only training portion
     let all_predictions = model.predict(dataset);
-    let train_predictions: Vec<f32> = split.train.iter()
-        .map(|&i| all_predictions[i])
-        .collect();
-    let train_targets: Vec<f32> = split.train.iter()
-        .map(|&i| targets[i])
-        .collect();
+    let train_predictions: Vec<f32> = split.train.iter().map(|&i| all_predictions[i]).collect();
+    let train_targets: Vec<f32> = split.train.iter().map(|&i| targets[i]).collect();
     let train_metric = metric.compute(&train_predictions, &train_targets);
 
     // Extract validation era indices if available (for Rank IC computation)
-    let val_era_indices =
-        dataset.era_indices().map(|eras| split.validation.iter().map(|&i| eras[i]).collect::<Vec<u16>>());
+    let val_era_indices = dataset.era_indices().map(|eras| {
+        split
+            .validation
+            .iter()
+            .map(|&i| eras[i])
+            .collect::<Vec<u16>>()
+    });
 
     // Compute additional metrics (F1, ROC-AUC, Rank IC)
-    let (f1_score, roc_auc, rank_ic) =
-        compute_additional_metrics(&tuner.task_type(), &val_predictions, &val_targets, val_era_indices.as_deref());
+    let (f1_score, roc_auc, rank_ic) = compute_additional_metrics(
+        &tuner.task_type(),
+        &val_predictions,
+        &val_targets,
+        val_era_indices.as_deref(),
+    );
 
     Ok(EvalMetrics {
         val_metric,
@@ -346,10 +349,8 @@ fn evaluate_conformal<M: TunableModel>(
         // Use validation split for RankIC to avoid inflated training IC
         let validation_ratio = 0.2;
 
-        let split = crate::dataset::split_holdout_by_era(
-            dataset.era_indices().unwrap(),
-            validation_ratio,
-        );
+        let split =
+            crate::dataset::split_holdout_by_era(dataset.era_indices().unwrap(), validation_ratio);
 
         let predictions = model.predict(dataset);
         let metric = select_metric(&tuner.task_type());
@@ -374,7 +375,12 @@ fn evaluate_conformal<M: TunableModel>(
         })
     } else {
         // Standard conformal evaluation (on full training set)
-        Ok(extract_conformal_result(tuner, &model, dataset, dataset.targets()))
+        Ok(extract_conformal_result(
+            tuner,
+            &model,
+            dataset,
+            dataset.targets(),
+        ))
     }
 }
 
@@ -392,8 +398,12 @@ fn extract_conformal_result<M: TunableModel>(
     let mse = super::metrics::select_metric(&tuner.task_type()).compute(&predictions, eval_targets);
 
     // Compute additional metrics based on task type
-    let (f1_score, roc_auc, rank_ic) =
-        compute_additional_metrics(&tuner.task_type(), &predictions, eval_targets, eval_dataset.era_indices());
+    let (f1_score, roc_auc, rank_ic) = compute_additional_metrics(
+        &tuner.task_type(),
+        &predictions,
+        eval_targets,
+        eval_dataset.era_indices(),
+    );
 
     EvalMetrics {
         val_metric: conformal_q,
@@ -431,9 +441,12 @@ fn compute_metrics_by_indices<M: TunableModel>(
         era_indices.map(|eras| val_idx.iter().map(|&i| eras[i]).collect::<Vec<u16>>());
 
     // Compute additional metrics (F1, ROC-AUC, Rank IC)
-    let (f1_score, roc_auc, rank_ic) =
-        compute_additional_metrics(&tuner.task_type(), &val_preds, &val_targets, val_era_indices.as_deref());
+    let (f1_score, roc_auc, rank_ic) = compute_additional_metrics(
+        &tuner.task_type(),
+        &val_preds,
+        &val_targets,
+        val_era_indices.as_deref(),
+    );
 
     (val_metric, train_metric, f1_score, roc_auc, rank_ic)
 }
-

@@ -513,7 +513,11 @@ impl EnsemblePredictor {
     }
 
     /// Create with equal weights
-    pub fn equal_weights(formula: CustomFeature, model: UniversalModel, pipeline: Pipeline) -> Self {
+    pub fn equal_weights(
+        formula: CustomFeature,
+        model: UniversalModel,
+        pipeline: Pipeline,
+    ) -> Self {
         Self::new(formula, model, pipeline, 0.5, 0.5)
     }
 
@@ -552,7 +556,8 @@ impl EnsemblePredictor {
                 let combined: Vec<f64> = (0..n_samples)
                     .map(|i| {
                         let mut values = vec![formula_preds[i], model_preds[i]];
-                        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        values
+                            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                         (values[0] + values[1]) / 2.0 // Median of 2 = average
                     })
                     .collect();
@@ -623,9 +628,7 @@ mod tests {
     #[test]
     fn test_formula_predictor_creation() {
         // Build a simple linear formula: 2.0 * x
-        let formula = FormulaBuilder::new("test")
-            .add_term("x", 2.0)
-            .build();
+        let formula = FormulaBuilder::new("test").add_term("x", 2.0).build();
 
         let predictor = FormulaPredictor::new(formula);
         assert_eq!(predictor.formula.name, "test");
@@ -642,7 +645,10 @@ mod tests {
 
     #[test]
     fn test_ensemble_strategy() {
-        assert!(matches!(EnsembleStrategy::WeightedAverage, EnsembleStrategy::WeightedAverage));
+        assert!(matches!(
+            EnsembleStrategy::WeightedAverage,
+            EnsembleStrategy::WeightedAverage
+        ));
         assert!(matches!(EnsembleStrategy::Median, EnsembleStrategy::Median));
     }
 }

@@ -14,28 +14,24 @@ use std::time::Instant;
 
 use polars::prelude::*;
 
-use crate::dataset::{BinnedDataset};
+use crate::dataset::BinnedDataset;
 use crate::{Result, TreeBoostError};
 
 use super::traits::{ParamMapExt, TunableModel};
 
-use super::config::{
-    EvalStrategy, TunerConfig, TuningMode, OptimizationMetric,
-};
-use super::history::{SearchHistory};
-use super::logger::{
-    finalize_logging, init_logger, save_model_formats, start_iteration_logging,
-};
+use super::config::{EvalStrategy, OptimizationMetric, TunerConfig, TuningMode};
+use super::history::SearchHistory;
+use super::logger::{finalize_logging, init_logger, save_model_formats, start_iteration_logging};
 use super::realistic::RealisticModeConfig;
 
 // Submodules
-mod types;
-mod grid;
-mod metrics;
+mod builder;
 mod eval_optimistic;
 mod eval_realistic;
 mod execution;
-mod builder;
+mod grid;
+mod metrics;
+mod types;
 
 // Internal use of types
 use types::{SendPtr, MAX_ZONE_SWITCH_FAILS};
@@ -362,7 +358,9 @@ impl<M: TunableModel> AutoTuner<M> {
         self.config.n_parallel
     }
 
-    pub(super) fn custom_validation(&self) -> Option<&(SendPtr<BinnedDataset>, SendPtr<BinnedDataset>)> {
+    pub(super) fn custom_validation(
+        &self,
+    ) -> Option<&(SendPtr<BinnedDataset>, SendPtr<BinnedDataset>)> {
         self.custom_validation.as_ref()
     }
 
@@ -452,7 +450,8 @@ impl<M: TunableModel> AutoTuner<M> {
         let total_trials = self.config.estimated_trials();
         // For GPU backends, run sequentially to avoid CUDA context contention
         // GPU trials are fast (~1-2s each), so sequential is fine
-        let use_parallel = self.config.parallel_trials && !execution::is_gpu_backend::<M>(&self.base_config);
+        let use_parallel =
+            self.config.parallel_trials && !execution::is_gpu_backend::<M>(&self.base_config);
 
         if self.config.verbose {
             println!("Starting AutoTuner...");
@@ -508,7 +507,12 @@ impl<M: TunableModel> AutoTuner<M> {
             }
 
             // Generate grid of candidates
-            let candidates = grid::generate_grid(&self.config.space, &self.config.grid_strategy, self.config.seed, spread);
+            let candidates = grid::generate_grid(
+                &self.config.space,
+                &self.config.grid_strategy,
+                self.config.seed,
+                spread,
+            );
 
             if self.config.verbose {
                 println!("  Testing {} candidates...", candidates.len());
@@ -543,7 +547,11 @@ impl<M: TunableModel> AutoTuner<M> {
                             .get("learning_rate")
                             .copied()
                             .unwrap_or(M::get_learning_rate(&self.base_config));
-                        let metric_str = format_trial_metrics(&result, &self.config.eval_strategy, &self.config.task_type);
+                        let metric_str = format_trial_metrics(
+                            &result,
+                            &self.config.eval_strategy,
+                            &self.config.task_type,
+                        );
                         println!(
                             "  -> New best! {} (depth={}, lr={:.4}, trees={})",
                             metric_str,
@@ -721,7 +729,8 @@ impl<M: TunableModel> AutoTuner<M> {
         let total_trials = self.config.estimated_trials();
         // For GPU backends, run sequentially to avoid CUDA context contention
         // GPU trials are fast (~1-2s each), so sequential is fine
-        let use_parallel = self.config.parallel_trials && !execution::is_gpu_backend::<M>(&self.base_config);
+        let use_parallel =
+            self.config.parallel_trials && !execution::is_gpu_backend::<M>(&self.base_config);
 
         // Parallel not supported in realistic mode (encoding is stateful)
         let use_parallel = use_parallel && !self.config.tuning_mode.is_realistic();
@@ -780,7 +789,12 @@ impl<M: TunableModel> AutoTuner<M> {
             }
 
             // Generate grid of candidates
-            let candidates = grid::generate_grid(&self.config.space, &self.config.grid_strategy, self.config.seed, spread);
+            let candidates = grid::generate_grid(
+                &self.config.space,
+                &self.config.grid_strategy,
+                self.config.seed,
+                spread,
+            );
 
             if self.config.verbose {
                 println!("  Testing {} candidates...", candidates.len());
@@ -788,7 +802,9 @@ impl<M: TunableModel> AutoTuner<M> {
 
             // Evaluate all candidates (parallel or sequential based on backend)
             // Results are logged immediately inside evaluate_candidates_internal via the shared logger
-            let results = if let (Some(raw_data), Some(realistic_cfg)) = (self.raw_data.as_ref(), self.realistic_config.as_ref()) {
+            let results = if let (Some(raw_data), Some(realistic_cfg)) =
+                (self.raw_data.as_ref(), self.realistic_config.as_ref())
+            {
                 execution::evaluate_candidates_internal(
                     self,
                     raw_data,
@@ -823,7 +839,11 @@ impl<M: TunableModel> AutoTuner<M> {
                             .get("learning_rate")
                             .copied()
                             .unwrap_or(M::get_learning_rate(&self.base_config));
-                        let metric_str = format_trial_metrics(&result, &self.config.eval_strategy, &self.config.task_type);
+                        let metric_str = format_trial_metrics(
+                            &result,
+                            &self.config.eval_strategy,
+                            &self.config.task_type,
+                        );
                         println!(
                             "  -> New best! {} (depth={}, lr={:.4}, trees={})",
                             metric_str,
@@ -967,7 +987,8 @@ impl<M: TunableModel> AutoTuner<M> {
 
                         // Encode full dataset
                         let full_df = (**raw_data).clone();
-                        let full_dataset = super::realistic::encode_full_dataset(full_df, realistic_cfg)?;
+                        let full_dataset =
+                            super::realistic::encode_full_dataset(full_df, realistic_cfg)?;
 
                         // Build best config and train
                         let best_config = self.build_config(&best.params);
@@ -1008,12 +1029,21 @@ impl<M: TunableModel> AutoTuner<M> {
     // =============================================================================
 
     #[cfg(test)]
-    pub(crate) fn generate_param_values(&self, param: &crate::tuner::config::ParamDef, spread: f32, points: usize) -> Vec<f32> {
+    pub(crate) fn generate_param_values(
+        &self,
+        param: &crate::tuner::config::ParamDef,
+        spread: f32,
+        points: usize,
+    ) -> Vec<f32> {
         grid::generate_param_values(param, spread, points)
     }
 
     #[cfg(test)]
-    pub(crate) fn generate_cartesian_grid(&self, spread: f32, points_per_dim: usize) -> Vec<HashMap<String, f32>> {
+    pub(crate) fn generate_cartesian_grid(
+        &self,
+        spread: f32,
+        points_per_dim: usize,
+    ) -> Vec<HashMap<String, f32>> {
         grid::generate_cartesian_grid(&self.config.space, spread, points_per_dim)
     }
 
@@ -1023,12 +1053,20 @@ impl<M: TunableModel> AutoTuner<M> {
     }
 
     #[cfg(test)]
-    pub(crate) fn generate_lhs_grid(&self, spread: f32, n_samples: usize) -> Vec<HashMap<String, f32>> {
+    pub(crate) fn generate_lhs_grid(
+        &self,
+        spread: f32,
+        n_samples: usize,
+    ) -> Vec<HashMap<String, f32>> {
         grid::generate_lhs_grid(&self.config.space, spread, n_samples, self.config.seed)
     }
 
     #[cfg(test)]
-    pub(crate) fn generate_random_grid(&self, spread: f32, n_samples: usize) -> Vec<HashMap<String, f32>> {
+    pub(crate) fn generate_random_grid(
+        &self,
+        spread: f32,
+        n_samples: usize,
+    ) -> Vec<HashMap<String, f32>> {
         grid::generate_random_grid(&self.config.space, spread, n_samples, self.config.seed)
     }
 }

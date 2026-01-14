@@ -45,7 +45,9 @@ pub trait TargetTransform: Send + Sync {
 ///
 /// This enum wraps all target transform types to enable serialization with rkyv and serde.
 /// Use this type when you need to store transforms in configs or save them with models.
-#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, PartialEq)]
+#[derive(
+    Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, PartialEq,
+)]
 pub enum TargetTransformKind {
     /// No transformation (identity)
     Identity,
@@ -57,14 +59,18 @@ pub enum TargetTransformKind {
 }
 
 /// Parameters for ClampTransform (for serialization)
-#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, PartialEq)]
+#[derive(
+    Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, PartialEq,
+)]
 pub struct ClampParams {
     pub min: f32,
     pub max: f32,
 }
 
 /// Parameters for LogitTransform (for serialization)
-#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, PartialEq)]
+#[derive(
+    Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, PartialEq,
+)]
 pub struct LogitTransformParams {
     pub min: f32,
     pub max: f32,

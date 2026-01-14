@@ -769,7 +769,10 @@ mod tests {
             if !train.is_empty() {
                 let max_train = *train.last().unwrap();
                 let min_val = *val.first().unwrap();
-                assert!(min_val >= max_train, "Validation should come after training");
+                assert!(
+                    min_val >= max_train,
+                    "Validation should come after training"
+                );
             }
         }
     }
@@ -798,7 +801,10 @@ mod tests {
             let (train, val) = split.get_fold(i);
             let train_set: HashSet<_> = train.iter().collect();
             let val_set: HashSet<_> = val.iter().collect();
-            assert!(train_set.is_disjoint(&val_set), "Train and val should not overlap");
+            assert!(
+                train_set.is_disjoint(&val_set),
+                "Train and val should not overlap"
+            );
         }
     }
 

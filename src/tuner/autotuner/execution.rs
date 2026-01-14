@@ -12,10 +12,10 @@ use polars::prelude::DataFrame;
 use rayon::prelude::*;
 
 use crate::dataset::BinnedDataset;
-use crate::tuner::traits::TunableModel;
-use crate::tuner::realistic::RealisticModeConfig;
-use crate::tuner::trial::TrialResult;
 use crate::tuner::logger::{log_trial, SharedLogger};
+use crate::tuner::realistic::RealisticModeConfig;
+use crate::tuner::traits::TunableModel;
+use crate::tuner::trial::TrialResult;
 use crate::Result;
 
 use super::types::EvalInput;
@@ -37,60 +37,56 @@ fn evaluate_single<M: TunableModel>(
 
     // Dispatch to appropriate strategy based on input mode
     let eval_metrics = match input {
-        EvalInput::Optimistic(dataset) => {
-            match tuner.eval_strategy() {
-                crate::tuner::config::EvalStrategy::Holdout {
-                    validation_ratio,
-                    folds,
-                } => super::eval_optimistic::evaluate_holdout_with_folds(
-                    tuner,
-                    dataset,
-                    params,
-                    *validation_ratio,
-                    *folds,
-                )?,
-                crate::tuner::config::EvalStrategy::Conformal {
-                    calibration_ratio,
-                    quantile,
-                    folds,
-                } => super::eval_optimistic::evaluate_conformal_with_folds(
-                    tuner,
-                    dataset,
-                    params,
-                    *calibration_ratio,
-                    *quantile,
-                    *folds,
-                )?,
-            }
-        }
-        EvalInput::Realistic { raw_data, config } => {
-            match tuner.eval_strategy() {
-                crate::tuner::config::EvalStrategy::Holdout {
-                    validation_ratio,
-                    folds,
-                } => super::eval_realistic::evaluate_holdout_realistic_with_folds(
-                    tuner,
-                    raw_data,
-                    config,
-                    params,
-                    *validation_ratio,
-                    *folds,
-                )?,
-                crate::tuner::config::EvalStrategy::Conformal {
-                    calibration_ratio,
-                    quantile,
-                    folds,
-                } => super::eval_realistic::evaluate_conformal_realistic_with_folds(
-                    tuner,
-                    raw_data,
-                    config,
-                    params,
-                    *calibration_ratio,
-                    *quantile,
-                    *folds,
-                )?,
-            }
-        }
+        EvalInput::Optimistic(dataset) => match tuner.eval_strategy() {
+            crate::tuner::config::EvalStrategy::Holdout {
+                validation_ratio,
+                folds,
+            } => super::eval_optimistic::evaluate_holdout_with_folds(
+                tuner,
+                dataset,
+                params,
+                *validation_ratio,
+                *folds,
+            )?,
+            crate::tuner::config::EvalStrategy::Conformal {
+                calibration_ratio,
+                quantile,
+                folds,
+            } => super::eval_optimistic::evaluate_conformal_with_folds(
+                tuner,
+                dataset,
+                params,
+                *calibration_ratio,
+                *quantile,
+                *folds,
+            )?,
+        },
+        EvalInput::Realistic { raw_data, config } => match tuner.eval_strategy() {
+            crate::tuner::config::EvalStrategy::Holdout {
+                validation_ratio,
+                folds,
+            } => super::eval_realistic::evaluate_holdout_realistic_with_folds(
+                tuner,
+                raw_data,
+                config,
+                params,
+                *validation_ratio,
+                *folds,
+            )?,
+            crate::tuner::config::EvalStrategy::Conformal {
+                calibration_ratio,
+                quantile,
+                folds,
+            } => super::eval_realistic::evaluate_conformal_realistic_with_folds(
+                tuner,
+                raw_data,
+                config,
+                params,
+                *calibration_ratio,
+                *quantile,
+                *folds,
+            )?,
+        },
     };
 
     let train_time_ms = start.elapsed().as_millis() as u64;
@@ -276,9 +272,7 @@ pub(super) fn is_gpu_backend<M: TunableModel>(base_config: &M::Config) -> bool {
 ///
 /// Called when stuck in a local optimum. Shifts each parameter's center
 /// to a random position within its bounds.
-pub(super) fn randomize_centers<M: TunableModel>(
-    tuner: &mut crate::tuner::AutoTuner<M>,
-) {
+pub(super) fn randomize_centers<M: TunableModel>(tuner: &mut crate::tuner::AutoTuner<M>) {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 

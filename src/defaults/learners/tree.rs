@@ -16,6 +16,7 @@ pub const DEFAULT_MIN_GAIN: f32 = 0.0;
 pub const DEFAULT_MIN_SAMPLES_LEAF: usize = 1;
 pub const DEFAULT_MIN_HESSIAN_LEAF: f32 = 1.0;
 pub const DEFAULT_COLSAMPLE: f32 = 1.0;
+pub const ROBUST_COLSAMPLE: f32 = 0.8; // For noise-robust training (feature bagging)
 
 // Step size
 pub const DEFAULT_LEARNING_RATE: f32 = 0.1;

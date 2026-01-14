@@ -657,7 +657,10 @@ impl std::fmt::Debug for AutoConfig {
             .field("backend_type", &self.backend_type)
             .field("skip_training", &self.skip_training)
             .field("target_bound_config", &self.target_bound_config)
-            .field("custom_features", &format!("{} features", self.custom_features.len()))
+            .field(
+                "custom_features",
+                &format!("{} features", self.custom_features.len()),
+            )
             .finish()
     }
 }
