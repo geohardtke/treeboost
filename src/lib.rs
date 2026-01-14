@@ -676,7 +676,7 @@ mod python;
 pub use backend::{
     kernel, BackendConfig, BackendPreset, BackendSelector, BackendType, GpuMode, HistogramBackend,
 };
-pub use booster::{GBDTConfig, GBDTModel, GbdtPreset, LossType, OutputType};
+pub use booster::{GBDTConfig, GBDTModel, GbdtPreset, LossType, OutputType, ShapValues};
 pub use dataset::{BinnedDataset, FeatureInfo, FeatureType, QuantileBinner};
 pub use ensemble::{
     EnsembleBuilder, MultiSeedConfig, SelectionConfig as EnsembleSelectionConfig, StackedEnsemble,
@@ -693,16 +693,18 @@ pub use learner::{
     LinearTreeConfig, TreeBooster, TreeConfig, TreePreset, WeakLearner,
 };
 pub use loss::{
-    sigmoid, softmax, BetaLoss, BinaryLogLoss, LossFunction, MseLoss, MultiClassLogLoss,
-    MultiLabelFocalLoss, MultiLabelLogLoss, PseudoHuberLoss,
+    sigmoid, softmax, BetaLoss, BinaryLogLoss, LossFunction, MapeLoss, MseLoss, MultiClassLogLoss,
+    MultiLabelFocalLoss, MultiLabelLogLoss, PseudoHuberLoss, QuantileLoss, SymmetricMapeLoss,
+    TweedieLoss,
 };
 pub use model::{
     AutoBuilder, AutoConfig, AutoEnsembleConfig, AutoEnsembleMethod, AutoModel,
     AutoModelUpdateReport, BoostingMode, BuildPhaseTimes, BuildResult, ConsoleProgress,
-    CustomFeature, FeatureOp, FormulaBuilder, IncrementalUpdateReport, ModeSelection,
-    Pipeline, PipelineStep, PipelineStepKind, ProgressCallback, ProgressUpdate, QuietProgress,
-    StackingStrategy, TargetBoundConfig, TrainingPhase, TreeTunerPreset, TuningLevel,
-    UniversalConfig, UniversalModel, UniversalPreset,
+    CustomFeature, EnsemblePredictor, EnsembleStrategy, FeatureOp, FormulaBuilder,
+    FormulaPredictor, GatedPredictor, GatingConfig, IncrementalUpdateReport, ModelPredictor,
+    ModeSelection, Pipeline, PipelineStep, PipelineStepKind, ProgressCallback,
+    ProgressUpdate, QuietProgress, StackingStrategy, TargetBoundConfig, TrainingPhase,
+    TreeTunerPreset, TuningLevel, UniversalConfig, UniversalModel, UniversalPreset,
 };
 pub use monitoring::{AlertLevel, CVHoldoutTracker, ShiftDetector, ShiftResult};
 

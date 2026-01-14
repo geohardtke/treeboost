@@ -8,6 +8,10 @@
 //! - `MultiLabelLogLoss`: Independent binary cross-entropy for multi-label classification
 //! - `MultiLabelFocalLoss`: Focal loss for imbalanced multi-label classification
 //! - `BetaLoss`: Beta distribution loss for bounded continuous regression in (0, 1)
+//! - `QuantileLoss`: Pinball loss for quantile regression (median, percentiles)
+//! - `TweedieLoss`: Tweedie deviance for count data and insurance claims
+//! - `MapeLoss`: Mean Absolute Percentage Error for scale-independent forecasting
+//! - `SymmetricMapeLoss`: Symmetric MAPE with bounded range
 //!
 //! Also provides activation functions:
 //! - `sigmoid`: Numerically stable sigmoid for binary classification
@@ -18,17 +22,23 @@ mod beta;
 mod focal;
 mod huber;
 mod logloss;
+mod mape;
 mod mse;
 mod multilabel;
+mod quantile;
 mod softmax;
 mod traits;
+mod tweedie;
 
 pub use activation::sigmoid;
 pub use beta::BetaLoss;
 pub use focal::MultiLabelFocalLoss;
 pub use huber::PseudoHuberLoss;
 pub use logloss::BinaryLogLoss;
+pub use mape::{MapeLoss, SymmetricMapeLoss};
 pub use mse::MseLoss;
 pub use multilabel::MultiLabelLogLoss;
+pub use quantile::QuantileLoss;
 pub use softmax::{softmax, MultiClassLogLoss};
 pub use traits::LossFunction;
+pub use tweedie::TweedieLoss;
