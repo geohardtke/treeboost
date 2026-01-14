@@ -558,3 +558,36 @@ fn test_ltt_with_pipeline_encoded_categoricals() {
 
     println!("✓ LTT correctly handles pipeline-encoded categoricals");
 }
+// Test to verify early validation when all features are dropped
+use polars::prelude::*;
+
+#[test]
+fn test_early_failure_when_all_features_dropped() {
+    // Create data where the only feature will be dropped as ID-like
+    let id_values: Vec<i64> = (0..100).collect(); // Sequential integers [0, 1, 2, ..., 99]
+    let target_values: Vec<f64> = (0..100).map(|i| i as f64 * 2.0).collect();
+
+    let df = DataFrame::new(vec![
+        Series::new("id".into(), id_values).into(), // Will be dropped (ID-like name + pattern)
+        Series::new("target".into(), target_values).into(),
+    ])
+    .unwrap();
+
+    let config =
+        treeboost::model::AutoConfig::new().with_tuning(treeboost::model::TuningLevel::None);
+
+    // This should fail early with a clear error message
+    let result = treeboost::model::AutoModel::train_with_config(&df, "target", config);
+
+    assert!(result.is_err(), "Should fail when all features are dropped");
+
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("No features remaining"),
+        "Error should mention no features remaining, got: {}",
+        err_msg
+    );
+
+    println!("✅ Early validation works correctly!");
+    println!("Error message: {}", err_msg);
+}

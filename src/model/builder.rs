@@ -48,14 +48,16 @@ use crate::dataset::feature_extractor::LinearFeatureConfig;
 use crate::dataset::{BinnedDataset, DataPipeline};
 use crate::defaults::auto as auto_defaults;
 use crate::features::{FeaturePlan, SmartFeatureEngine};
-use crate::model::{
-    Pipeline, EngineerFeaturesStep, TransformTargetStep, ExtractLinearFeaturesStep, CategoryEncoding,
-    PipelineStepKind, EncodeCategoricalsState, BinNumericFeaturesState, DropColumnsStep,
-    CustomFeaturesStep, PipelineStep,
+use crate::model::config::{
+    AutoConfig, BuildPhaseTimes, BuildResult, TargetBoundConfig, TuningLevel,
 };
-use crate::model::config::{AutoConfig, BuildPhaseTimes, BuildResult, TargetBoundConfig, TuningLevel};
 use crate::model::progress::{ProgressCallback, ProgressUpdate, TrainingPhase};
 use crate::model::universal::ModeSelection;
+use crate::model::{
+    BinNumericFeaturesState, CategoryEncoding, CustomFeaturesStep, DropColumnsStep,
+    EncodeCategoricalsState, EngineerFeaturesStep, ExtractLinearFeaturesStep, Pipeline,
+    PipelineStep, PipelineStepKind, TransformTargetStep,
+};
 use crate::model::{BoostingMode, UniversalConfig, UniversalModel};
 use crate::preprocessing::{ModelType, PreprocessingPlan, SmartPreprocessor};
 use crate::{Result, TreeBoostError};
@@ -522,7 +524,10 @@ impl AutoBuilder {
         // These encode domain-specific knowledge that AutoML cannot discover
         if !self.config.custom_features.is_empty() {
             if self.config.verbose {
-                println!("  [CustomFeatures] Applying {} user-defined features", self.config.custom_features.len());
+                println!(
+                    "  [CustomFeatures] Applying {} user-defined features",
+                    self.config.custom_features.len()
+                );
             }
             let custom_step = CustomFeaturesStep::new(self.config.custom_features.clone());
             working_df = custom_step.transform(working_df)?;
@@ -544,9 +549,18 @@ impl AutoBuilder {
 
         if self.config.verbose && feature_plan.as_ref().map_or(false, |p| !p.is_empty()) {
             let added = working_df.width() - initial_cols;
-            let num_poly = feature_plan.as_ref().map(|p| p.polynomial_features.len()).unwrap_or(0);
-            let num_interactions = feature_plan.as_ref().map(|p| p.interaction_pairs.len()).unwrap_or(0);
-            let num_ratios = feature_plan.as_ref().map(|p| p.ratio_pairs.len()).unwrap_or(0);
+            let num_poly = feature_plan
+                .as_ref()
+                .map(|p| p.polynomial_features.len())
+                .unwrap_or(0);
+            let num_interactions = feature_plan
+                .as_ref()
+                .map(|p| p.interaction_pairs.len())
+                .unwrap_or(0);
+            let num_ratios = feature_plan
+                .as_ref()
+                .map(|p| p.ratio_pairs.len())
+                .unwrap_or(0);
 
             println!(
                 "  [Features] Applied: {} → {} columns (+{} = {} poly×4 + {} interactions + {} ratios)",
@@ -615,18 +629,82 @@ impl AutoBuilder {
 
         // Step 1: Drop useless columns (id, constants, etc.) BUT NOT the target
         if !profile.drop_columns.is_empty() {
-            let cols_to_drop: Vec<String> = profile.drop_columns
+            let cols_to_drop: Vec<String> = profile
+                .drop_columns
                 .iter()
-                .filter(|c| c.name != target_col)  // Never drop target during training!
+                .filter(|c| c.name != target_col) // Never drop target
                 .map(|c| c.name.clone())
                 .collect();
 
             if !cols_to_drop.is_empty() {
                 working_df = working_df.drop_many(&cols_to_drop);
                 if self.config.verbose {
-                    println!("  [Prepare] Dropped {} columns: {:?}", cols_to_drop.len(), cols_to_drop);
+                    println!(
+                        "  [Prepare] Dropped {} columns: {:?}",
+                        cols_to_drop.len(),
+                        cols_to_drop
+                    );
                 }
             }
+        }
+
+        // CRITICAL VALIDATION: Ensure we have at least one feature after dropping columns
+        let remaining_cols = working_df.get_column_names();
+        let num_features = remaining_cols
+            .iter()
+            .filter(|&name| name.as_str() != target_col)
+            .count();
+
+        if num_features == 0 {
+            let dropped_summary = if profile.drop_columns.is_empty() {
+                String::from("No columns were marked for dropping by profiler.")
+            } else {
+                let reasons: Vec<String> = profile
+                    .drop_columns
+                    .iter()
+                    .filter(|dc| dc.name != target_col) // Don't show target in dropped list
+                    .map(|dc| format!("'{}' ({:?})", dc.name, dc.reason))
+                    .collect();
+                if reasons.is_empty() {
+                    String::from("Only the target column was marked (but not dropped).")
+                } else {
+                    format!("Profiler recommended dropping: {}", reasons.join(", "))
+                }
+            };
+
+            // Get mode for error message (fallback to PureTree if not explicitly set)
+            let current_mode = adapted_config
+                .custom_config
+                .as_ref()
+                .map(|c| c.mode)
+                .unwrap_or(BoostingMode::PureTree);
+
+            let mode_specific_msg = match current_mode {
+                BoostingMode::LinearThenTree => {
+                    "LinearThenTree requires features for both the linear and tree components."
+                }
+                BoostingMode::PureTree => "PureTree requires features for the tree model.",
+                BoostingMode::RandomForest => {
+                    "RandomForest requires features for the tree ensemble."
+                }
+            };
+
+            return Err(TreeBoostError::Data(format!(
+                "No features remaining after column profiling! {}\n\n\
+                 Dataset has {} total columns, but all non-target columns were dropped.\n\
+                 {}\n\n\
+                 Common causes:\n\
+                 1. All features are constants (zero variance)\n\
+                 2. All features are detected as IDs (sequential integers with ID-like names)\n\
+                 3. All features are text columns\n\n\
+                 Solutions:\n\
+                 - Verify your data has valid predictive features\n\
+                 - Check column names (avoid 'id', 'index', 'row_id' for real features)\n\
+                 - Disable automatic dropping: AutoConfig::new().with_feature_engineering(FeatureEngineeringMode::None)",
+                mode_specific_msg,
+                working_df.width(),
+                dropped_summary
+            )));
         }
 
         // Step 2: Apply feature engineering (already done above, working_df has engineered features)
@@ -759,10 +837,7 @@ impl AutoBuilder {
 
             println!(
                 "  [Tuning] Starting {:?} tuning: {} train, {} val samples, ~{} trials...",
-                adapted_config.tuning_level,
-                train_samples,
-                val_samples,
-                expected_trials
+                adapted_config.tuning_level, train_samples, val_samples, expected_trials
             );
         }
 
@@ -802,26 +877,43 @@ impl AutoBuilder {
             // Print detailed breakdown for LTT mode
             if let Some(ltt) = ltt_tuning.as_ref() {
                 println!("  [Tuning] === LinearThenTree Breakdown ===");
-                println!("  [Tuning] Linear phase R²: {:.4} ({:.1}% variance captured)",
-                    ltt.linear_r2, ltt.linear_r2 * 100.0);
+                println!(
+                    "  [Tuning] Linear phase R²: {:.4} ({:.1}% variance captured)",
+                    ltt.linear_r2,
+                    ltt.linear_r2 * 100.0
+                );
 
                 // Get best linear trial to show residual RMSE
-                if let Some(best_linear) = ltt.history.linear_trials.iter()
-                    .min_by(|a, b| a.rmse.partial_cmp(&b.rmse).unwrap()) {
+                if let Some(best_linear) = ltt
+                    .history
+                    .linear_trials
+                    .iter()
+                    .min_by(|a, b| a.rmse.partial_cmp(&b.rmse).unwrap())
+                {
                     println!("  [Tuning] Linear residual RMSE: {:.6}", best_linear.rmse);
                 }
 
                 // Get best tree trial to show how much trees improved
-                if let Some(best_tree) = ltt.history.tree_trials.iter()
-                    .min_by(|a, b| a.residual_rmse.partial_cmp(&b.residual_rmse).unwrap()) {
-                    println!("  [Tuning] Tree residual RMSE: {:.6}", best_tree.residual_rmse);
+                if let Some(best_tree) = ltt
+                    .history
+                    .tree_trials
+                    .iter()
+                    .min_by(|a, b| a.residual_rmse.partial_cmp(&b.residual_rmse).unwrap())
+                {
+                    println!(
+                        "  [Tuning] Tree residual RMSE: {:.6}",
+                        best_tree.residual_rmse
+                    );
                 }
 
                 println!("  [Tuning] Combined final RMSE: {:.6}", ltt.final_rmse);
             } else if let Some(tree) = tree_tuning.as_ref() {
                 // best_metric is MSE, compute RMSE for display
                 let rmse = tree.best_metric.sqrt();
-                println!("  [Tuning] Best validation MSE: {:.6} (RMSE: {:.6})", tree.best_metric, rmse);
+                println!(
+                    "  [Tuning] Best validation MSE: {:.6} (RMSE: {:.6})",
+                    tree.best_metric, rmse
+                );
             }
 
             println!("  [Tuning] (Computed on validation split during hyperparameter search)");
@@ -860,62 +952,77 @@ impl AutoBuilder {
         // - Trees use full feature space (no information loss)
         // - Linear model uses only appropriate features (better generalization)
         //
-        let (feature_extractor, raw_features, linear_indices) =
-            if matches!(mode, BoostingMode::LinearThenTree) {
-                // Step 1: Extract ALL features (no filtering) to match BinnedDataset
-                let all_config = LinearFeatureConfig {
-                    exclude_columns: std::collections::HashSet::new(),
-                    exclude_categorical: false,
-                    exclude_id: false,
-                    exclude_constant: false,
-                    exclude_boolean: false,
-                    exclude_datetime: false,
-                    exclude_text: false,
-                };
-                let all_extractor =
-                    crate::dataset::feature_extractor::FeatureExtractor::with_config(all_config);
-                let (all_features, _num_all_features) =
-                    all_extractor.extract(&filtered_df, target_col)?;
+        let (feature_extractor, raw_features, linear_indices) = if matches!(
+            mode,
+            BoostingMode::LinearThenTree
+        ) {
+            // Step 1: Extract ALL features (no filtering) to match BinnedDataset
+            let all_config = LinearFeatureConfig {
+                exclude_columns: std::collections::HashSet::new(),
+                exclude_categorical: false,
+                exclude_id: false,
+                exclude_constant: false,
+                exclude_boolean: false,
+                exclude_datetime: false,
+                exclude_text: false,
+            };
+            let all_extractor =
+                crate::dataset::feature_extractor::FeatureExtractor::with_config(all_config);
+            let (all_features, _num_all_features) =
+                all_extractor.extract(&filtered_df, target_col)?;
 
-                // Step 2: Build linear_feature_indices by identifying ENGINEERED features
-                // Linear model uses: polynomial features (_squared, _sqrt, _log) + interaction features (_x_)
-                // Tree model uses: original features (both numeric and categorical-encoded)
-                // This is different from filtering by column TYPE - we filter by feature ORIGIN
-                let mut linear_feature_indices = Vec::new();
-                let mut linear_feature_names = Vec::new(); // Track names for logging
+            // Step 2: Build linear_feature_indices by identifying ENGINEERED features
+            // Linear model uses: polynomial features (_squared, _sqrt, _log) + interaction features (_x_)
+            // Tree model uses: original features (both numeric and categorical-encoded)
+            // This is different from filtering by column TYPE - we filter by feature ORIGIN
+            let mut linear_feature_indices = Vec::new();
+            let mut linear_feature_names = Vec::new(); // Track names for logging
 
-                let col_names: Vec<String> = filtered_df
-                    .get_column_names()
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
+            let col_names: Vec<String> = filtered_df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
 
-                // Build indices relative to EXTRACTED features (target excluded)
-                let mut feature_idx = 0;
-                for col_name in &col_names {
-                    if col_name == target_col {
-                        continue; // Skip target
-                    }
+            // Build indices relative to EXTRACTED features (target excluded)
+            let mut feature_idx = 0;
+            for col_name in &col_names {
+                if col_name == target_col {
+                    continue; // Skip target
+                }
 
-                    // Identify engineered features by naming convention
-                    let is_engineered = col_name.ends_with("_squared")
+                // Identify engineered features by naming convention
+                let is_engineered = col_name.ends_with("_squared")
                         || col_name.ends_with("_sqrt")
                         || col_name.ends_with("_log")
                         || col_name.ends_with("_log1p")
                         || col_name.contains("_x_") // Interaction features
                         || col_name.contains("_ratio_"); // Ratio features
 
-                    if is_engineered {
-                        // Engineered features go to linear model (polynomial/interaction)
-                        linear_feature_indices.push(feature_idx);
-                        linear_feature_names.push(col_name.clone());
-                    }
-
-                    feature_idx += 1; // Increment for each non-target feature
+                if is_engineered {
+                    // Engineered features go to linear model (polynomial/interaction)
+                    linear_feature_indices.push(feature_idx);
+                    linear_feature_names.push(col_name.clone());
                 }
 
+                feature_idx += 1; // Increment for each non-target feature
+            }
+
+            // If no engineered features found, use ALL features for linear model
+            // This handles simple cases like y = a*x + b where no feature engineering was done
+            if linear_feature_indices.is_empty() {
+                let num_all_features = col_names.len() - 1; // -1 for target
+                linear_feature_indices = (0..num_all_features).collect();
+
+                if self.config.verbose {
+                    println!(
+                            "  [Linear] No engineered features found, using all {} features for linear model",
+                            num_all_features
+                        );
+                }
+            } else {
                 // WHITEBOX: Log which features are selected for linear model
-                if self.config.verbose && !linear_feature_names.is_empty() {
+                if self.config.verbose {
                     println!(
                         "  [Linear] Selected {} engineered features for linear component:",
                         linear_feature_names.len()
@@ -924,17 +1031,43 @@ impl AutoBuilder {
                         println!("    - {}", name);
                     }
                     println!("  [Linear] Tree component uses all {} original features (numeric + encoded categoricals)",
-                             col_names.len() - 1 - linear_feature_names.len()); // -1 for target
+                                 col_names.len() - 1 - linear_feature_names.len());
+                    // -1 for target
                 }
+            }
 
-                (
-                    Some(all_extractor),
-                    Some(all_features),
-                    Some(linear_feature_indices),
-                )
-            } else {
-                (None, None, None)
-            };
+            // CRITICAL VALIDATION: LinearThenTree needs features for BOTH linear and tree models
+            if linear_feature_indices.is_empty() {
+                return Err(TreeBoostError::Data(format!(
+                        "LinearThenTree mode requires at least one feature for the linear model, but none were found!\n\n\
+                         Dataset has {} columns after preprocessing.\n\n\
+                         Common causes:\n\
+                         1. All features were dropped as useless (constants, IDs, text)\n\
+                         2. Feature engineering disabled and no features remain\n\n\
+                         Solutions:\n\
+                         - Verify your data has valid predictive features\n\
+                         - Check column names (avoid 'id', 'index' for real features)\n\
+                         - Try enabling feature engineering: AutoConfig::new().with_feature_engineering(FeatureEngineeringMode::Aggressive)",
+                        col_names.len()
+                    )));
+            }
+
+            let num_total_features = col_names.len() - 1; // -1 for target
+            if num_total_features == 0 {
+                return Err(TreeBoostError::Data(format!(
+                        "LinearThenTree mode requires features for the tree model, but none were found!\n\n\
+                         This should not happen if linear features exist. Please report this as a bug."
+                    )));
+            }
+
+            (
+                Some(all_extractor),
+                Some(all_features),
+                Some(linear_feature_indices),
+            )
+        } else {
+            (None, None, None)
+        };
         // Handle ensemble configuration by setting ensemble_seeds in UniversalConfig
         let final_config = if let Some(ref ensemble_config) = adapted_config.ensemble.get_config() {
             // Only PureTree and LinearThenTree support ensembles
@@ -987,7 +1120,11 @@ impl AutoBuilder {
                 fs::create_dir_all(output_dir)?;
 
                 // Build Pipeline from all discovered settings
-                let drop_columns: Vec<String> = profile.drop_columns.iter().map(|c| c.name.clone()).collect();
+                let drop_columns: Vec<String> = profile
+                    .drop_columns
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect();
                 let pipeline = self.build_pipeline(
                     &feature_plan,
                     &pipeline_state,
@@ -1048,7 +1185,11 @@ impl AutoBuilder {
 
         // Build Pipeline and set it on the model BEFORE creating BuildResult
         // This ensures the pipeline is serialized with model.rkyv
-        let drop_columns: Vec<String> = profile.drop_columns.iter().map(|c| c.name.clone()).collect();
+        let drop_columns: Vec<String> = profile
+            .drop_columns
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
         let pipeline = self.build_pipeline(
             &feature_plan,
             &pipeline_state,
@@ -1273,65 +1414,83 @@ impl AutoBuilder {
         // These encode domain-specific knowledge that AutoML cannot discover
         if !self.config.custom_features.is_empty() {
             if self.config.verbose {
-                println!("  [CustomFeatures] Applying {} user-defined features", self.config.custom_features.len());
+                println!(
+                    "  [CustomFeatures] Applying {} user-defined features",
+                    self.config.custom_features.len()
+                );
                 for feature in &self.config.custom_features {
                     println!("    - {}", feature.name);
                 }
             }
-            pipeline.add_step(PipelineStepKind::CustomFeatures(
-                CustomFeaturesStep::new(self.config.custom_features.clone())
-            ));
+            pipeline.add_step(PipelineStepKind::CustomFeatures(CustomFeaturesStep::new(
+                self.config.custom_features.clone(),
+            )));
         }
 
         // Step 1: EngineerFeaturesStep (if feature engineering was applied)
         if let Some(ref plan) = feature_plan {
             if !plan.is_empty() {
-                pipeline.add_step(PipelineStepKind::EngineerFeatures(EngineerFeaturesStep::new(
-                    plan.polynomial_features.clone(),
-                    plan.interaction_pairs.clone(),
-                    plan.ratio_pairs.clone(),
-                )));
+                pipeline.add_step(PipelineStepKind::EngineerFeatures(
+                    EngineerFeaturesStep::new(
+                        plan.polynomial_features.clone(),
+                        plan.interaction_pairs.clone(),
+                        plan.ratio_pairs.clone(),
+                    ),
+                ));
             }
         }
 
         // Step 2: EncodeCategoricalsStep (with learned encodings from pipeline_state)
         if !pipeline_state.categorical_encodings.is_empty() {
-            let encodings: Vec<(String, CategoryEncoding)> = pipeline_state.categorical_encodings
+            let encodings: Vec<(String, CategoryEncoding)> = pipeline_state
+                .categorical_encodings
                 .iter()
                 .map(|enc| {
-                    (enc.name.clone(), CategoryEncoding {
-                        method: "target".to_string(),
-                        category_mapping: enc.category_mapping.clone(),
-                        encoding_map: enc.encoding_map.clone(),
-                        bin_boundaries: enc.bin_boundaries.clone(),
-                    })
+                    (
+                        enc.name.clone(),
+                        CategoryEncoding {
+                            method: "target".to_string(),
+                            category_mapping: enc.category_mapping.clone(),
+                            encoding_map: enc.encoding_map.clone(),
+                            bin_boundaries: enc.bin_boundaries.clone(),
+                        },
+                    )
                 })
                 .collect();
-            pipeline.add_step(PipelineStepKind::EncodeCategoricals(EncodeCategoricalsState { encodings }));
+            pipeline.add_step(PipelineStepKind::EncodeCategoricals(
+                EncodeCategoricalsState { encodings },
+            ));
         }
 
         // Step 3: TransformTargetStep (if target transform was applied)
         if let Some(transform) = target_transform {
-            pipeline.add_step(PipelineStepKind::TransformTarget(TransformTargetStep::new(transform)));
+            pipeline.add_step(PipelineStepKind::TransformTarget(TransformTargetStep::new(
+                transform,
+            )));
         }
 
         // Step 4: BinNumericFeaturesStep (with learned boundaries from feature_info)
-        let boundaries: Vec<(String, Vec<f64>)> = pipeline_state.feature_info
+        let boundaries: Vec<(String, Vec<f64>)> = pipeline_state
+            .feature_info
             .iter()
             .filter(|fi| !fi.bin_boundaries.is_empty())
             .map(|fi| (fi.name.clone(), fi.bin_boundaries.clone()))
             .collect();
-        pipeline.add_step(PipelineStepKind::BinNumericFeatures(BinNumericFeaturesState {
-            num_bins: 255,
-            boundaries,
-        }));
+        pipeline.add_step(PipelineStepKind::BinNumericFeatures(
+            BinNumericFeaturesState {
+                num_bins: 255,
+                boundaries,
+            },
+        ));
 
         // Step 5: ExtractLinearFeaturesStep (if LinearThenTree mode with feature indices)
         if let Some(indices) = linear_feature_indices {
-            pipeline.add_step(PipelineStepKind::ExtractLinearFeatures(ExtractLinearFeaturesStep {
-                linear_feature_indices: indices,
-                all_feature_names: pipeline_state.column_order.clone(),
-            }));
+            pipeline.add_step(PipelineStepKind::ExtractLinearFeatures(
+                ExtractLinearFeaturesStep {
+                    linear_feature_indices: indices,
+                    all_feature_names: pipeline_state.column_order.clone(),
+                },
+            ));
         }
 
         // Don't set column_order - Pipeline is a graph, each step validates its own inputs
@@ -1564,7 +1723,9 @@ impl AutoBuilder {
                         min, max
                     );
                 }
-                return Ok(Some(crate::preprocessing::TargetTransformKind::logit(*min, *max)?));
+                return Ok(Some(crate::preprocessing::TargetTransformKind::logit(
+                    *min, *max,
+                )?));
             }
             TargetBoundConfig::Clamp { min, max } => {
                 if self.config.verbose {
@@ -1573,7 +1734,9 @@ impl AutoBuilder {
                         min, max
                     );
                 }
-                return Ok(Some(crate::preprocessing::TargetTransformKind::clamp(*min, *max)?));
+                return Ok(Some(crate::preprocessing::TargetTransformKind::clamp(
+                    *min, *max,
+                )?));
             }
             TargetBoundConfig::LogitEmpirical | TargetBoundConfig::ClampEmpirical => {
                 // Need to compute empirical bounds from data
@@ -1581,24 +1744,30 @@ impl AutoBuilder {
         }
 
         // For empirical modes, extract target column and compute bounds
-        let target_series = df
-            .column(target_col)
-            .map_err(|e| TreeBoostError::Data(format!("Target column '{}' not found: {}", target_col, e)))?;
+        let target_series = df.column(target_col).map_err(|e| {
+            TreeBoostError::Data(format!("Target column '{}' not found: {}", target_col, e))
+        })?;
 
         // Convert to f32 values
         let targets: Vec<f32> = match target_series.dtype() {
             polars::prelude::DataType::Float32 => {
                 target_series.f32()?.into_no_null_iter().collect()
             }
-            polars::prelude::DataType::Float64 => {
-                target_series.f64()?.into_no_null_iter().map(|x| x as f32).collect()
-            }
-            polars::prelude::DataType::Int32 => {
-                target_series.i32()?.into_no_null_iter().map(|x| x as f32).collect()
-            }
-            polars::prelude::DataType::Int64 => {
-                target_series.i64()?.into_no_null_iter().map(|x| x as f32).collect()
-            }
+            polars::prelude::DataType::Float64 => target_series
+                .f64()?
+                .into_no_null_iter()
+                .map(|x| x as f32)
+                .collect(),
+            polars::prelude::DataType::Int32 => target_series
+                .i32()?
+                .into_no_null_iter()
+                .map(|x| x as f32)
+                .collect(),
+            polars::prelude::DataType::Int64 => target_series
+                .i64()?
+                .into_no_null_iter()
+                .map(|x| x as f32)
+                .collect(),
             _ => {
                 // Non-numeric target, cannot apply transformation
                 return Ok(None);
@@ -1629,7 +1798,10 @@ impl AutoBuilder {
                         empirical_min, empirical_max
                     );
                 }
-                Ok(Some(crate::preprocessing::TargetTransformKind::logit(empirical_min, empirical_max)?))
+                Ok(Some(crate::preprocessing::TargetTransformKind::logit(
+                    empirical_min,
+                    empirical_max,
+                )?))
             }
             TargetBoundConfig::ClampEmpirical => {
                 if self.config.verbose {
@@ -1638,7 +1810,10 @@ impl AutoBuilder {
                         empirical_min, empirical_max
                     );
                 }
-                Ok(Some(crate::preprocessing::TargetTransformKind::clamp(empirical_min, empirical_max)?))
+                Ok(Some(crate::preprocessing::TargetTransformKind::clamp(
+                    empirical_min,
+                    empirical_max,
+                )?))
             }
             // Already handled above
             _ => Ok(None),
