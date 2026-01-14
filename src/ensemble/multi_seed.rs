@@ -173,7 +173,7 @@ impl MultiSeedTrainer {
         let n_folds = self.multi_seed_config.n_folds;
 
         // Generate K-fold split
-        let kfold = split_kfold(num_rows, n_folds, seed);
+        let kfold = split_kfold(num_rows, n_folds, seed)?;
         let mut oof_preds = vec![0.0f32; num_rows];
 
         // Train on each fold and collect OOF predictions

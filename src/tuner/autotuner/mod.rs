@@ -1561,7 +1561,7 @@ impl<M: TunableModel> AutoTuner<M> {
         params: &HashMap<String, f32>,
         k: usize,
     ) -> EvalResult {
-        let kfold = split_kfold(dataset.num_rows(), k, self.config.seed);
+        let kfold = split_kfold(dataset.num_rows(), k, self.config.seed)?;
         let config = self.build_config(params);
         let metric = self.select_metric();
 
@@ -1630,7 +1630,7 @@ impl<M: TunableModel> AutoTuner<M> {
             self.evaluate_conformal(dataset, params, calibration_ratio, quantile)
         } else {
             // Run conformal on each fold and average
-            let kfold = split_kfold(dataset.num_rows(), folds, self.config.seed);
+            let kfold = split_kfold(dataset.num_rows(), folds, self.config.seed)?;
             let mut fold_results = Vec::with_capacity(folds);
 
             for fold_idx in 0..folds {
@@ -2336,7 +2336,7 @@ impl<M: TunableModel> AutoTuner<M> {
         params: &HashMap<String, f32>,
         k: usize,
     ) -> EvalResult {
-        let kfold = split_kfold(raw_data.height(), k, self.config.seed);
+        let kfold = split_kfold(raw_data.height(), k, self.config.seed)?;
         let mut fold_results = Vec::with_capacity(k);
 
         for fold_idx in 0..k {
@@ -2379,7 +2379,7 @@ impl<M: TunableModel> AutoTuner<M> {
             )
         } else {
             // Run conformal on each fold and average
-            let kfold = split_kfold(raw_data.height(), folds, self.config.seed);
+            let kfold = split_kfold(raw_data.height(), folds, self.config.seed)?;
             let mut fold_results = Vec::with_capacity(folds);
 
             for fold_idx in 0..folds {
