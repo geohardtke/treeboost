@@ -9,6 +9,7 @@ pub const DEFAULT_GOSS_OTHER_RATE: f32 = 0.1;
 // Subsampling
 pub const DEFAULT_SUBSAMPLE: f32 = 1.0;
 pub const LARGE_DATA_SUBSAMPLE: f32 = 0.8;
+pub const ROBUST_SUBSAMPLE: f32 = 0.8; // For noise-robust training
 
 // Early Stopping
 pub const DEFAULT_EARLY_STOPPING_ROUNDS: usize = 0;
