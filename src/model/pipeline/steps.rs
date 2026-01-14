@@ -977,6 +977,12 @@ impl FormulaBuilder {
         self
     }
 
+    /// Add a constant (intercept) term
+    pub fn add_const(mut self, value: f64) -> Self {
+        self.terms.push(FeatureOp::constant(value));
+        self
+    }
+
     /// Add a LUT term for a categorical column
     pub fn add_lut(mut self, column: impl Into<String>, mapping: &[(&str, f64)]) -> Self {
         self.terms.push(FeatureOp::lut(column, mapping));

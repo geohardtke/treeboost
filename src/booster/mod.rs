@@ -11,13 +11,16 @@
 //! - `prediction`: Prediction implementations (inference methods)
 //! - `analysis`: Feature importance and model analysis
 //! - `conformal`: Conformal prediction intervals
+//! - `shap`: TreeSHAP feature attribution
 
 pub mod analysis;
 mod config;
 pub mod conformal;
 mod gbdt;
 pub mod prediction;
+pub mod shap;
 pub mod training;
 
 pub use config::{GBDTConfig, GbdtPreset, LossType, OutputType};
 pub use gbdt::GBDTModel;
+pub use shap::ShapValues;

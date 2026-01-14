@@ -5,11 +5,13 @@
 //! - `AutoBuilder`: High-level AutoML interface for simplified training
 //! - `AutoModel`: Self-contained trained model from AutoBuilder
 //! - `Pipeline`: Sequential data transformation pipeline with learned state
+//! - `PredictorKind`: Unified predictor abstraction (formula, model, gated, ensemble)
 
 mod auto;
 mod builder;
 mod config;
 mod pipeline;
+mod predictor;
 mod progress;
 mod tuning;
 mod universal;
@@ -30,6 +32,10 @@ pub use pipeline::{
     EngineerFeaturesStep, EngineerTimeSeriesFeaturesStep, ExtractLinearFeaturesStep, FeatureOp,
     FormulaBuilder, LutMapping, Pipeline, PipelineStep, PipelineStepKind, TransformTargetStep,
     TrigFeature, TrigFunc,
+};
+pub use predictor::{
+    EnsemblePredictor, EnsembleStrategy, FormulaPredictor, GatedPredictor, GatingConfig,
+    ModelPredictor,
 };
 pub use universal::{
     BoostingMode, IncrementalUpdateReport, ModeSelection, StackingStrategy, UniversalConfig,
