@@ -37,7 +37,7 @@ crate-type = ["cdylib", "rlib"]
 default = []
 python = ["dep:pyo3", "dep:numpy"]
 gpu = ["dep:wgpu", "dep:pollster"]
-cuda = ["dep:cudarc", "gpu"]  # CUDA also enables GPU for fallback chain
+cuda = ["dep:cudarc", "gpu"]       # CUDA also enables GPU for fallback chain
 mmap = ["dep:memmap2"]
 
 [[bin]]
@@ -46,7 +46,12 @@ path = "src/main.rs"
 
 [dependencies]
 # Data processing - columnar storage with lazy evaluation
-polars = { version = "0.51", features = ["parquet", "lazy", "dtype-full", "rank"] }
+polars = { version = "0.51", features = [
+  "parquet",
+  "lazy",
+  "dtype-full",
+  "rank",
+] }
 
 # Parallelism - work-stealing scheduler
 rayon = "1.10"
@@ -67,7 +72,7 @@ bytemuck = { version = "1.19", features = ["derive"] }
 rustc-hash = "2.1"
 
 # Random number generation for data splitting
-rand = "0.8"
+rand = "0.9"
 
 # Error handling
 thiserror = "2.0"
@@ -130,6 +135,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 approx = "0.5"
 tempfile = "3.15"
 fastrand = "2.3"
+rand_distr = "0.5"  # For statistical distributions in stress tests (compatible with rand 0.9)
 
 # Competitor GBDT implementations for benchmarking
 gbdt = { version = "0.1", features = ["enable_training"] }
