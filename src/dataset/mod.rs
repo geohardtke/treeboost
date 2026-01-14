@@ -75,4 +75,7 @@ pub use io::{
 pub use pipeline::{CategoricalEncodingState, DataPipeline, PipelineConfig, PipelineState};
 
 // Split types (from split/)
-pub use split::{split_holdout, split_holdout_by_era, split_kfold, HoldoutSplit, KFoldSplit};
+pub use split::{
+    split_group_kfold, split_holdout, split_holdout_by_era, split_kfold, split_stratified_kfold,
+    split_time_series, HoldoutSplit, KFoldSplit, TimeSeriesSplit,
+};
