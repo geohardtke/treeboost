@@ -232,7 +232,7 @@ impl EnsembleTree {
                 .internal_nodes()
                 .filter_map(|(idx, node)| {
                     node.split_info()
-                        .map(|(feat_idx, _, _, _, _)| (idx, feat_idx, node.sum_hessians))
+                        .map(|(feat_idx, _, _, _, _, _)| (idx, feat_idx, node.sum_hessians))
                 })
                 .collect(),
             EnsembleTree::Vector(t) => t
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn test_scalar_prediction() {
         let tree = Tree::from_nodes(vec![
-            Node::internal(0, 5, 5.0, 1, 2, 0, 100, 0.0, 100.0),
+            Node::internal(0, 5, 5.0, 1, 2, true, 0, 100, 0.0, 100.0),
             Node::leaf(1.0, 1, 50, 0.0, 50.0),
             Node::leaf(2.0, 1, 50, 0.0, 50.0),
         ]);
