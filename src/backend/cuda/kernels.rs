@@ -188,7 +188,7 @@ impl HistogramKernel {
     ) -> Vec<Histogram> {
         self.ensure_initialized();
 
-        if row_indices.is_empty() {
+        if row_indices.is_empty() || num_features == 0 {
             return (0..num_features).map(|_| Histogram::new()).collect();
         }
 
@@ -552,7 +552,7 @@ impl HistogramKernel {
     ) -> Vec<Vec<Histogram>> {
         self.ensure_initialized();
 
-        if node_ranges.is_empty() {
+        if node_ranges.is_empty() || num_features == 0 {
             return Vec::new();
         }
 

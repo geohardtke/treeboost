@@ -68,12 +68,17 @@ impl FullCudaTreeBuilder {
         max_leaves: usize,
         lambda: f32,
         min_samples_leaf: usize,
-        min_hessian_leaf: f32,
         min_gain: f32,
         learning_rate: f32,
+        split_finder: &crate::tree::SplitFinder,
     ) -> Tree {
         let num_rows = row_indices.len();
         let num_features = dataset.num_features();
+
+        // Handle edge cases: empty data or no features
+        if num_rows == 0 || num_features == 0 {
+            return Tree::new(0.0, num_rows, 0.0, 0.0);
+        }
 
         // Cache bins and grad/hess on GPU (once per tree)
         let bins = dataset.as_row_major();
@@ -235,15 +240,13 @@ impl FullCudaTreeBuilder {
                 if hists.is_empty() {
                     continue;
                 }
-                if let Some(split) = self.find_best_split_cpu(
-                    hists,
+                // Convert Vec<Histogram> to NodeHistograms for SplitFinder
+                let node_histograms = crate::histogram::NodeHistograms::from_vec(hists.clone());
+                if let Some(split) = split_finder.find_best_split(
+                    &node_histograms,
                     node.sum_gradients,
                     node.sum_hessians,
                     node.count,
-                    lambda,
-                    min_samples_leaf,
-                    min_hessian_leaf,
-                    min_gain,
                 ) {
                     splits_and_nodes.push((split, i));
                 }
@@ -368,6 +371,7 @@ impl FullCudaTreeBuilder {
                     split_value,
                     left_child: left_idx,
                     right_child: right_idx,
+                    default_left: split.default_left,
                 };
 
                 num_leaves += 1;
@@ -411,59 +415,5 @@ impl FullCudaTreeBuilder {
         }
 
         tree
-    }
-
-    /// CPU split finding (fast scan of 256 bins per feature).
-    fn find_best_split_cpu(
-        &self,
-        histograms: &[Histogram],
-        total_gradient: f32,
-        total_hessian: f32,
-        total_count: u32,
-        lambda: f32,
-        min_samples_leaf: usize,
-        min_hessian_leaf: f32,
-        min_gain: f32,
-    ) -> Option<SplitInfo> {
-        use crate::kernel;
-
-        let mut best: Option<SplitInfo> = None;
-
-        for (feature_idx, hist) in histograms.iter().enumerate() {
-            if let Some(candidate) = kernel::find_best_split(
-                &hist.sum_gradients(),
-                &hist.sum_hessians(),
-                &hist.counts(),
-                total_gradient,
-                total_hessian,
-                total_count,
-                lambda,
-                min_samples_leaf as u32,
-                min_hessian_leaf,
-            ) {
-                if candidate.gain > min_gain {
-                    let split = SplitInfo {
-                        feature_idx,
-                        bin_threshold: candidate.bin_threshold,
-                        split_value: 0.0,
-                        gain: candidate.gain,
-                        left_gradient: candidate.left_gradient,
-                        left_hessian: candidate.left_hessian,
-                        left_count: candidate.left_count,
-                        right_gradient: candidate.right_gradient,
-                        right_hessian: candidate.right_hessian,
-                        right_count: candidate.right_count,
-                    };
-
-                    match &best {
-                        None => best = Some(split),
-                        Some(b) if split.gain > b.gain => best = Some(split),
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        best
     }
 }
