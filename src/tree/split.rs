@@ -787,6 +787,42 @@ impl SplitFinder {
         per_era_totals: &[(f32, f32, u32)],
         feature_mask: Option<&[usize]>,
     ) -> Option<SplitInfo> {
+        // Validate era configuration for noise pruning
+        if self.noise_pruning {
+            let num_eras = era_histograms.num_eras();
+
+            // Need at least 2 eras for noise pruning
+            if num_eras < 2 {
+                eprintln!(
+                    "WARNING: noise_pruning enabled but only {} era(s) found. \
+                     Noise pruning requires 2 eras (Era 0=train, Era 1=validation). \
+                     All splits will be rejected.",
+                    num_eras
+                );
+                return None;
+            }
+
+            // Check that eras 0 and 1 exist in per_era_totals
+            let has_era_0 = per_era_totals
+                .get(0)
+                .map_or(false, |(_, _, count)| *count > 0);
+            let has_era_1 = per_era_totals
+                .get(1)
+                .map_or(false, |(_, _, count)| *count > 0);
+
+            if !has_era_0 || !has_era_1 {
+                eprintln!(
+                    "WARNING: noise_pruning enabled but missing required eras. \
+                     Found: Era 0={}, Era 1={}. \
+                     Noise pruning requires both Era 0 (train) and Era 1 (validation) \
+                     with non-zero samples. All splits will be rejected.",
+                    if has_era_0 { "present" } else { "missing" },
+                    if has_era_1 { "present" } else { "missing" }
+                );
+                return None;
+            }
+        }
+
         let mut best_split = SplitInfo::default();
         let num_features = era_histograms.num_features();
 
@@ -1224,5 +1260,149 @@ mod tests {
         assert!(allowed.contains(&0)); // same group
         assert!(allowed.contains(&1)); // same group
         assert_eq!(allowed.len(), 5); // All allowed since 2,3,4 are unconstrained
+    }
+
+    #[test]
+    fn test_noise_pruning_rejects_bad_validation_splits() {
+        use crate::histogram::EraHistograms;
+
+        // Setup: 2 eras (Era 0=train, Era 1=validation), 1 feature
+        let mut era_histograms = EraHistograms::new(2, 1);
+
+        // Era 0 (Train): Strong split signal
+        // Left bins (0-127): gradient=-2.0 (wants positive weight)
+        // Right bins (128-255): gradient=+2.0 (wants negative weight)
+        // This creates large gain from splitting
+        let train_hist = era_histograms.get_mut(0, 0);
+        for bin in 0..128 {
+            train_hist.accumulate(bin, -2.0, 1.0);
+        }
+        for bin in 128..=255 {
+            train_hist.accumulate(bin, 2.0, 1.0);
+        }
+
+        // Era 1 (Validation): Uniform/flat pattern (no real signal)
+        // All bins have small uniform gradients - splitting doesn't help
+        // This creates VERY LOW or NEGATIVE gain on validation (splitting is useless)
+        let val_hist = era_histograms.get_mut(1, 0);
+        for bin in 0..=255 {
+            val_hist.accumulate(bin, 0.01, 1.0); // Nearly uniform, tiny gradient
+        }
+
+        // Per-era totals: (gradient, hessian, count)
+        let per_era_totals = vec![
+            (-2.0 * 128.0 + 2.0 * 128.0, 256.0, 256), // Era 0: train (grad=0)
+            (0.01 * 256.0, 256.0, 256),               // Era 1: validation (grad=2.56)
+        ];
+
+        // Test 1: With noise_pruning enabled and stricter threshold (0.0),
+        // split should be REJECTED because validation gain is tiny/negligible
+        let finder_noise_pruning = SplitFinder::new()
+            .with_lambda(0.0)
+            .with_min_gain(0.0)
+            .with_noise_pruning(true)
+            .with_noise_pruning_threshold(0.5); // Reject if val gain <= 0.5
+
+        let split =
+            finder_noise_pruning.find_best_split_with_eras(&era_histograms, &per_era_totals);
+        assert!(
+            split.is_none(),
+            "Expected NO split with noise_pruning=true (validation has low gain)"
+        );
+
+        // Test 2: With noise_pruning disabled (DES mode), split might still be accepted
+        // because DES checks directional agreement, not gain magnitude
+        let finder_des = SplitFinder::new()
+            .with_lambda(0.0)
+            .with_min_gain(0.0)
+            .with_noise_pruning(false); // Use DES directional agreement
+
+        let _split_des = finder_des.find_best_split_with_eras(&era_histograms, &per_era_totals);
+        // DES might accept this if there's directional agreement
+        // (we're not asserting here as DES behavior depends on implementation details)
+    }
+
+    #[test]
+    fn test_noise_pruning_validation_with_missing_eras() {
+        use crate::histogram::EraHistograms;
+
+        // Setup: Only 1 era (should fail validation)
+        let era_histograms_single = EraHistograms::new(1, 1);
+        let per_era_totals_single = vec![(0.0, 256.0, 256)];
+
+        let finder = SplitFinder::new()
+            .with_noise_pruning(true)
+            .with_noise_pruning_threshold(-0.1);
+
+        // Should return None with warning about insufficient eras
+        let split =
+            finder.find_best_split_with_eras(&era_histograms_single, &per_era_totals_single);
+        assert!(split.is_none(), "Expected None when only 1 era provided");
+
+        // Setup: 2 eras but Era 1 has zero samples
+        let mut era_histograms_zero = EraHistograms::new(2, 1);
+        let train_hist = era_histograms_zero.get_mut(0, 0);
+        for bin in 0..128 {
+            train_hist.accumulate(bin, -1.0, 1.0);
+        }
+        // Era 1 has no data
+
+        let per_era_totals_zero = vec![
+            (-128.0, 128.0, 128), // Era 0: has data
+            (0.0, 0.0, 0),        // Era 1: zero samples
+        ];
+
+        let split_zero =
+            finder.find_best_split_with_eras(&era_histograms_zero, &per_era_totals_zero);
+        assert!(
+            split_zero.is_none(),
+            "Expected None when Era 1 has zero samples"
+        );
+    }
+
+    #[test]
+    fn test_noise_pruning_accepts_good_validation_splits() {
+        use crate::histogram::EraHistograms;
+
+        // Setup: Both eras agree on the split (same pattern)
+        let mut era_histograms = EraHistograms::new(2, 1);
+
+        // Era 0 (Train): Good signal
+        let train_hist = era_histograms.get_mut(0, 0);
+        for bin in 0..128 {
+            train_hist.accumulate(bin, -2.0, 1.0);
+        }
+        for bin in 128..=255 {
+            train_hist.accumulate(bin, 2.0, 1.0);
+        }
+
+        // Era 1 (Validation): SAME signal (not noise)
+        let val_hist = era_histograms.get_mut(1, 0);
+        for bin in 0..128 {
+            val_hist.accumulate(bin, -2.0, 1.0); // Same pattern as train
+        }
+        for bin in 128..=255 {
+            val_hist.accumulate(bin, 2.0, 1.0); // Same pattern as train
+        }
+
+        let per_era_totals = vec![
+            (-2.0 * 128.0 + 2.0 * 128.0, 256.0, 256), // Era 0
+            (-2.0 * 128.0 + 2.0 * 128.0, 256.0, 256), // Era 1
+        ];
+
+        // With noise_pruning enabled, split should be ACCEPTED
+        // because validation gain is positive (same pattern as train)
+        let finder = SplitFinder::new()
+            .with_lambda(0.0)
+            .with_min_gain(0.0)
+            .with_noise_pruning(true)
+            .with_noise_pruning_threshold(-0.1);
+
+        let split = finder.find_best_split_with_eras(&era_histograms, &per_era_totals);
+        assert!(
+            split.is_some(),
+            "Expected split when both train and validation have positive gain"
+        );
+        assert!(split.unwrap().gain > 0.0, "Expected positive gain");
     }
 }
