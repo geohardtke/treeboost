@@ -226,7 +226,7 @@ impl TargetTransform for IdentityTransform {
 ///
 /// # Example
 /// ```
-/// use treeboost::preprocessing::LogitTransform;
+/// use treeboost::preprocessing::{LogitTransform, TargetTransform};
 ///
 /// // Exam scores in [0, 100]
 /// let transform = LogitTransform::new(0.0, 100.0).unwrap();
