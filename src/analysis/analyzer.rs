@@ -373,7 +373,7 @@ impl DatasetAnalysis {
             }
 
             for i in config.max_sample_rows..num_rows {
-                let j = rng.gen_range(0..=i);
+                let j = rng.random_range(0..=i);
                 if j < config.max_sample_rows {
                     indices[j] = i;
                 }
@@ -594,7 +594,7 @@ impl DatasetAnalysis {
             }
 
             for i in config.max_sample_rows..num_rows {
-                let j = rng.gen_range(0..=i);
+                let j = rng.random_range(0..=i);
                 if j < config.max_sample_rows {
                     indices[j] = i;
                 }

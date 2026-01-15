@@ -323,6 +323,7 @@ impl FullGpuTreeBuilder {
                     left_child: left_idx,
                     right_child: right_idx,
                     default_left: split.default_left,
+                    gain: split.gain,
                 };
 
                 num_leaves += 1;
@@ -581,6 +582,7 @@ impl FullGpuTreeBuilder {
                 left_child: left_idx,
                 right_child: right_idx,
                 default_left: split.default_left,
+                gain: split.gain,
             };
 
             num_leaves += 1;

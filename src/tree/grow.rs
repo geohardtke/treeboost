@@ -218,6 +218,13 @@ pub struct TreeGrower {
     /// Enable era-based splitting (Directional Era Splitting / DES)
     /// When enabled, only accepts splits where all eras agree on direction
     era_splitting: bool,
+    /// Enable noise pruning (PaloBoost-style validation)
+    /// When enabled with era_splitting, Era 0 = train, Era 1 = validation
+    /// Splits found on Era 0 are rejected if Era 1 gain <= threshold
+    noise_pruning: bool,
+    /// Noise pruning threshold for validation gain
+    /// Splits are rejected if validation gain <= this threshold
+    noise_pruning_threshold: f32,
     /// Enable adaptive missing value direction selection
     /// When true, evaluates both directions for missing values and selects optimal path
     use_missing_value_learning: bool,
@@ -243,6 +250,8 @@ impl Default for TreeGrower {
             gpu_batch_size: 32, // Default batch size for GPU histogram dispatch
             use_gpu_subgroups: false,
             era_splitting: false,              // Disabled by default
+            noise_pruning: false,              // Disabled by default
+            noise_pruning_threshold: -0.1,     // Default threshold
             use_missing_value_learning: false, // Disabled by default
             cached_backend: RefCell::new(None),
         }
@@ -265,6 +274,8 @@ impl std::fmt::Debug for TreeGrower {
             .field("gpu_batch_size", &self.gpu_batch_size)
             .field("use_gpu_subgroups", &self.use_gpu_subgroups)
             .field("era_splitting", &self.era_splitting)
+            .field("noise_pruning", &self.noise_pruning)
+            .field("noise_pruning_threshold", &self.noise_pruning_threshold)
             .finish()
     }
 }
@@ -287,6 +298,8 @@ impl Clone for TreeGrower {
             gpu_batch_size: self.gpu_batch_size,
             use_gpu_subgroups: self.use_gpu_subgroups,
             era_splitting: self.era_splitting,
+            noise_pruning: self.noise_pruning,
+            noise_pruning_threshold: self.noise_pruning_threshold,
             use_missing_value_learning: self.use_missing_value_learning,
             // Reset cached backend - clone gets its own lazily initialized backend
             cached_backend: RefCell::new(None),
@@ -418,6 +431,33 @@ impl TreeGrower {
         self.era_splitting
     }
 
+    /// Enable or disable noise pruning (PaloBoost-style)
+    ///
+    /// When enabled with era_splitting, treats Era 0 as training and Era 1 as validation.
+    /// Splits are found using Era 0 gain, but rejected if Era 1 gain <= 0.
+    ///
+    /// - Default: false (disabled)
+    pub fn with_noise_pruning(mut self, enabled: bool) -> Self {
+        self.noise_pruning = enabled;
+        self
+    }
+
+    /// Check if noise pruning is enabled
+    pub fn noise_pruning(&self) -> bool {
+        self.noise_pruning
+    }
+
+    /// Set noise pruning threshold
+    ///
+    /// Splits are rejected if validation gain <= this threshold.
+    /// - 0.0: Classic PaloBoost (only accept positive validation gains)
+    /// - -0.1: Default (allows small negative gains, handles distribution shift)
+    /// - -0.2: More permissive (for high temporal distribution shift)
+    pub fn with_noise_pruning_threshold(mut self, threshold: f32) -> Self {
+        self.noise_pruning_threshold = threshold;
+        self
+    }
+
     /// Enable adaptive missing value direction selection
     ///
     /// When enabled, evaluates both child directions for missing values at each split
@@ -471,6 +511,8 @@ impl TreeGrower {
             .with_min_gain(self.min_gain)
             .with_monotonic_constraints(self.monotonic_constraints.clone())
             .with_missing_value_learning(self.use_missing_value_learning)
+            .with_noise_pruning(self.noise_pruning)
+            .with_noise_pruning_threshold(self.noise_pruning_threshold)
     }
 
     /// Compute per-era totals (gradient, hessian, count) for given row indices
@@ -775,6 +817,7 @@ impl TreeGrower {
                     left_child: left_idx,
                     right_child: right_idx,
                     default_left: split_info.default_left,
+                    gain: split_info.gain,
                 };
 
                 num_leaves += 1; // One leaf becomes two (net +1)
@@ -1162,6 +1205,7 @@ impl TreeGrower {
                 left_child: left_idx,
                 right_child: right_idx,
                 default_left: split_info.default_left,
+                gain: split_info.gain,
             };
 
             num_leaves += 1;
@@ -1534,6 +1578,7 @@ impl TreeGrower {
                     left_child: left_idx,
                     right_child: right_idx,
                     default_left: split_info.default_left,
+                    gain: split_info.gain,
                 };
 
                 num_leaves += 1;

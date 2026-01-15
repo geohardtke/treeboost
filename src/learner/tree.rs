@@ -80,6 +80,45 @@ pub struct TreeConfig {
 
     /// Enable era-based splitting (DES)
     pub era_splitting: bool,
+
+    /// Enable noise pruning (PaloBoost-style)
+    ///
+    /// When enabled with `era_splitting`, treats eras as:
+    /// - Era 0: Training set (in-bag)
+    /// - Era 1: Validation set (out-of-bag)
+    ///
+    /// Splits are found using Era 0 gain, but rejected if Era 1 gain <= threshold.
+    /// This prevents overfitting by validating each split against held-out data.
+    #[serde(default)]
+    pub noise_pruning: bool,
+
+    /// Noise pruning threshold for validation gain
+    /// Splits are rejected if validation gain <= this threshold
+    /// Default: -0.1 (allows small negative gains to handle distribution shift)
+    /// Stricter: 0.0 (classic PaloBoost, only accept positive validation gains)
+    /// More permissive: -0.2 (for high temporal distribution shift)
+    #[serde(default = "default_noise_pruning_threshold")]
+    pub noise_pruning_threshold: f32,
+
+    /// Post-pruning gamma threshold (Cost-Complexity Pruning)
+    ///
+    /// Applied after tree growth to collapse branches where split gain < gamma.
+    /// This solves the "Horizon Effect" where greedy algorithms miss good splits
+    /// behind initially weak ones.
+    ///
+    /// Set to 0.0 to disable post-pruning (default).
+    /// Typical values: 0.0 (disabled) to 5.0 (aggressive pruning).
+    ///
+    /// **When to use:**
+    /// - Complex datasets where deep interactions exist behind weak first splits
+    /// - When you want accuracy improvement (not safety like noise_pruning)
+    /// - Combined with lower min_gain during growth to find deep patterns
+    #[serde(default)]
+    pub post_pruning_gamma: f32,
+}
+
+fn default_noise_pruning_threshold() -> f32 {
+    -0.1
 }
 
 /// Presets for common tree configurations.
@@ -112,6 +151,9 @@ impl Default for TreeConfig {
             monotonic_constraints: Vec::new(),
             interaction_groups: Vec::new(),
             era_splitting: false,
+            noise_pruning: false,
+            noise_pruning_threshold: default_noise_pruning_threshold(),
+            post_pruning_gamma: 0.0,
         }
     }
 }
@@ -268,6 +310,51 @@ impl TreeConfig {
         self
     }
 
+    /// Enable noise pruning (PaloBoost-style validation)
+    ///
+    /// When enabled with `era_splitting`, uses Era 0 as training and Era 1 as validation.
+    /// Splits are found on Era 0 but rejected if Era 1 gain <= threshold.
+    pub fn with_noise_pruning(mut self, enabled: bool) -> Self {
+        self.noise_pruning = enabled;
+        self
+    }
+
+    /// Set noise pruning threshold
+    ///
+    /// Splits are rejected if validation gain <= this threshold.
+    /// - 0.0: Classic PaloBoost (only accept positive validation gains)
+    /// - -0.1: Default (allows small negative gains, handles distribution shift)
+    /// - -0.2: More permissive (for high temporal distribution shift)
+    pub fn with_noise_pruning_threshold(mut self, threshold: f32) -> Self {
+        self.noise_pruning_threshold = threshold;
+        self
+    }
+
+    /// Set post-pruning gamma threshold (Cost-Complexity Pruning)
+    ///
+    /// Applied after tree growth to collapse branches where split gain < gamma.
+    /// This solves the "Horizon Effect" where greedy algorithms miss good splits
+    /// behind initially weak ones.
+    ///
+    /// # Arguments
+    /// * `gamma` - Minimum gain threshold. Set to 0.0 to disable (default).
+    ///
+    /// # Strategy
+    /// 1. Grow trees with low/no min_gain (allow deep exploration)
+    /// 2. Post-prune to remove branches that didn't contribute enough
+    ///
+    /// Returns error if gamma is negative.
+    pub fn with_post_pruning_gamma(mut self, gamma: f32) -> Result<Self> {
+        if gamma < 0.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "post_pruning_gamma must be >= 0.0, got {}",
+                gamma
+            )));
+        }
+        self.post_pruning_gamma = gamma;
+        Ok(self)
+    }
+
     /// Build a TreeGrower from this config
     ///
     /// # Arguments
@@ -302,6 +389,8 @@ impl TreeConfig {
             .with_interaction_constraints(interaction_constraints)
             .with_backend(backend.unwrap_or(BackendType::Auto))
             .with_era_splitting(self.era_splitting)
+            .with_noise_pruning(self.noise_pruning)
+            .with_noise_pruning_threshold(self.noise_pruning_threshold)
     }
 }
 

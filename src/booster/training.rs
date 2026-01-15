@@ -467,6 +467,8 @@ impl GBDTModel {
             .with_backend(config.backend_type)
             .with_gpu_subgroups(config.use_gpu_subgroups)
             .with_era_splitting(config.era_splitting)
+            .with_noise_pruning(config.noise_pruning)
+            .with_noise_pruning_threshold(config.noise_pruning_threshold)
             .with_missing_value_learning(config.use_missing_value_learning);
 
         let mut trees = Vec::with_capacity(config.num_rounds);
@@ -608,9 +610,6 @@ impl GBDTModel {
             #[allow(unused_mut, unused_assignments)]
             let mut tree: Option<Tree> = None;
 
-            // Create split finder for GPU builders
-            let split_finder = tree_grower.create_split_finder();
-
             // Try Full GPU builders first (level-wise growth, all-GPU pipeline)
             #[cfg(feature = "cuda")]
             if tree.is_none() {
@@ -733,6 +732,12 @@ impl GBDTModel {
                     }
                 }
             };
+
+            // Apply post-pruning if enabled (Cost-Complexity Pruning)
+            let mut tree = tree;
+            if config.post_pruning_gamma > 0.0 {
+                tree.post_prune(config.post_pruning_gamma, config.lambda);
+            }
 
             // Update predictions with the new tree
             for idx in 0..predictions.len() {
@@ -929,6 +934,8 @@ impl GBDTModel {
             .with_backend(config.backend_type)
             .with_gpu_subgroups(config.use_gpu_subgroups)
             .with_era_splitting(config.era_splitting)
+            .with_noise_pruning(config.noise_pruning)
+            .with_noise_pruning_threshold(config.noise_pruning_threshold)
             .with_missing_value_learning(config.use_missing_value_learning);
 
         // Trees stored as: [round0_class0, round0_class1, ..., round0_classK, round1_class0, ...]
@@ -955,12 +962,17 @@ impl GBDTModel {
                 );
 
                 // Grow tree for this class
-                let tree = tree_grower.grow_with_indices(
+                let mut tree = tree_grower.grow_with_indices(
                     dataset,
                     &gradients,
                     &hessians,
                     &train_indices,
                 )?;
+
+                // Apply post-pruning if enabled (Cost-Complexity Pruning)
+                if config.post_pruning_gamma > 0.0 {
+                    tree.post_prune(config.post_pruning_gamma, config.lambda);
+                }
 
                 // Update predictions for this class
                 for idx in 0..num_rows {
@@ -1252,7 +1264,7 @@ impl GBDTModel {
 
         for tree in trees {
             for (_, node) in tree.internal_nodes() {
-                if let Some((feature_idx, _, _, _, _, _)) = node.split_info() {
+                if let Some((feature_idx, _, _, _, _, _, _)) = node.split_info() {
                     importances[feature_idx] += node.sum_hessians;
                 }
             }
@@ -1464,6 +1476,8 @@ impl GBDTModel {
             .with_backend(config.backend_type)
             .with_gpu_subgroups(config.use_gpu_subgroups)
             .with_era_splitting(config.era_splitting)
+            .with_noise_pruning(config.noise_pruning)
+            .with_noise_pruning_threshold(config.noise_pruning_threshold)
             .with_missing_value_learning(config.use_missing_value_learning);
 
         let mut trees = Vec::with_capacity(config.num_rounds);

@@ -404,6 +404,40 @@ pub struct GBDTConfig {
     /// Requires passing `era_indices` to the training method.
     pub era_splitting: bool,
 
+    /// Enable noise pruning (PaloBoost-style validation)
+    ///
+    /// When enabled with `era_splitting`, treats eras as:
+    /// - Era 0: Training set (in-bag)
+    /// - Era 1: Validation set (out-of-bag)
+    ///
+    /// Splits are found using Era 0 gain, but rejected if Era 1 gain <= 0.
+    /// This prevents overfitting by validating each split against held-out data.
+    ///
+    /// Use cases:
+    /// - Noisy datasets where standard regularization isn't enough
+    /// - High-dimensional data with spurious correlations
+    /// - Temporal validation (train on past, validate on future)
+    pub noise_pruning: bool,
+
+    /// Noise pruning threshold for validation gain
+    /// Splits are rejected if validation gain <= this threshold
+    /// Default: -0.1 (allows small negative gains to handle distribution shift)
+    /// Stricter: 0.0 (classic PaloBoost, only accept positive validation gains)
+    /// More permissive: -0.2 (for high temporal distribution shift)
+    pub noise_pruning_threshold: f32,
+
+    /// Post-pruning gamma threshold (Cost-Complexity Pruning)
+    ///
+    /// Applied after tree growth to collapse branches where split gain < gamma.
+    /// This solves the "Horizon Effect" where greedy algorithms miss good splits
+    /// behind initially weak ones.
+    ///
+    /// Set to 0.0 to disable post-pruning (default).
+    /// Typical values: 0.0 (disabled) to 5.0 (aggressive pruning).
+    ///
+    /// **Purpose**: Accuracy improvement (complements noise_pruning which is for safety)
+    pub post_pruning_gamma: f32,
+
     /// Enable adaptive missing value direction selection
     ///
     /// When enabled, evaluates both child directions for missing values at each split
@@ -481,6 +515,13 @@ impl Default for GBDTConfig {
 
             // Era-based splitting (disabled by default)
             era_splitting: false,
+
+            // Noise pruning (disabled by default)
+            noise_pruning: false,
+            noise_pruning_threshold: -0.1, // Default threshold
+
+            // Post-pruning (disabled by default)
+            post_pruning_gamma: 0.0, // 0.0 = disabled
 
             // Missing value learning (disabled by default)
             use_missing_value_learning: false,
@@ -968,6 +1009,84 @@ impl GBDTConfig {
     pub fn with_era_splitting(mut self, enabled: bool) -> Self {
         self.era_splitting = enabled;
         self
+    }
+
+    /// Enable noise pruning (PaloBoost-style validation)
+    ///
+    /// When enabled with `era_splitting`, treats Era 0 as training and Era 1 as validation.
+    /// Splits are found using Era 0 gain, but rejected if Era 1 gain <= 0.
+    ///
+    /// This prevents overfitting by validating each split against held-out data.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use treeboost::GBDTConfig;
+    ///
+    /// let config = GBDTConfig::new()
+    ///     .with_era_splitting(true)
+    ///     .with_noise_pruning(true);
+    ///
+    /// // Set era indices: 0 for train rows, 1 for validation rows
+    /// // dataset.set_era_indices(era_indices);
+    /// ```
+    pub fn with_noise_pruning(mut self, enabled: bool) -> Self {
+        self.noise_pruning = enabled;
+        self
+    }
+
+    /// Set noise pruning threshold
+    ///
+    /// Splits are rejected if validation gain <= this threshold.
+    /// - 0.0: Classic PaloBoost (only accept positive validation gains)
+    /// - -0.1: Default (allows small negative gains, handles distribution shift)
+    /// - -0.2: More permissive (for high temporal distribution shift)
+    ///
+    /// # Example
+    /// ```ignore
+    /// use treeboost::GBDTConfig;
+    ///
+    /// let config = GBDTConfig::new()
+    ///     .with_era_splitting(true)
+    ///     .with_noise_pruning(true)
+    ///     .with_noise_pruning_threshold(-0.15);  // Custom threshold
+    /// ```
+    pub fn with_noise_pruning_threshold(mut self, threshold: f32) -> Self {
+        self.noise_pruning_threshold = threshold;
+        self
+    }
+
+    /// Set post-pruning gamma threshold (Cost-Complexity Pruning)
+    ///
+    /// Applied after tree growth to collapse branches where split gain < gamma.
+    /// This solves the "Horizon Effect" where greedy algorithms miss good splits
+    /// behind initially weak ones.
+    ///
+    /// # Arguments
+    /// * `gamma` - Minimum gain threshold. Set to 0.0 to disable (default).
+    ///
+    /// # Strategy
+    /// 1. Grow trees with low/no min_gain (allow deep exploration)
+    /// 2. Post-prune to remove branches that didn't contribute enough
+    ///
+    /// # Example
+    /// ```ignore
+    /// use treeboost::GBDTConfig;
+    ///
+    /// let config = GBDTConfig::new()
+    ///     .with_min_gain(0.0)           // Allow all splits during growth
+    ///     .with_post_pruning_gamma(1.0); // Then prune weak branches
+    /// ```
+    ///
+    /// Returns error if gamma is negative.
+    pub fn with_post_pruning_gamma(mut self, gamma: f32) -> Result<Self, crate::TreeBoostError> {
+        if gamma < 0.0 {
+            return Err(crate::TreeBoostError::Config(format!(
+                "post_pruning_gamma must be >= 0.0, got {}",
+                gamma
+            )));
+        }
+        self.post_pruning_gamma = gamma;
+        Ok(self)
     }
 
     /// Enable adaptive missing value direction selection

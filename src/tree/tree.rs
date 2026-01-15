@@ -395,6 +395,72 @@ impl Tree {
         }
     }
 
+    /// Post-prune the tree to improve accuracy (Cost-Complexity Pruning).
+    ///
+    /// This collapses branches where the split gain is less than the threshold (gamma),
+    /// solving the "Horizon Effect" where greedy algorithms miss good splits behind
+    /// initially weak ones.
+    ///
+    /// # Algorithm
+    /// Bottom-up traversal: if both children are leaves and the node's gain < gamma,
+    /// collapse the node back to a leaf using the stored gradient/hessian statistics.
+    ///
+    /// # Arguments
+    /// * `gamma` - Minimum gain threshold. Splits with gain < gamma are pruned.
+    /// * `lambda` - L2 regularization parameter for computing leaf weights.
+    ///
+    /// # Returns
+    /// Number of nodes pruned.
+    pub fn post_prune(&mut self, gamma: f32, lambda: f32) -> usize {
+        // Cannot prune if root is already a leaf
+        if self.nodes.is_empty() || self.nodes[0].is_leaf() {
+            return 0;
+        }
+
+        let mut pruned_count = 0;
+        self.prune_recursive(0, gamma, lambda, &mut pruned_count);
+        pruned_count
+    }
+
+    /// Recursive helper for post-pruning. Returns true if the node is (now) a leaf.
+    fn prune_recursive(
+        &mut self,
+        node_idx: usize,
+        gamma: f32,
+        lambda: f32,
+        pruned_count: &mut usize,
+    ) -> bool {
+        // Extract children indices (borrow checker dance)
+        let (left_child, right_child, gain) = match self.nodes[node_idx].node_type {
+            NodeType::Leaf { .. } => return true,
+            NodeType::Internal {
+                left_child,
+                right_child,
+                gain,
+                ..
+            } => (left_child, right_child, gain),
+        };
+
+        // Recursively prune children first (bottom-up)
+        let left_is_leaf = self.prune_recursive(left_child, gamma, lambda, pruned_count);
+        let right_is_leaf = self.prune_recursive(right_child, gamma, lambda, pruned_count);
+
+        // Only consider collapsing if both children are now leaves
+        if left_is_leaf && right_is_leaf && gain < gamma {
+            // Collapse this node to a leaf
+            // Use the stored gradient/hessian stats to compute leaf value
+            let node = &self.nodes[node_idx];
+            let leaf_value =
+                Node::compute_leaf_weight(node.sum_gradients, node.sum_hessians, lambda);
+
+            self.nodes[node_idx].node_type = NodeType::Leaf { value: leaf_value };
+            *pruned_count += 1;
+            return true;
+        }
+
+        false
+    }
+
     /// Get all leaf nodes
     pub fn leaves(&self) -> impl Iterator<Item = (usize, &Node)> {
         self.nodes.iter().enumerate().filter(|(_, n)| n.is_leaf())
@@ -435,9 +501,9 @@ mod tests {
         //           leaf=2.0   leaf=3.0
 
         let tree = Tree::from_nodes(vec![
-            Node::internal(0, 5, 5.0, 1, 2, true, 0, 100, 0.0, 100.0),
+            Node::internal(0, 5, 5.0, 1, 2, true, 10.0, 0, 100, 0.0, 100.0),
             Node::leaf(1.0, 1, 50, 0.0, 50.0),
-            Node::internal(1, 10, 10.0, 3, 4, true, 1, 50, 0.0, 50.0),
+            Node::internal(1, 10, 10.0, 3, 4, true, 5.0, 1, 50, 0.0, 50.0),
             Node::leaf(2.0, 2, 25, 0.0, 25.0),
             Node::leaf(3.0, 2, 25, 0.0, 25.0),
         ]);
@@ -456,9 +522,9 @@ mod tests {
     #[test]
     fn test_tree_stats() {
         let tree = Tree::from_nodes(vec![
-            Node::internal(0, 5, 5.0, 1, 2, true, 0, 100, 0.0, 100.0),
+            Node::internal(0, 5, 5.0, 1, 2, true, 10.0, 0, 100, 0.0, 100.0),
             Node::leaf(1.0, 1, 50, 0.0, 50.0),
-            Node::internal(1, 10, 10.0, 3, 4, true, 1, 50, 0.0, 50.0),
+            Node::internal(1, 10, 10.0, 3, 4, true, 5.0, 1, 50, 0.0, 50.0),
             Node::leaf(2.0, 2, 25, 0.0, 25.0),
             Node::leaf(3.0, 2, 25, 0.0, 25.0),
         ]);
@@ -466,5 +532,97 @@ mod tests {
         assert_eq!(tree.num_nodes(), 5);
         assert_eq!(tree.num_leaves(), 3);
         assert_eq!(tree.max_depth(), 2);
+    }
+
+    #[test]
+    fn test_post_prune_no_effect_when_all_gains_above_gamma() {
+        // Tree with all gains > gamma (10.0 and 5.0 > 1.0)
+        let mut tree = Tree::from_nodes(vec![
+            Node::internal(0, 5, 5.0, 1, 2, true, 10.0, 0, 100, -10.0, 100.0),
+            Node::leaf(1.0, 1, 50, -5.0, 50.0),
+            Node::internal(1, 10, 10.0, 3, 4, true, 5.0, 1, 50, -5.0, 50.0),
+            Node::leaf(2.0, 2, 25, -2.5, 25.0),
+            Node::leaf(3.0, 2, 25, -2.5, 25.0),
+        ]);
+
+        let pruned = tree.post_prune(1.0, 0.0);
+        assert_eq!(pruned, 0);
+        assert_eq!(tree.num_leaves(), 3);
+        assert_eq!(tree.num_nodes(), 5);
+    }
+
+    #[test]
+    fn test_post_prune_collapses_weak_splits() {
+        // Tree where node 2 (internal) has gain=0.5 < gamma=1.0
+        // Structure:
+        //        [f0 <= 5] gain=10.0
+        //        /        \
+        //    leaf=1.0   [f1 <= 10] gain=0.5 (WEAK - should be pruned)
+        //               /        \
+        //           leaf=2.0   leaf=3.0
+        //
+        // After pruning with gamma=1.0, node 2 should become a leaf
+        let mut tree = Tree::from_nodes(vec![
+            Node::internal(0, 5, 5.0, 1, 2, true, 10.0, 0, 100, -10.0, 100.0),
+            Node::leaf(1.0, 1, 50, -5.0, 50.0),
+            Node::internal(1, 10, 10.0, 3, 4, true, 0.5, 1, 50, -5.0, 50.0), // gain=0.5 < gamma=1.0
+            Node::leaf(2.0, 2, 25, -2.5, 25.0),
+            Node::leaf(3.0, 2, 25, -2.5, 25.0),
+        ]);
+
+        // Before pruning: f0=7 -> node 2 -> f1=5 -> leaf=2.0
+        assert_eq!(tree.predict(|f| if f == 0 { 7 } else { 5 }), 2.0);
+
+        let pruned = tree.post_prune(1.0, 1.0); // gamma=1.0, lambda=1.0
+        assert_eq!(pruned, 1); // Node 2 should be pruned
+
+        // Verify node 2 is now a leaf with correct value
+        // leaf_value = -sum_g / (sum_h + lambda) = -(-5.0) / (50.0 + 1.0) = 5.0 / 51.0 ≈ 0.098
+        assert!(tree.get_node(2).is_leaf());
+        let value = tree.get_node(2).leaf_value().unwrap();
+        assert!((value - 0.098).abs() < 0.01);
+
+        // After pruning: f0=7 -> node 2 (now a leaf) -> value ≈ 0.098
+        let pred = tree.predict(|f| if f == 0 { 7 } else { 5 });
+        assert!((pred - 0.098).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_post_prune_cascades_upward() {
+        // Tree where multiple levels should be pruned
+        //        [f0 <= 5] gain=0.3 (WEAK)
+        //        /        \
+        //    leaf=1.0   [f1 <= 10] gain=0.2 (WEAK)
+        //               /        \
+        //           leaf=2.0   leaf=3.0
+        //
+        // With gamma=1.0, node 2 is pruned first, then node 0 can be pruned
+        let mut tree = Tree::from_nodes(vec![
+            Node::internal(0, 5, 5.0, 1, 2, true, 0.3, 0, 100, -10.0, 100.0), // gain=0.3
+            Node::leaf(1.0, 1, 50, -5.0, 50.0),
+            Node::internal(1, 10, 10.0, 3, 4, true, 0.2, 1, 50, -5.0, 50.0), // gain=0.2
+            Node::leaf(2.0, 2, 25, -2.5, 25.0),
+            Node::leaf(3.0, 2, 25, -2.5, 25.0),
+        ]);
+
+        // Before pruning: f0=3 -> leaf=1.0
+        assert_eq!(tree.predict(|f| if f == 0 { 3 } else { 5 }), 1.0);
+
+        let pruned = tree.post_prune(1.0, 1.0);
+        assert_eq!(pruned, 2); // Both internal nodes should be pruned
+        assert!(tree.get_node(0).is_leaf()); // Root is now a leaf
+
+        // After pruning: root is leaf with value = -(-10.0) / (100.0 + 1.0) ≈ 0.099
+        let pred = tree.predict(|_| 0);
+        assert!((pred - 0.099).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_post_prune_single_leaf_tree() {
+        // Already a leaf - nothing to prune
+        let mut tree = Tree::new(0.5, 100, 10.0, 20.0);
+        let pruned = tree.post_prune(1.0, 0.0);
+        assert_eq!(pruned, 0);
+        assert!(tree.root().is_leaf());
     }
 }

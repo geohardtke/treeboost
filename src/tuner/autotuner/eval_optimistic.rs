@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use crate::dataset::{split_holdout, split_kfold, BinnedDataset};
 use crate::tuner::config::OptimizationMetric;
 use crate::tuner::traits::TunableModel;
-use crate::Result;
 
 use super::metrics::{compute_additional_metrics, select_metric};
 use super::types::{aggregate_fold_results, check_conformal_support, EvalMetrics, EvalResult};

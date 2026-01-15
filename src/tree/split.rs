@@ -229,6 +229,16 @@ pub struct SplitFinder {
     /// When true, evaluates both directions for missing values and selects optimal path
     /// When false, missing values follow default left direction
     use_missing_value_learning: bool,
+    /// Enable noise pruning (PaloBoost-style)
+    /// When true with era splitting, Era 0 = train, Era 1 = validation
+    /// Splits found on Era 0 are rejected if Era 1 gain <= threshold
+    noise_pruning: bool,
+    /// Noise pruning threshold for validation gain
+    /// Splits are rejected if validation gain <= this threshold
+    /// Default: -0.1 (allows small negative gains to handle distribution shift)
+    /// Stricter: 0.0 (classic PaloBoost, only accept positive validation gains)
+    /// More permissive: -0.2 (for high temporal distribution shift)
+    noise_pruning_threshold: f32,
 }
 
 impl Default for SplitFinder {
@@ -241,6 +251,8 @@ impl Default for SplitFinder {
             min_gain: 0.0,
             monotonic_constraints: Vec::new(),
             use_missing_value_learning: false, // Default: missing values go left
+            noise_pruning: false,              // Default: use DES directional agreement
+            noise_pruning_threshold: -0.1,     // Default: allow small negative validation gains
         }
     }
 }
@@ -303,6 +315,27 @@ impl SplitFinder {
     /// values. May increase training time due to additional gain evaluations.
     pub fn with_missing_value_learning(mut self, enable: bool) -> Self {
         self.use_missing_value_learning = enable;
+        self
+    }
+
+    /// Enable noise pruning (PaloBoost-style validation)
+    ///
+    /// When enabled with era splitting, treats Era 0 as training and Era 1 as validation.
+    /// Splits are found using Era 0 gain, but rejected if Era 1 gain <= threshold.
+    /// This prevents overfitting by validating each split against held-out data.
+    pub fn with_noise_pruning(mut self, enable: bool) -> Self {
+        self.noise_pruning = enable;
+        self
+    }
+
+    /// Set noise pruning threshold
+    ///
+    /// Splits are rejected if validation gain <= this threshold.
+    /// - 0.0: Classic PaloBoost (only accept positive validation gains)
+    /// - -0.1: Default (allows small negative gains, handles distribution shift)
+    /// - -0.2: More permissive (for high temporal distribution shift)
+    pub fn with_noise_pruning_threshold(mut self, threshold: f32) -> Self {
+        self.noise_pruning_threshold = threshold;
         self
     }
 
@@ -875,10 +908,49 @@ impl SplitFinder {
                 continue;
             }
 
-            // Check directional agreement across all eras
-            if !has_directional_agreement(&era_stats) {
-                continue;
-            }
+            // Compute gain based on mode (noise pruning vs DES)
+            let gain = if self.noise_pruning {
+                // === NOISE PRUNING MODE (PaloBoost-style) ===
+                // Era 0 = Training, Era 1 = Validation
+                // Find split on Era 0, reject if Era 1 gain <= 0
+
+                // Need at least 2 eras for noise pruning
+                if era_stats.len() < 2 {
+                    continue;
+                }
+
+                // Get train (Era 0) and validation (Era 1) stats
+                let train_stats = era_stats.iter().find(|s| s.era == 0);
+                let val_stats = era_stats.iter().find(|s| s.era == 1);
+
+                match (train_stats, val_stats) {
+                    (Some(train), Some(val)) => {
+                        // Check train gain passes threshold
+                        if train.gain <= self.min_gain {
+                            continue;
+                        }
+
+                        // THE KEY CHECK: Reject if validation gain is below threshold
+                        // Threshold is configurable to handle different data scenarios
+                        if val.gain <= self.noise_pruning_threshold {
+                            continue;
+                        }
+
+                        // Use train gain as the final gain
+                        train.gain
+                    }
+                    _ => continue, // Missing train or val era
+                }
+            } else {
+                // === DES MODE (Directional Era Splitting) ===
+                // Check directional agreement across all eras
+                if !has_directional_agreement(&era_stats) {
+                    continue;
+                }
+
+                // Compute average gain across eras
+                average_era_gain(&era_stats)
+            };
 
             // Check monotonic constraint on aggregate (if applicable)
             let total_right_grad = total_grad - total_left_grad;
@@ -891,9 +963,6 @@ impl SplitFinder {
             ) {
                 continue;
             }
-
-            // Compute average gain across eras
-            let gain = average_era_gain(&era_stats);
 
             if gain > best_split.gain {
                 best_split.bin_threshold = bin;

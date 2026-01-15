@@ -287,10 +287,10 @@ pub(super) fn randomize_centers<M: TunableModel>(tuner: &mut crate::tuner::AutoT
             // Log-uniform for log-scale parameters
             let log_min = min.max(1e-10).ln();
             let log_max = max.max(1e-10).ln();
-            (log_min + rng.gen::<f32>() * (log_max - log_min)).exp()
+            (log_min + rng.random::<f32>() * (log_max - log_min)).exp()
         } else {
             // Uniform for linear parameters
-            min + rng.gen::<f32>() * (max - min)
+            min + rng.random::<f32>() * (max - min)
         };
 
         param.set_center(new_center);

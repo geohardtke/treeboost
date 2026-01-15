@@ -246,7 +246,7 @@ pub(crate) fn generate_lhs_grid(
             // Stratum boundaries: [stratum/n_samples, (stratum+1)/n_samples] of the [low, high] range
             let stratum_low = stratum as f32 / n_samples as f32;
             let stratum_high = (stratum + 1) as f32 / n_samples as f32;
-            let u: f32 = rng.gen_range(stratum_low..stratum_high);
+            let u: f32 = rng.random_range(stratum_low..stratum_high);
 
             let value = if param.bounds.is_log_scale() {
                 // Log-uniform sampling within stratum
@@ -303,7 +303,7 @@ pub(crate) fn generate_random_grid(
             let high = (center + half_span).min(max);
 
             // Sample uniformly in [0, 1)
-            let u: f32 = rng.gen();
+            let u: f32 = rng.random();
 
             let value = if param.bounds.is_log_scale() {
                 // Log-uniform sampling
