@@ -42,6 +42,45 @@ pub(crate) fn early_stop_keep_count(best_count: usize, min_early_stopping: usize
 }
 
 impl GBDTModel {
+    /// Helper function to perform parallel feature binning
+    ///
+    /// This extracts the common binning logic used by train() and train_with_eras()
+    fn bin_features(
+        features: &[f32],
+        num_rows: usize,
+        num_features: usize,
+        binner: &QuantileBinner,
+        feature_names: Option<&Vec<String>>,
+    ) -> Vec<(Vec<u8>, FeatureInfo)> {
+        (0..num_features)
+            .into_par_iter()
+            .map(|f| {
+                // Extract column (row-major to column values)
+                let column: Vec<f64> = (0..num_rows)
+                    .map(|r| features[r * num_features + f] as f64)
+                    .collect();
+
+                // Compute boundaries and bin
+                let boundaries = binner.compute_boundaries(&column);
+                let binned = binner.bin_column(&column, &boundaries);
+
+                // Create feature info
+                let name = feature_names
+                    .and_then(|names| names.get(f).cloned())
+                    .unwrap_or_else(|| format!("feature_{}", f));
+
+                let info = FeatureInfo {
+                    name,
+                    feature_type: FeatureType::Numeric,
+                    num_bins: (boundaries.len() + 1).min(255) as u8,
+                    bin_boundaries: boundaries,
+                };
+
+                (binned, info)
+            })
+            .collect()
+    }
+
     /// Train a GBDT model from raw feature data (high-level API)
     ///
     /// This is the primary training API that handles binning automatically.
@@ -101,34 +140,13 @@ impl GBDTModel {
         let binner = QuantileBinner::new(config.num_bins);
 
         // Parallel binning: process each feature column in parallel
-        let binned_results: Vec<(Vec<u8>, FeatureInfo)> = (0..num_features)
-            .into_par_iter()
-            .map(|f| {
-                // Extract column (row-major to column values)
-                let column: Vec<f64> = (0..num_rows)
-                    .map(|r| features[r * num_features + f] as f64)
-                    .collect();
-
-                // Compute boundaries and bin
-                let boundaries = binner.compute_boundaries(&column);
-                let binned = binner.bin_column(&column, &boundaries);
-
-                // Create feature info
-                let name = feature_names
-                    .as_ref()
-                    .and_then(|names| names.get(f).cloned())
-                    .unwrap_or_else(|| format!("feature_{}", f));
-
-                let info = FeatureInfo {
-                    name,
-                    feature_type: FeatureType::Numeric,
-                    num_bins: (boundaries.len() + 1).min(255) as u8,
-                    bin_boundaries: boundaries,
-                };
-
-                (binned, info)
-            })
-            .collect();
+        let binned_results = Self::bin_features(
+            features,
+            num_rows,
+            num_features,
+            &binner,
+            feature_names.as_ref(),
+        );
 
         // Combine results into column-major storage
         let mut binned_data = Vec::with_capacity(num_rows * num_features);
@@ -182,6 +200,13 @@ impl GBDTModel {
         output_dir: impl AsRef<Path>,
         formats: &[ModelFormat],
     ) -> Result<Self> {
+        // Validate formats before expensive training
+        if formats.is_empty() {
+            return Err(TreeBoostError::Config(
+                "formats must not be empty - specify at least one model format".to_string(),
+            ));
+        }
+
         // Train the model
         let model = Self::train(
             features,
@@ -333,34 +358,13 @@ impl GBDTModel {
         let binner = QuantileBinner::new(config.num_bins);
 
         // Parallel binning: process each feature column in parallel
-        let binned_results: Vec<(Vec<u8>, FeatureInfo)> = (0..num_features)
-            .into_par_iter()
-            .map(|f| {
-                // Extract column (row-major to column values)
-                let column: Vec<f64> = (0..num_rows)
-                    .map(|r| features[r * num_features + f] as f64)
-                    .collect();
-
-                // Compute boundaries and bin
-                let boundaries = binner.compute_boundaries(&column);
-                let binned = binner.bin_column(&column, &boundaries);
-
-                // Create feature info
-                let name = feature_names
-                    .as_ref()
-                    .and_then(|names| names.get(f).cloned())
-                    .unwrap_or_else(|| format!("feature_{}", f));
-
-                let info = FeatureInfo {
-                    name,
-                    feature_type: FeatureType::Numeric,
-                    num_bins: (boundaries.len() + 1).min(255) as u8,
-                    bin_boundaries: boundaries,
-                };
-
-                (binned, info)
-            })
-            .collect();
+        let binned_results = Self::bin_features(
+            features,
+            num_rows,
+            num_features,
+            &binner,
+            feature_names.as_ref(),
+        );
 
         // Combine results into column-major storage
         let mut binned_data = Vec::with_capacity(num_rows * num_features);
@@ -462,10 +466,11 @@ impl GBDTModel {
             .with_interaction_constraints(interaction_constraints)
             .with_backend(config.backend_type)
             .with_gpu_subgroups(config.use_gpu_subgroups)
-            .with_era_splitting(config.era_splitting);
+            .with_era_splitting(config.era_splitting)
+            .with_missing_value_learning(config.use_missing_value_learning);
 
         let mut trees = Vec::with_capacity(config.num_rounds);
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(config.seed);
 
         // Early stopping state
         let early_stopping_enabled =
@@ -603,6 +608,9 @@ impl GBDTModel {
             #[allow(unused_mut, unused_assignments)]
             let mut tree: Option<Tree> = None;
 
+            // Create split finder for GPU builders
+            let split_finder = tree_grower.create_split_finder();
+
             // Try Full GPU builders first (level-wise growth, all-GPU pipeline)
             #[cfg(feature = "cuda")]
             if tree.is_none() {
@@ -622,9 +630,9 @@ impl GBDTModel {
                         config.max_leaves,
                         config.lambda,
                         config.min_samples_leaf,
-                        config.min_hessian_leaf,
                         config.min_gain,
                         config.learning_rate,
+                        &split_finder,
                     ));
                 }
             }
@@ -647,9 +655,9 @@ impl GBDTModel {
                         config.max_leaves,
                         config.lambda,
                         config.min_samples_leaf,
-                        config.min_hessian_leaf,
                         config.min_gain,
                         config.learning_rate,
+                        &split_finder,
                     ));
                 }
             }
@@ -742,8 +750,7 @@ impl GBDTModel {
 
                 let mut val_loss = 0.0f32;
                 for (&pred, &target) in val_predictions.iter().zip(val_targets.iter()) {
-                    let (g, _h) = loss_fn.gradient_hessian(target, pred);
-                    val_loss += g.abs();
+                    val_loss += loss_fn.loss(target, pred);
                 }
                 val_loss /= validation_indices.len().max(1) as f32;
 
@@ -751,14 +758,40 @@ impl GBDTModel {
                     *best_val_loss = val_loss;
                     *best_num_trees = trees.len();
                     *rounds_without_improvement = 0;
+                    if trees.len() % 50 == 0 {
+                        eprintln!(
+                            "[ES] Round {}: val_loss={:.6} (NEW BEST), best_trees={}",
+                            trees.len(),
+                            val_loss,
+                            *best_num_trees
+                        );
+                    }
                 } else {
                     *rounds_without_improvement += 1;
+                    if trees.len() % 50 == 0
+                        || *rounds_without_improvement == config.early_stopping_rounds
+                    {
+                        eprintln!(
+                            "[ES] Round {}: val_loss={:.6}, no_improve={}/{}, best_at={}",
+                            trees.len(),
+                            val_loss,
+                            *rounds_without_improvement,
+                            config.early_stopping_rounds,
+                            *best_num_trees
+                        );
+                    }
                     if should_early_stop(
                         *rounds_without_improvement,
                         trees.len(),
                         config.early_stopping_rounds,
                         config.min_early_stopping_trees,
                     ) {
+                        eprintln!(
+                            "[ES] STOPPING at round {}: best_trees={}, truncating to {}",
+                            trees.len(),
+                            *best_num_trees,
+                            early_stop_keep_count(*best_num_trees, config.min_early_stopping_trees)
+                        );
                         trees.truncate(early_stop_keep_count(
                             *best_num_trees,
                             config.min_early_stopping_trees,
@@ -895,7 +928,8 @@ impl GBDTModel {
             .with_interaction_constraints(interaction_constraints)
             .with_backend(config.backend_type)
             .with_gpu_subgroups(config.use_gpu_subgroups)
-            .with_era_splitting(config.era_splitting);
+            .with_era_splitting(config.era_splitting)
+            .with_missing_value_learning(config.use_missing_value_learning);
 
         // Trees stored as: [round0_class0, round0_class1, ..., round0_classK, round1_class0, ...]
         let mut trees = Vec::with_capacity(config.num_rounds * num_classes);
@@ -1218,7 +1252,7 @@ impl GBDTModel {
 
         for tree in trees {
             for (_, node) in tree.internal_nodes() {
-                if let Some((feature_idx, _, _, _, _)) = node.split_info() {
+                if let Some((feature_idx, _, _, _, _, _)) = node.split_info() {
                     importances[feature_idx] += node.sum_hessians;
                 }
             }
@@ -1318,24 +1352,216 @@ impl GBDTModel {
         sorted[idx]
     }
 
-    /// Train a GBDT model with separate train/validation sets
+    /// Train a GBDT model with separate pre-split train/validation sets
     ///
-    /// This is useful when you have pre-split data or want more control over validation.
+    /// Use this for time-series data or any case where you need temporal/custom
+    /// validation splits instead of random holdout.
+    ///
+    /// # Arguments
+    /// * `train_data` - Training dataset (binned)
+    /// * `val_data` - Validation dataset (binned with same binner as train_data)
+    /// * `val_targets` - Validation targets (unused, kept for API compatibility)
+    /// * `config` - GBDT configuration (validation_ratio is ignored, early_stopping_rounds is used)
+    ///
+    /// # Requirements
+    /// Both datasets must be binned with the same binner (same bin edges).
+    /// Use `DatasetBinner::bin()` on combined data, then split by indices.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // For time-series: last 6 weeks as validation
+    /// let combined_binned = binner.bin(&combined_df)?;
+    /// let train_data = combined_binned.subset_by_indices(&train_indices);
+    /// let val_data = combined_binned.subset_by_indices(&val_indices);
+    ///
+    /// let config = GBDTConfig::new()
+    ///     .with_early_stopping(50, 0.0)?  // validation_ratio ignored
+    ///     .with_num_rounds(10000);
+    ///
+    /// let model = GBDTModel::train_binned_with_validation(&train_data, &val_data, &[], config)?;
+    /// ```
     pub fn train_binned_with_validation(
         train_data: &BinnedDataset,
-        _val_data: &BinnedDataset,
-        val_targets: &[f32],
-        config: GBDTConfig,
+        val_data: &BinnedDataset,
+        _val_targets: &[f32], // Kept for API compatibility, targets come from val_data
+        mut config: GBDTConfig,
     ) -> Result<Self> {
-        // For now, just train on the combined data and validate
-        // In a full implementation, this would handle separate datasets properly
-        // This maintains backward compatibility with TunableModel trait
+        // Dispatch to multi-class training if using multi-class loss
+        if let Some(num_classes) = config.loss_type.num_classes() {
+            // Multi-class with pre-split validation not yet implemented
+            // Fall back to training on train_data only
+            return Self::train_binned_multiclass(train_data, config, num_classes);
+        }
 
-        // Create a combined dataset (not ideal, but maintains API compatibility)
-        let mut train_targets_vec = train_data.targets().to_vec();
-        train_targets_vec.extend_from_slice(val_targets);
+        // Dispatch to multi-label training if using multi-label loss
+        if config.loss_type.is_multilabel() {
+            if let Some(num_outputs) = config.loss_type.num_outputs() {
+                // Multi-label with pre-split validation not yet implemented
+                return Self::train_binned_multilabel(train_data, config, num_outputs);
+            }
+        }
 
-        // For this simple implementation, just train on training data
-        Self::train_binned(train_data, config)
+        config.validate().map_err(TreeBoostError::Config)?;
+
+        // Concatenate train and val datasets
+        let combined_dataset = train_data.concat(val_data)?;
+        let n_train = train_data.num_rows();
+        let n_val = val_data.num_rows();
+
+        // Create explicit indices (no random split)
+        let train_indices: Vec<usize> = (0..n_train).collect();
+        let validation_indices: Vec<usize> = (n_train..n_train + n_val).collect();
+        let calibration_indices: Vec<usize> = vec![]; // Not supported for pre-split
+
+        // CRITICAL: Resolve BackendType::Auto to concrete backend ONCE based on full dataset
+        if matches!(config.backend_type, crate::backend::BackendType::Auto) {
+            let resolved =
+                crate::backend::BackendSelector::with_config(crate::backend::BackendConfig {
+                    preferred: crate::backend::BackendType::Auto,
+                    ..Default::default()
+                })
+                .select(combined_dataset.num_rows())?;
+            config.backend_type = resolved.backend_type();
+        }
+
+        let loss_fn = config.loss_type.create();
+        let targets = combined_dataset.targets();
+
+        // Compute base prediction from training data only
+        let train_targets: Vec<f32> = train_indices.iter().map(|&i| targets[i]).collect();
+        let base_prediction = loss_fn.initial_prediction(&train_targets);
+
+        // Initialize predictions for all rows
+        let mut predictions = vec![base_prediction; combined_dataset.num_rows()];
+
+        // Gradient and hessian buffers
+        let mut gradients = vec![0.0f32; combined_dataset.num_rows()];
+        let mut hessians = vec![0.0f32; combined_dataset.num_rows()];
+
+        // Build interaction constraints from groups
+        let interaction_constraints = if config.interaction_groups.is_empty() {
+            InteractionConstraints::new()
+        } else {
+            InteractionConstraints::from_groups(
+                config.interaction_groups.clone(),
+                combined_dataset.num_features(),
+            )
+        };
+
+        // Create tree grower
+        let tree_grower = TreeGrower::new()
+            .with_max_depth(config.max_depth)
+            .with_max_leaves(config.max_leaves)
+            .with_lambda(config.lambda)
+            .with_min_samples_leaf(config.min_samples_leaf)
+            .with_min_hessian_leaf(config.min_hessian_leaf)
+            .with_entropy_weight(config.entropy_weight)
+            .with_min_gain(config.min_gain)
+            .with_learning_rate(config.learning_rate)
+            .with_colsample(config.colsample)
+            .with_monotonic_constraints(config.monotonic_constraints.clone())
+            .with_interaction_constraints(interaction_constraints)
+            .with_backend(config.backend_type)
+            .with_gpu_subgroups(config.use_gpu_subgroups)
+            .with_era_splitting(config.era_splitting)
+            .with_missing_value_learning(config.use_missing_value_learning);
+
+        let mut trees = Vec::with_capacity(config.num_rounds);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(config.seed);
+
+        // Early stopping state - ALWAYS enabled if validation data provided
+        let early_stopping_enabled =
+            config.early_stopping_rounds > 0 && !validation_indices.is_empty();
+        let mut best_val_loss = f32::MAX;
+        let mut rounds_without_improvement = 0;
+        let mut best_num_trees = 0;
+
+        // Pre-allocate reusable buffers for subsampling
+        let mut sample_indices: Vec<usize> = Vec::with_capacity(train_indices.len());
+        let mut shuffle_buffer: Vec<usize> = if config.subsample < 1.0 && !config.goss_enabled {
+            train_indices.clone()
+        } else {
+            Vec::new()
+        };
+        let mut goss_indexed: Vec<(usize, f32)> = if config.goss_enabled {
+            Vec::with_capacity(train_indices.len())
+        } else {
+            Vec::new()
+        };
+
+        // Determine if we can use fused gradient+histogram (no subsampling)
+        let use_fused = !config.goss_enabled && config.subsample >= 1.0;
+
+        // Create Full GPU builders if applicable
+        #[cfg(feature = "cuda")]
+        let mut cuda_builder: Option<FullCudaTreeBuilder> =
+            if use_fused && matches!(config.backend_type, BackendType::Cuda | BackendType::Auto) {
+                use crate::backend::cuda::CudaDevice;
+                CudaDevice::new().and_then(|d| {
+                    let resolved = config.gpu_mode.resolve(BackendType::Cuda);
+                    if matches!(resolved, GpuMode::Full) {
+                        Some(FullCudaTreeBuilder::new(std::sync::Arc::new(d)))
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+
+        #[cfg(feature = "gpu")]
+        let mut wgpu_builder: Option<FullGpuTreeBuilder> = if use_fused
+            && matches!(config.backend_type, BackendType::Wgpu | BackendType::Auto)
+            && {
+                #[cfg(feature = "cuda")]
+                {
+                    cuda_builder.is_none()
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    true
+                }
+            } {
+            use crate::backend::wgpu::GpuDevice;
+            GpuDevice::new().and_then(|d| {
+                let resolved = config.gpu_mode.resolve(BackendType::Wgpu);
+                if matches!(resolved, GpuMode::Full) {
+                    Some(FullGpuTreeBuilder::new(std::sync::Arc::new(d)))
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
+        Self::train_binned_impl(
+            &combined_dataset,
+            config,
+            loss_fn,
+            targets,
+            &train_indices,
+            &validation_indices,
+            &calibration_indices,
+            base_prediction,
+            &mut predictions,
+            &mut gradients,
+            &mut hessians,
+            tree_grower,
+            &mut trees,
+            &mut rng,
+            early_stopping_enabled,
+            &mut best_val_loss,
+            &mut rounds_without_improvement,
+            &mut best_num_trees,
+            &mut sample_indices,
+            &mut shuffle_buffer,
+            &mut goss_indexed,
+            use_fused,
+            #[cfg(feature = "cuda")]
+            &mut cuda_builder,
+            #[cfg(feature = "gpu")]
+            &mut wgpu_builder,
+        )
     }
 }

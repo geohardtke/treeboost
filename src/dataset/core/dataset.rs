@@ -968,6 +968,159 @@ impl BinnedDataset {
             raw_features: new_raw_features,
         }
     }
+
+    // =========================================================================
+    // Concatenation (for pre-split validation)
+    // =========================================================================
+
+    /// Concatenate two BinnedDatasets row-wise
+    ///
+    /// This is used for pre-split validation where you have separate train and
+    /// validation datasets that need to be combined for the training loop
+    /// (which uses indices to distinguish train vs validation rows).
+    ///
+    /// # Requirements
+    /// - Both datasets MUST have the same number of features
+    /// - Both datasets MUST have compatible feature_info (same bin edges)
+    /// - Both datasets MUST have the same num_target_cols
+    ///
+    /// # Returns
+    /// A new BinnedDataset where:
+    /// - Rows 0..self.num_rows() are from `self` (typically training data)
+    /// - Rows self.num_rows()..total are from `other` (typically validation data)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let train_data: BinnedDataset = ...;
+    /// let val_data: BinnedDataset = ...;
+    ///
+    /// let combined = train_data.concat(&val_data)?;
+    ///
+    /// // Train indices: 0..train_data.num_rows()
+    /// // Val indices: train_data.num_rows()..combined.num_rows()
+    /// ```
+    pub fn concat(&self, other: &Self) -> crate::Result<Self> {
+        // Validate compatibility
+        if self.num_features() != other.num_features() {
+            return Err(crate::TreeBoostError::Config(format!(
+                "Cannot concat datasets with different number of features: {} vs {}",
+                self.num_features(),
+                other.num_features()
+            )));
+        }
+
+        if self.num_target_cols != other.num_target_cols {
+            return Err(crate::TreeBoostError::Config(format!(
+                "Cannot concat datasets with different num_target_cols: {} vs {}",
+                self.num_target_cols, other.num_target_cols
+            )));
+        }
+
+        // Validate feature_info compatibility (same bin edges)
+        for (i, (a, b)) in self
+            .feature_info
+            .iter()
+            .zip(other.feature_info.iter())
+            .enumerate()
+        {
+            if a.num_bins != b.num_bins {
+                return Err(crate::TreeBoostError::Config(format!(
+                    "Feature {} has incompatible bins: {} vs {}. \
+                     Both datasets must be binned with the same binner.",
+                    i, a.num_bins, b.num_bins
+                )));
+            }
+        }
+
+        let new_num_rows = self.num_rows + other.num_rows;
+        let num_features = self.num_features();
+        let num_target_cols = self.num_target_cols;
+
+        // Concatenate features (column-major layout)
+        // For each feature column, append other's rows after self's rows
+        let mut new_features = Vec::with_capacity(new_num_rows * num_features);
+        for f in 0..num_features {
+            // Self's column
+            let self_start = f * self.num_rows;
+            new_features.extend_from_slice(&self.features[self_start..self_start + self.num_rows]);
+            // Other's column
+            let other_start = f * other.num_rows;
+            new_features
+                .extend_from_slice(&other.features[other_start..other_start + other.num_rows]);
+        }
+
+        // Concatenate targets (row-wise layout for multi-output)
+        let mut new_targets = Vec::with_capacity(new_num_rows * num_target_cols);
+        new_targets.extend_from_slice(&self.targets);
+        new_targets.extend_from_slice(&other.targets);
+
+        // Concatenate era_indices - both must have them or both must not
+        let new_era_indices = match (&self.era_indices, &other.era_indices) {
+            (Some(self_eras), Some(other_eras)) => {
+                let mut combined = self_eras.clone();
+                combined.extend_from_slice(other_eras);
+                Some(combined)
+            }
+            (None, None) => None,
+            _ => {
+                return Err(crate::TreeBoostError::Config(
+                    "Cannot concatenate datasets: both must have era_indices or neither (inconsistent data)".to_string(),
+                ))
+            }
+        };
+
+        // Recompute sparse columns for the combined dataset
+        let sparse_columns: Vec<Option<SparseColumn>> = (0..num_features)
+            .map(|f| {
+                let start = f * new_num_rows;
+                let column = &new_features[start..start + new_num_rows];
+                let sparse = SparseColumn::from_dense(column, DEFAULT_BIN);
+
+                if sparse.is_sparse() {
+                    Some(sparse)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Compute new num_eras
+        let new_num_eras = new_era_indices
+            .as_ref()
+            .and_then(|eras| eras.iter().copied().max())
+            .map(|m| m as usize + 1)
+            .unwrap_or(0);
+
+        // Concatenate raw_features - both must have them or both must not
+        let new_raw_features = match (&self.raw_features, &other.raw_features) {
+            (Some(self_raw), Some(other_raw)) => {
+                let mut combined = self_raw.clone();
+                combined.extend_from_slice(other_raw);
+                Some(combined)
+            }
+            (None, None) => None,
+            _ => {
+                return Err(crate::TreeBoostError::Config(
+                    "Cannot concatenate datasets: both must have raw_features or neither (inconsistent data)".to_string(),
+                ))
+            }
+        };
+
+        Ok(Self {
+            num_rows: new_num_rows,
+            features: new_features,
+            targets: new_targets,
+            num_target_cols,
+            feature_info: self.feature_info.clone(), // Use self's feature_info
+            sparse_columns,
+            era_indices: new_era_indices,
+            num_eras: new_num_eras,
+            raw_features: new_raw_features,
+            // Caches must be recomputed
+            row_major_cache: OnceLock::new(),
+            row_major_4bit_cache: OnceLock::new(),
+        })
+    }
 }
 
 // =============================================================================
