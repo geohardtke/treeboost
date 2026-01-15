@@ -404,6 +404,16 @@ pub struct GBDTConfig {
     /// Requires passing `era_indices` to the training method.
     pub era_splitting: bool,
 
+    /// Enable adaptive missing value direction selection
+    ///
+    /// When enabled, evaluates both child directions for missing values at each split
+    /// and selects the direction that maximizes gain. When disabled (default), missing
+    /// values follow the left child direction.
+    ///
+    /// Beneficial when missing values carry predictive information distinct from observed
+    /// values. May increase training time due to additional gain evaluations.
+    pub use_missing_value_learning: bool,
+
     // Random seed for reproducibility
     /// Random seed for train/validation splitting and subsampling
     pub seed: u64,
@@ -471,6 +481,9 @@ impl Default for GBDTConfig {
 
             // Era-based splitting (disabled by default)
             era_splitting: false,
+
+            // Missing value learning (disabled by default)
+            use_missing_value_learning: false,
 
             // Random seed (matches legacy hardcoded value for backwards compatibility)
             seed: seeds_defaults::GBDT_SEED,
@@ -954,6 +967,19 @@ impl GBDTConfig {
     /// ```
     pub fn with_era_splitting(mut self, enabled: bool) -> Self {
         self.era_splitting = enabled;
+        self
+    }
+
+    /// Enable adaptive missing value direction selection
+    ///
+    /// When enabled, evaluates both child directions for missing values at each split
+    /// and selects the direction that maximizes gain. When disabled (default), missing
+    /// values follow the left child direction.
+    ///
+    /// Beneficial when missing values carry predictive information distinct from observed
+    /// values. May increase training time due to additional gain evaluations.
+    pub fn with_missing_value_learning(mut self, enabled: bool) -> Self {
+        self.use_missing_value_learning = enabled;
         self
     }
 

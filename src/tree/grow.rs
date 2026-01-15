@@ -218,6 +218,9 @@ pub struct TreeGrower {
     /// Enable era-based splitting (Directional Era Splitting / DES)
     /// When enabled, only accepts splits where all eras agree on direction
     era_splitting: bool,
+    /// Enable adaptive missing value direction selection
+    /// When true, evaluates both directions for missing values and selects optimal path
+    use_missing_value_learning: bool,
     /// Cached backend instance (lazily initialized, reused across trees)
     cached_backend: RefCell<Option<Box<dyn HistogramBackend>>>,
 }
@@ -239,7 +242,8 @@ impl Default for TreeGrower {
             backend_type: BackendType::Auto,
             gpu_batch_size: 32, // Default batch size for GPU histogram dispatch
             use_gpu_subgroups: false,
-            era_splitting: false, // Disabled by default
+            era_splitting: false,              // Disabled by default
+            use_missing_value_learning: false, // Disabled by default
             cached_backend: RefCell::new(None),
         }
     }
@@ -283,6 +287,7 @@ impl Clone for TreeGrower {
             gpu_batch_size: self.gpu_batch_size,
             use_gpu_subgroups: self.use_gpu_subgroups,
             era_splitting: self.era_splitting,
+            use_missing_value_learning: self.use_missing_value_learning,
             // Reset cached backend - clone gets its own lazily initialized backend
             cached_backend: RefCell::new(None),
         }
@@ -413,6 +418,16 @@ impl TreeGrower {
         self.era_splitting
     }
 
+    /// Enable adaptive missing value direction selection
+    ///
+    /// When enabled, evaluates both child directions for missing values at each split
+    /// and selects the direction that maximizes gain. When disabled (default), missing
+    /// values follow the left child direction.
+    pub fn with_missing_value_learning(mut self, enabled: bool) -> Self {
+        self.use_missing_value_learning = enabled;
+        self
+    }
+
     /// Pre-initialize backend with full dataset size
     ///
     /// CRITICAL: Call this BEFORE any training to select backend based on full dataset,
@@ -447,7 +462,7 @@ impl TreeGrower {
     }
 
     /// Create a split finder with current configuration
-    fn create_split_finder(&self) -> SplitFinder {
+    pub(crate) fn create_split_finder(&self) -> SplitFinder {
         SplitFinder::new()
             .with_lambda(self.lambda)
             .with_min_samples_leaf(self.min_samples_leaf)
@@ -455,6 +470,7 @@ impl TreeGrower {
             .with_entropy_weight(self.entropy_weight)
             .with_min_gain(self.min_gain)
             .with_monotonic_constraints(self.monotonic_constraints.clone())
+            .with_missing_value_learning(self.use_missing_value_learning)
     }
 
     /// Compute per-era totals (gradient, hessian, count) for given row indices
@@ -758,6 +774,7 @@ impl TreeGrower {
                     split_value,
                     left_child: left_idx,
                     right_child: right_idx,
+                    default_left: split_info.default_left,
                 };
 
                 num_leaves += 1; // One leaf becomes two (net +1)
@@ -1144,6 +1161,7 @@ impl TreeGrower {
                 split_value,
                 left_child: left_idx,
                 right_child: right_idx,
+                default_left: split_info.default_left,
             };
 
             num_leaves += 1;
@@ -1515,6 +1533,7 @@ impl TreeGrower {
                     split_value,
                     left_child: left_idx,
                     right_child: right_idx,
+                    default_left: split_info.default_left,
                 };
 
                 num_leaves += 1;

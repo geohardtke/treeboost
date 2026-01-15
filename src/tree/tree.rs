@@ -66,6 +66,56 @@ impl Tree {
         self.nodes.iter().map(|n| n.depth).max().unwrap_or(0)
     }
 
+    /// Route to the appropriate child node based on bin value
+    ///
+    /// Handles missing values (bin 0) using the learned direction.
+    #[inline]
+    fn route_to_child(
+        bin: u8,
+        bin_threshold: u8,
+        default_left: bool,
+        left_child: usize,
+        right_child: usize,
+    ) -> usize {
+        if bin == 0 {
+            // Missing value: use learned direction
+            if default_left {
+                left_child
+            } else {
+                right_child
+            }
+        } else if bin <= bin_threshold {
+            left_child
+        } else {
+            right_child
+        }
+    }
+
+    /// Route to the appropriate child node based on raw feature value
+    ///
+    /// Handles missing values (NaN) using the learned direction.
+    #[inline]
+    fn route_to_child_raw(
+        value: f64,
+        split_value: f64,
+        default_left: bool,
+        left_child: usize,
+        right_child: usize,
+    ) -> usize {
+        if value.is_nan() {
+            // Missing value: use learned direction
+            if default_left {
+                left_child
+            } else {
+                right_child
+            }
+        } else if value <= split_value {
+            left_child
+        } else {
+            right_child
+        }
+    }
+
     /// Predict for a single sample using binned features
     ///
     /// # Arguments
@@ -85,14 +135,17 @@ impl Tree {
                     bin_threshold,
                     left_child,
                     right_child,
+                    default_left,
                     ..
                 } => {
                     let bin = get_bin(feature_idx);
-                    node_idx = if bin <= bin_threshold {
-                        left_child
-                    } else {
-                        right_child
-                    };
+                    node_idx = Self::route_to_child(
+                        bin,
+                        bin_threshold,
+                        default_left,
+                        left_child,
+                        right_child,
+                    );
                 }
             }
         }
@@ -133,14 +186,17 @@ impl Tree {
                     split_value,
                     left_child,
                     right_child,
+                    default_left,
                     ..
                 } => {
                     let value = get_value(feature_idx);
-                    node_idx = if value <= split_value {
-                        left_child
-                    } else {
-                        right_child
-                    };
+                    node_idx = Self::route_to_child_raw(
+                        value,
+                        split_value,
+                        default_left,
+                        left_child,
+                        right_child,
+                    );
                 }
             }
         }
@@ -203,14 +259,17 @@ impl Tree {
                     split_value,
                     left_child,
                     right_child,
+                    default_left,
                     ..
                 } => {
                     let value = features[row_offset + feature_idx];
-                    node_idx = if value <= split_value {
-                        left_child
-                    } else {
-                        right_child
-                    };
+                    node_idx = Self::route_to_child_raw(
+                        value,
+                        split_value,
+                        default_left,
+                        left_child,
+                        right_child,
+                    );
                 }
             }
         }
@@ -266,14 +325,17 @@ impl Tree {
                     bin_threshold,
                     left_child,
                     right_child,
+                    default_left,
                     ..
                 } => {
                     let bin = dataset.get_bin(row_idx, feature_idx);
-                    node_idx = if bin <= bin_threshold {
-                        left_child
-                    } else {
-                        right_child
-                    };
+                    node_idx = Self::route_to_child(
+                        bin,
+                        bin_threshold,
+                        default_left,
+                        left_child,
+                        right_child,
+                    );
                 }
             }
         }
@@ -315,14 +377,17 @@ impl Tree {
                         bin_threshold,
                         left_child,
                         right_child,
+                        default_left,
                         ..
                     } => {
                         let bin = dataset.get_bin(row_idx, feature_idx);
-                        node_indices[row_idx] = if bin <= bin_threshold {
-                            left_child
-                        } else {
-                            right_child
-                        };
+                        node_indices[row_idx] = Self::route_to_child(
+                            bin,
+                            bin_threshold,
+                            default_left,
+                            left_child,
+                            right_child,
+                        );
                         active_count += 1;
                     }
                 }
@@ -370,9 +435,9 @@ mod tests {
         //           leaf=2.0   leaf=3.0
 
         let tree = Tree::from_nodes(vec![
-            Node::internal(0, 5, 5.0, 1, 2, 0, 100, 0.0, 100.0),
+            Node::internal(0, 5, 5.0, 1, 2, true, 0, 100, 0.0, 100.0),
             Node::leaf(1.0, 1, 50, 0.0, 50.0),
-            Node::internal(1, 10, 10.0, 3, 4, 1, 50, 0.0, 50.0),
+            Node::internal(1, 10, 10.0, 3, 4, true, 1, 50, 0.0, 50.0),
             Node::leaf(2.0, 2, 25, 0.0, 25.0),
             Node::leaf(3.0, 2, 25, 0.0, 25.0),
         ]);
@@ -391,9 +456,9 @@ mod tests {
     #[test]
     fn test_tree_stats() {
         let tree = Tree::from_nodes(vec![
-            Node::internal(0, 5, 5.0, 1, 2, 0, 100, 0.0, 100.0),
+            Node::internal(0, 5, 5.0, 1, 2, true, 0, 100, 0.0, 100.0),
             Node::leaf(1.0, 1, 50, 0.0, 50.0),
-            Node::internal(1, 10, 10.0, 3, 4, 1, 50, 0.0, 50.0),
+            Node::internal(1, 10, 10.0, 3, 4, true, 1, 50, 0.0, 50.0),
             Node::leaf(2.0, 2, 25, 0.0, 25.0),
             Node::leaf(3.0, 2, 25, 0.0, 25.0),
         ]);

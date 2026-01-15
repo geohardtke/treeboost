@@ -180,6 +180,9 @@ pub struct SplitInfo {
     pub right_hessian: f32,
     /// Right child sample count
     pub right_count: u32,
+    /// Default direction for missing values (bin 0)
+    /// If true, missing values go left; if false, they go right
+    pub default_left: bool,
 }
 
 impl Default for SplitInfo {
@@ -195,6 +198,7 @@ impl Default for SplitInfo {
             right_gradient: 0.0,
             right_hessian: 0.0,
             right_count: 0,
+            default_left: true, // Default: missing values go left
         }
     }
 }
@@ -221,6 +225,10 @@ pub struct SplitFinder {
     min_gain: f32,
     /// Monotonic constraints per feature (empty = no constraints)
     monotonic_constraints: Vec<MonotonicConstraint>,
+    /// Enable adaptive missing value direction selection
+    /// When true, evaluates both directions for missing values and selects optimal path
+    /// When false, missing values follow default left direction
+    use_missing_value_learning: bool,
 }
 
 impl Default for SplitFinder {
@@ -232,6 +240,7 @@ impl Default for SplitFinder {
             entropy_weight: 0.0, // No entropy regularization by default
             min_gain: 0.0,
             monotonic_constraints: Vec::new(),
+            use_missing_value_learning: false, // Default: missing values go left
         }
     }
 }
@@ -281,6 +290,19 @@ impl SplitFinder {
     /// vector length are treated as unconstrained.
     pub fn with_monotonic_constraints(mut self, constraints: Vec<MonotonicConstraint>) -> Self {
         self.monotonic_constraints = constraints;
+        self
+    }
+
+    /// Enable adaptive missing value direction selection
+    ///
+    /// When enabled, evaluates both child directions for missing values at each split
+    /// and selects the direction that maximizes gain. When disabled (default), missing
+    /// values follow the left child direction.
+    ///
+    /// Beneficial when missing values carry predictive information distinct from observed
+    /// values. May increase training time due to additional gain evaluations.
+    pub fn with_missing_value_learning(mut self, enable: bool) -> Self {
+        self.use_missing_value_learning = enable;
         self
     }
 
@@ -487,6 +509,7 @@ impl SplitFinder {
 
         // Convert kernel result to SplitInfo
         // Note: split_value will be populated later by the tree grower from bin_boundaries
+        // SIMD path: always default_left=true (missing→left) for simplicity
         Some(SplitInfo {
             feature_idx,
             bin_threshold: candidate.bin_threshold,
@@ -498,12 +521,14 @@ impl SplitFinder {
             right_gradient: candidate.right_gradient,
             right_hessian: candidate.right_hessian,
             right_count: candidate.right_count,
+            default_left: true, // SIMD path uses default behavior
         })
     }
 
     /// Scalar split finding with full feature support
     ///
-    /// Supports entropy regularization and monotonic constraints.
+    /// Supports entropy regularization, monotonic constraints, and adaptive
+    /// missing value direction selection.
     fn find_best_split_for_feature_scalar(
         &self,
         histogram: &Histogram,
@@ -515,6 +540,19 @@ impl SplitFinder {
         let mut best_split = SplitInfo {
             feature_idx,
             ..Default::default()
+        };
+
+        // Extract missing value statistics if learning is enabled
+        let (missing_gradient, missing_hessian, missing_count) = if self.use_missing_value_learning
+        {
+            let missing_entry = histogram.get(0);
+            (
+                missing_entry.sum_gradients,
+                missing_entry.sum_hessians,
+                missing_entry.count,
+            )
+        } else {
+            (0.0, 0.0, 0)
         };
 
         // Cumulative sums for left child
@@ -537,55 +575,94 @@ impl SplitFinder {
             let right_hessian = total_hessian - left_hessian;
             let right_count = total_count - left_count;
 
-            // Check leaf constraints
-            if (left_count as usize) < self.min_samples_leaf
-                || (right_count as usize) < self.min_samples_leaf
-            {
-                continue;
-            }
-            if left_hessian < self.min_hessian_leaf || right_hessian < self.min_hessian_leaf {
-                continue;
-            }
+            // Determine how many directions to test
+            let directions = if self.use_missing_value_learning {
+                // Test both missing→left and missing→right
+                vec![
+                    (
+                        true,
+                        left_gradient,
+                        left_hessian,
+                        left_count,
+                        right_gradient,
+                        right_hessian,
+                        right_count,
+                    ),
+                    (
+                        false,
+                        left_gradient - missing_gradient,
+                        left_hessian - missing_hessian,
+                        left_count - missing_count,
+                        right_gradient + missing_gradient,
+                        right_hessian + missing_hessian,
+                        right_count + missing_count,
+                    ),
+                ]
+            } else {
+                // Only test default direction (missing→left)
+                vec![(
+                    true,
+                    left_gradient,
+                    left_hessian,
+                    left_count,
+                    right_gradient,
+                    right_hessian,
+                    right_count,
+                )]
+            };
 
-            // Check monotonic constraint
-            if !self.satisfies_monotonic_constraint(
-                feature_idx,
-                left_gradient,
-                left_hessian,
-                right_gradient,
-                right_hessian,
-            ) {
-                continue;
-            }
+            for (default_left, left_g, left_h, left_c, right_g, right_h, right_c) in directions {
+                // Check leaf constraints
+                if (left_c as usize) < self.min_samples_leaf
+                    || (right_c as usize) < self.min_samples_leaf
+                {
+                    continue;
+                }
+                if left_h < self.min_hessian_leaf || right_h < self.min_hessian_leaf {
+                    continue;
+                }
 
-            // Compute gain with entropy regularization
-            let gain = self.compute_gain(
-                PartitionStats {
-                    gradient: left_gradient,
-                    hessian: left_hessian,
-                    count: left_count,
-                },
-                PartitionStats {
-                    gradient: right_gradient,
-                    hessian: right_hessian,
-                    count: right_count,
-                },
-                PartitionStats {
-                    gradient: total_gradient,
-                    hessian: total_hessian,
-                    count: total_count,
-                },
-            );
+                // Check monotonic constraint
+                if !self.satisfies_monotonic_constraint(
+                    feature_idx,
+                    left_g,
+                    left_h,
+                    right_g,
+                    right_h,
+                ) {
+                    continue;
+                }
 
-            if gain > best_split.gain {
-                best_split.bin_threshold = bin;
-                best_split.gain = gain;
-                best_split.left_gradient = left_gradient;
-                best_split.left_hessian = left_hessian;
-                best_split.left_count = left_count;
-                best_split.right_gradient = right_gradient;
-                best_split.right_hessian = right_hessian;
-                best_split.right_count = right_count;
+                // Compute gain with entropy regularization
+                let gain = self.compute_gain(
+                    PartitionStats {
+                        gradient: left_g,
+                        hessian: left_h,
+                        count: left_c,
+                    },
+                    PartitionStats {
+                        gradient: right_g,
+                        hessian: right_h,
+                        count: right_c,
+                    },
+                    PartitionStats {
+                        gradient: total_gradient,
+                        hessian: total_hessian,
+                        count: total_count,
+                    },
+                );
+
+                if gain > best_split.gain {
+                    best_split.bin_threshold = bin;
+                    best_split.gain = gain;
+                    best_split.left_gradient = left_g;
+                    best_split.left_hessian = left_h;
+                    best_split.left_count = left_c;
+                    best_split.right_gradient = right_g;
+                    best_split.right_hessian = right_h;
+                    best_split.right_count = right_c;
+                    best_split.default_left = default_left;
+                }
             }
         }
 
