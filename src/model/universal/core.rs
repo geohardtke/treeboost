@@ -151,6 +151,11 @@ impl UniversalModel {
         self.config.pipeline = Some(pipeline);
     }
 
+    /// Set the pipeline state for inference binning/encoding
+    pub fn set_pipeline_state(&mut self, state: crate::dataset::PipelineState) {
+        self.config.pipeline_state = Some(state);
+    }
+
     /// Apply linear model shrinkage factor to predictions (batch)
     ///
     /// In LinearThenTree mode, the linear model's contribution to the ensemble
@@ -207,6 +212,7 @@ impl UniversalModel {
             .with_lambda(config.tree_config.lambda)
             .with_entropy_weight(config.tree_config.entropy_weight) // Pass entropy regularization
             .with_subsample(config.subsample)?
+            .with_colsample(config.colsample)?
             .with_backend(config.backend_type) // Pass backend type
             .with_seed(config.seed);
 

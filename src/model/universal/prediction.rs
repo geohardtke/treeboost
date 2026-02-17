@@ -81,23 +81,8 @@ impl UniversalModel {
                     self.apply_linear_shrinkage(&mut preds, &linear_preds);
                 }
 
-                // Filter dataset to tree features (tree was trained on filtered features)
-                let tree_dataset = if let Some(ref linear_idx) = self.linear_feature_indices {
-                    // Compute tree_indices = all features NOT in linear_indices
-                    let all_indices: std::collections::HashSet<usize> =
-                        (0..self.num_features).collect();
-                    let linear_set: std::collections::HashSet<usize> =
-                        linear_idx.iter().copied().collect();
-                    let mut tree_indices: Vec<usize> =
-                        all_indices.difference(&linear_set).copied().collect();
-                    tree_indices.sort_unstable(); // Keep deterministic order
-
-                    // Filter to only tree features
-                    std::borrow::Cow::Owned(dataset.subset_features(&tree_indices))
-                } else {
-                    // No filtering (backward compat)
-                    std::borrow::Cow::Borrowed(dataset)
-                };
+                // Tree uses ALL features to capture nonlinear residual patterns
+                let tree_dataset = std::borrow::Cow::Borrowed(dataset);
 
                 // Add tree contribution (either ensemble or single GBDT, trained on residuals)
                 // IMPORTANT: Subtract gbdt's base_prediction to avoid double-counting
@@ -324,120 +309,56 @@ impl UniversalModel {
     /// - Returns error if Pipeline is not stored in the model
     /// - Returns error if DataFrame schema doesn't match training schema
     pub fn predict_df(&self, df: &polars::prelude::DataFrame) -> Result<Vec<f32>> {
-        use crate::dataset::core::{BinnedDataset, FeatureInfo, FeatureType};
+        use crate::dataset::pipeline::DataPipeline;
+        use crate::model::pipeline::PipelineStepKind;
 
-        // Get pipeline from config
-        let pipeline = self.config.pipeline.as_ref().ok_or_else(|| {
+        // Get pipeline state (authoritative source for inference binning/encoding)
+        let pipeline_state = self.config.pipeline_state.as_ref().ok_or_else(|| {
             crate::TreeBoostError::Config(
-                "Model has no pipeline stored. Cannot use predict_df(). \
-                 Use predict() with a pre-processed BinnedDataset instead."
+                "Model has no pipeline_state stored. Cannot use predict_df(). \
+                 The model may have been saved before this feature was added. \
+                 Re-train and save the model to include pipeline_state."
                     .to_string(),
             )
         })?;
 
-        // Step 1: Apply Pipeline transformations (feature engineering, encoding)
-        let transformed_df = pipeline.transform(df.clone())?;
-
-        let num_rows = transformed_df.height();
-        let num_features = transformed_df.width();
-
-        // Step 2: Extract raw_features (for LinearThenTree linear model)
-        // Row-major layout: [row0_feat0, row0_feat1, ..., row1_feat0, ...]
-        let mut raw_features = Vec::with_capacity(num_rows * num_features);
-        for row_idx in 0..num_rows {
-            for col in transformed_df.get_columns() {
-                let val = if let Ok(ca) = col.f64() {
-                    ca.get(row_idx).unwrap_or(0.0) as f32
-                } else if let Ok(ca) = col.f32() {
-                    ca.get(row_idx).unwrap_or(0.0)
-                } else if let Ok(ca) = col.i64() {
-                    ca.get(row_idx).unwrap_or(0) as f32
-                } else if let Ok(ca) = col.i32() {
-                    ca.get(row_idx).unwrap_or(0) as f32
-                } else {
-                    0.0
-                };
-                raw_features.push(val);
-            }
-        }
-
-        // Step 3: Create BinnedDataset with simple uniform binning
-        // For LinearThenTree, raw_features are primary; trees use binned backup.
-        let mut binned = Vec::with_capacity(num_rows * num_features);
-        let mut feature_info = Vec::with_capacity(num_features);
-
-        // Get min/max for each feature to create uniform bins
-        for col in transformed_df.get_columns() {
-            let col_name = col.name().to_string();
-
-            // Extract column values as f32
-            let vals: Vec<f32> = (0..num_rows)
-                .map(|r| {
-                    if let Ok(ca) = col.f64() {
-                        ca.get(r).unwrap_or(0.0) as f32
-                    } else if let Ok(ca) = col.f32() {
-                        ca.get(r).unwrap_or(0.0)
-                    } else if let Ok(ca) = col.i64() {
-                        ca.get(r).unwrap_or(0) as f32
-                    } else if let Ok(ca) = col.i32() {
-                        ca.get(r).unwrap_or(0) as f32
-                    } else {
-                        0.0
+        // Step 1: Apply only pre-encoding Pipeline steps (DropColumns, EngineerFeatures, CustomFeatures)
+        // EncodeCategoricals and BinNumericFeatures must NOT run here — DataPipeline handles those.
+        let mut working_df = df.clone();
+        if let Some(ref pipeline) = self.config.pipeline {
+            for step in pipeline.steps() {
+                match step {
+                    PipelineStepKind::DropColumns(_)
+                    | PipelineStepKind::CustomFeatures(_)
+                    | PipelineStepKind::EngineerFeatures(_)
+                    | PipelineStepKind::EngineerTimeSeriesFeatures(_) => {
+                        working_df = step.transform(working_df)?;
                     }
-                })
-                .collect();
-
-            // Compute min/max for uniform binning
-            let min_val = vals.iter().cloned().fold(f32::INFINITY, f32::min);
-            let max_val = vals.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let range = (max_val - min_val).max(1e-9); // Avoid division by zero
-
-            // Create 255 uniform bins
-            let boundaries: Vec<f64> = (1..=254)
-                .map(|i| (min_val + range * (i as f32) / 255.0) as f64)
-                .collect();
-
-            // Bin values
-            for &val in &vals {
-                let bin = ((val - min_val) / range * 254.0).clamp(0.0, 254.0) as u8;
-                binned.push(bin);
-            }
-
-            feature_info.push(FeatureInfo {
-                name: col_name,
-                feature_type: FeatureType::Numeric,
-                num_bins: 255,
-                bin_boundaries: boundaries,
-            });
-        }
-
-        // Transpose from column-major to row-major format
-        let mut binned_row_major = vec![0u8; num_rows * num_features];
-        for row in 0..num_rows {
-            for feat in 0..num_features {
-                binned_row_major[row * num_features + feat] = binned[feat * num_rows + row];
+                    // Skip encoding/binning/target/linear steps — DataPipeline handles these
+                    _ => {}
+                }
             }
         }
 
-        // Create BinnedDataset with dummy targets
-        let dummy_targets = vec![0.0f32; num_rows];
-        let binned_dataset =
-            BinnedDataset::new(num_rows, binned_row_major, dummy_targets, feature_info);
-        let binned_dataset = binned_dataset.with_raw_features(raw_features.clone());
+        // Step 2: Use DataPipeline::process_for_inference — the SAME path as AutoModel::predict
+        let data_pipeline = DataPipeline::with_defaults();
+        let (preprocessed_df, dataset) =
+            data_pipeline.process_for_inference(working_df, pipeline_state)?;
 
-        // Step 4: Make predictions using the appropriate method
+        // Step 3: For LinearThenTree, extract raw features for linear model
         let predictions = match self.config.mode {
             BoostingMode::LinearThenTree => {
-                // Use raw_features for accurate linear predictions
-                self.predict_with_raw_features(&binned_dataset, &raw_features)
+                if let Some(ref extractor) = self.config.feature_extractor {
+                    let (raw_features, _num_features) =
+                        extractor.extract(&preprocessed_df, "target")?;
+                    self.predict_with_raw_features(&dataset, &raw_features)
+                } else {
+                    self.predict(&dataset)
+                }
             }
-            BoostingMode::PureTree | BoostingMode::RandomForest => {
-                // Trees use binned data
-                self.predict(&binned_dataset)
-            }
+            BoostingMode::PureTree | BoostingMode::RandomForest => self.predict(&dataset),
         };
 
-        // Predictions are already inverse-transformed by predict() / predict_with_raw_features()
         Ok(predictions)
     }
 

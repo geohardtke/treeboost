@@ -69,7 +69,7 @@ mod training; // Training methods // TunableModel impl and tests
 pub use core::{IncrementalUpdateReport, UniversalModel};
 
 // Re-export key types
-pub use config::{StackingStrategy, UniversalConfig, UniversalPreset};
+pub use config::{LinearSelectionMode, StackingStrategy, UniversalConfig, UniversalPreset};
 pub use mode::{BoostingMode, ModeSelection};
 
 // Implementation Note:
