@@ -17,6 +17,81 @@ use crate::tuner::{OptimizationMetric, TaskType as TunerTaskType};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Granular verbosity control for AutoBuilder output.
+///
+/// Each field controls a category of output. Use `Verbosity::all()` for
+/// everything, `Verbosity::light()` for training output without noisy details,
+/// or construct manually for fine-grained control.
+#[derive(Debug, Clone)]
+pub struct Verbosity {
+    /// Show preprocessing step details (imputers, encoders per column)
+    pub preprocessing: bool,
+    /// Show column profiling results
+    pub profiling: bool,
+    /// Show feature engineering details
+    pub features: bool,
+    /// Show autotuner progress
+    pub tuning: bool,
+    /// Show general training progress
+    pub training: bool,
+}
+
+impl Verbosity {
+    /// Everything enabled
+    pub fn all() -> Self {
+        Self {
+            preprocessing: true,
+            profiling: true,
+            features: true,
+            tuning: true,
+            training: true,
+        }
+    }
+
+    /// Training output without noisy preprocessing details
+    pub fn light() -> Self {
+        Self {
+            preprocessing: false,
+            profiling: true,
+            features: true,
+            tuning: true,
+            training: true,
+        }
+    }
+
+    /// All output disabled
+    pub fn silent() -> Self {
+        Self {
+            preprocessing: false,
+            profiling: false,
+            features: false,
+            tuning: false,
+            training: false,
+        }
+    }
+
+    /// Whether any verbose output is enabled (used for general checks)
+    pub fn enabled(&self) -> bool {
+        self.training || self.profiling || self.features || self.tuning || self.preprocessing
+    }
+}
+
+impl Default for Verbosity {
+    fn default() -> Self {
+        Self::silent()
+    }
+}
+
+impl From<bool> for Verbosity {
+    fn from(v: bool) -> Self {
+        if v {
+            Self::light()
+        } else {
+            Self::silent()
+        }
+    }
+}
+
 /// Tuning intensity level for AutoBuilder's hyperparameter optimization.
 ///
 /// ## When to Use TuningLevel
@@ -520,8 +595,8 @@ pub struct AutoConfig {
     /// Random seed for reproducibility
     pub seed: u64,
 
-    /// Verbose output
-    pub verbose: bool,
+    /// Verbose output control
+    pub verbose: Verbosity,
 
     /// Maximum time budget for training (None = no limit)
     /// AutoBuilder will adapt tuning intensity to fit within this budget
@@ -623,7 +698,7 @@ impl Clone for AutoConfig {
             preprocessing: self.preprocessing.clone(),
             mode_selection: self.mode_selection.clone(),
             seed: self.seed,
-            verbose: self.verbose,
+            verbose: self.verbose.clone(),
             time_budget: self.time_budget,
             progress_callback: Arc::clone(&self.progress_callback),
             linear_feature_config: self.linear_feature_config.clone(),
@@ -674,7 +749,7 @@ impl Default for AutoConfig {
             preprocessing: PreprocessingMode::Default,
             mode_selection: ModeSelection::Auto, // AutoBuilder defaults to automatic mode selection
             seed: seeds_defaults::DEFAULT_SEED,
-            verbose: false,
+            verbose: Verbosity::silent(),
             time_budget: None,
             progress_callback: Arc::new(QuietProgress),
             linear_feature_config: LinearFeatureConfig::default(),
@@ -833,7 +908,7 @@ impl AutoConfig {
 
     /// Enable verbose output
     pub fn with_verbose(mut self, verbose: bool) -> Self {
-        self.verbose = verbose;
+        self.verbose = verbose.into();
         self
     }
 
@@ -1636,6 +1711,10 @@ pub struct BuildResult {
 
     /// Time breakdown by phase
     pub phase_times: BuildPhaseTimes,
+
+    /// Binned validation dataset (for debugging pipeline consistency)
+    /// Only set when presplit validation is used.
+    pub validation_dataset: Option<crate::dataset::BinnedDataset>,
 }
 
 /// Time breakdown for build phases

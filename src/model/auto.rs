@@ -286,7 +286,7 @@ impl AutoModel {
         let config = crate::model::UniversalConfig::default()
             .with_mode(mode)
             .with_num_rounds(100)
-            .with_learning_rate(0.1);
+            .with_learning_rate(0.1)?;
 
         // Train with multi-label log loss
         let loss_fn = MultiLabelLogLoss::new();
@@ -583,6 +583,11 @@ impl AutoModel {
     /// Get tree tuning result (if PureTree/RandomForest mode was used)
     pub fn tree_tuning(&self) -> Option<&TreeTuningResult> {
         self.tree_tuning.as_ref()
+    }
+
+    /// Get the fitted pipeline state (feature names, encodings, etc.)
+    pub fn pipeline_state(&self) -> Option<&crate::dataset::PipelineState> {
+        self.pipeline_state.as_ref()
     }
 
     /// Get number of trees in the model
