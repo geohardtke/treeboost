@@ -45,6 +45,7 @@ fn create_multilabel_dataset(n: usize, num_outputs: usize, seed: u64) -> BinnedD
             feature_type: FeatureType::Numeric,
             num_bins: 255,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         })
         .collect();
 
@@ -52,7 +53,7 @@ fn create_multilabel_dataset(n: usize, num_outputs: usize, seed: u64) -> BinnedD
 }
 
 #[test]
-fn test_ltt_multilabel_training() {
+fn test_ltt_multilabel_training() -> Result<(), Box<dyn std::error::Error>> {
     let num_outputs = 3;
     let num_rows = 100;
     let dataset = create_multilabel_dataset(num_rows, num_outputs, 5151);
@@ -61,7 +62,7 @@ fn test_ltt_multilabel_training() {
     let config = UniversalConfig::default()
         .with_mode(BoostingMode::LinearThenTree)
         .with_num_rounds(5)
-        .with_learning_rate(0.1)
+        .with_learning_rate(0.1)?
         .with_linear_config(LinearConfig::default());
 
     let loss = MultiLabelLogLoss::new();
@@ -85,10 +86,11 @@ fn test_ltt_multilabel_training() {
     );
     let gbdts = model.gbdt_per_label().expect("Should have per-label GBDTs");
     assert_eq!(gbdts.len(), num_outputs);
+    Ok(())
 }
 
 #[test]
-fn test_ltt_multilabel_prediction_shape() {
+fn test_ltt_multilabel_prediction_shape() -> Result<(), Box<dyn std::error::Error>> {
     let num_outputs = 2;
     let num_rows = 50;
     let dataset = create_multilabel_dataset(num_rows, num_outputs, 6262);
@@ -96,7 +98,7 @@ fn test_ltt_multilabel_prediction_shape() {
     let config = UniversalConfig::default()
         .with_mode(BoostingMode::LinearThenTree)
         .with_num_rounds(3)
-        .with_learning_rate(0.1);
+        .with_learning_rate(0.1)?;
 
     let loss = MultiLabelLogLoss::new();
     let model =
@@ -128,10 +130,11 @@ fn test_ltt_multilabel_prediction_shape() {
             );
         }
     }
+    Ok(())
 }
 
 #[test]
-fn test_ltt_multilabel_correctness() {
+fn test_ltt_multilabel_correctness() -> Result<(), Box<dyn std::error::Error>> {
     let num_outputs = 3;
     let num_rows = 200;
     let dataset = create_multilabel_dataset(num_rows, num_outputs, 7373);
@@ -176,7 +179,7 @@ fn test_ltt_multilabel_correctness() {
     let config = UniversalConfig::default()
         .with_mode(BoostingMode::LinearThenTree)
         .with_num_rounds(10)
-        .with_learning_rate(0.1);
+        .with_learning_rate(0.1)?;
 
     let loss = MultiLabelLogLoss::new();
     let model =
@@ -207,4 +210,5 @@ fn test_ltt_multilabel_correctness() {
             accuracy
         );
     }
+    Ok(())
 }

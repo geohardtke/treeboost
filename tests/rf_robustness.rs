@@ -70,6 +70,7 @@ fn generate_noise_dataset(num_rows: usize) -> BinnedDataset {
             feature_type: FeatureType::Numeric,
             num_bins: 255,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         })
         .collect();
 
@@ -114,6 +115,7 @@ fn extract_subset(dataset: &BinnedDataset, start: usize, end: usize) -> BinnedDa
                 feature_type: info.feature_type,
                 num_bins: info.num_bins,
                 bin_boundaries: info.bin_boundaries.clone(),
+                impute_value: info.impute_value,
             }
         })
         .collect();
@@ -123,7 +125,7 @@ fn extract_subset(dataset: &BinnedDataset, start: usize, end: usize) -> BinnedDa
 
 #[test]
 #[ignore] // SLOW TEST (~2.5min): Training 3 models on 2000×1000 data. Run with: cargo test -- --ignored
-fn test_rf_vs_gbdt_noise_robustness() {
+fn test_rf_vs_gbdt_noise_robustness() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Random Forest Robustness Test ===");
     println!("Dataset: 2000 rows × 1000 features (10 informative, 990 noise)");
     println!("Comparing: Naive GBDT vs Regularized GBDT vs Random Forest\n");
@@ -147,8 +149,8 @@ fn test_rf_vs_gbdt_noise_robustness() {
     let naive_config = UniversalConfig::new()
         .with_mode(BoostingMode::PureTree)
         .with_num_rounds(100)
-        .with_learning_rate(0.3)
-        .with_subsample(1.0) // No row sampling either
+        .with_learning_rate(0.3)?
+        .with_subsample(1.0)? // No row sampling either
         .with_tree_config(naive_tree_config)
         .with_seed(42);
 
@@ -172,8 +174,8 @@ fn test_rf_vs_gbdt_noise_robustness() {
     let reg_config = UniversalConfig::new()
         .with_mode(BoostingMode::PureTree)
         .with_num_rounds(100)
-        .with_learning_rate(0.05)
-        .with_subsample(0.8) // Also add row sampling
+        .with_learning_rate(0.05)?
+        .with_subsample(0.8)? // Also add row sampling
         .with_tree_config(reg_tree_config)
         .with_seed(42);
 
@@ -197,7 +199,7 @@ fn test_rf_vs_gbdt_noise_robustness() {
     let rf_config = UniversalConfig::new()
         .with_mode(BoostingMode::RandomForest)
         .with_num_rounds(100)
-        .with_subsample(0.7) // Bootstrap sampling
+        .with_subsample(0.7)? // Bootstrap sampling
         .with_tree_config(rf_tree_config)
         .with_seed(42);
 
@@ -271,4 +273,5 @@ fn test_rf_vs_gbdt_noise_robustness() {
     println!("- Naive GBDT overfits to noise (as expected)");
     println!("- Regularized GBDT and RF are robust to noise features");
     println!("- Feature sampling effectively ignores irrelevant features\n");
+    Ok(())
 }

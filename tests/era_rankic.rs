@@ -80,12 +80,14 @@ fn create_panel_dataset() -> (BinnedDataset, Vec<u16>) {
             feature_type: FeatureType::Numeric,
             num_bins: 255,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         },
         FeatureInfo {
             name: "time_effect".to_string(),
             feature_type: FeatureType::Numeric,
             num_bins: 255,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         },
     ];
 
@@ -337,18 +339,21 @@ fn create_large_panel_dataset(num_groups: usize, num_dates: usize) -> (BinnedDat
             feature_type: FeatureType::Numeric,
             num_bins: 255,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         },
         FeatureInfo {
             name: "time_effect".to_string(),
             feature_type: FeatureType::Numeric,
             num_bins: 255,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         },
         FeatureInfo {
             name: "interaction".to_string(),
             feature_type: FeatureType::Numeric,
             num_bins: 255,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         },
     ];
 

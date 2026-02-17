@@ -8,7 +8,7 @@ use treeboost::{
 /// Test that shrinkage_factor is correctly applied and impacts predictions.
 /// Verifies the config is stored and affects model behavior.
 #[test]
-fn test_shrinkage_factor_applied() {
+fn test_shrinkage_factor_applied() -> Result<(), Box<dyn std::error::Error>> {
     let x: Vec<f64> = (0..50).map(|i| i as f64 * 0.1).collect();
     let y: Vec<f64> = x.iter().map(|v| 2.0 * v + 5.0).collect();
 
@@ -38,7 +38,7 @@ fn test_shrinkage_factor_applied() {
             .with_linear_config(linear_config)
             .with_tree_config(tree_config)
             .with_num_rounds(20)
-            .with_learning_rate(0.1);
+            .with_learning_rate(0.1)?;
 
         let config = AutoConfig::new()
             .with_feature_engineering(treeboost::model::FeatureEngineeringMode::None)
@@ -61,10 +61,11 @@ fn test_shrinkage_factor_applied() {
         assert_eq!(preds.len(), df.height());
         assert!(preds.iter().all(|p| p.is_finite()));
     }
+    Ok(())
 }
 
 #[test]
-fn test_ltt_pure_linear_data() {
+fn test_ltt_pure_linear_data() -> Result<(), Box<dyn std::error::Error>> {
     // Generate pure linear data: y = 2x + 3
     let x_values: Vec<f64> = (0..100).map(|i| i as f64).collect();
     let y_values: Vec<f64> = x_values.iter().map(|x| x * 2.0 + 3.0).collect();
@@ -103,7 +104,7 @@ fn test_ltt_pure_linear_data() {
         .with_linear_config(linear_config)
         .with_tree_config(tree_config)
         .with_num_rounds(50)
-        .with_learning_rate(0.1);
+        .with_learning_rate(0.1)?;
 
     let config = AutoConfig::new()
         .with_feature_engineering(treeboost::model::FeatureEngineeringMode::None)
@@ -140,10 +141,11 @@ fn test_ltt_pure_linear_data() {
         "RMSE should be low for pure linear data, got {:.4}",
         rmse
     );
+    Ok(())
 }
 
 #[test]
-fn test_ltt_linear_plus_residual() {
+fn test_ltt_linear_plus_residual() -> Result<(), Box<dyn std::error::Error>> {
     // Generate data: y = 2x + sin(x)
     let x_values: Vec<f64> = (0..100).map(|i| i as f64 * 0.1).collect();
     let y_values: Vec<f64> = x_values.iter().map(|x| x * 2.0 + x.sin()).collect();
@@ -182,7 +184,7 @@ fn test_ltt_linear_plus_residual() {
         .with_linear_config(linear_config)
         .with_tree_config(tree_config)
         .with_num_rounds(200) // Enough rounds to fit sin(x)
-        .with_learning_rate(0.1);
+        .with_learning_rate(0.1)?;
 
     let config = AutoConfig::new()
         .with_feature_engineering(treeboost::model::FeatureEngineeringMode::None)
@@ -218,10 +220,11 @@ fn test_ltt_linear_plus_residual() {
         "RMSE should be low (LTT captures both linear trend and sin(x) residual), got {:.4}",
         rmse
     );
+    Ok(())
 }
 
 #[test]
-fn test_ltt_with_categoricals() {
+fn test_ltt_with_categoricals() -> Result<(), Box<dyn std::error::Error>> {
     // Generate data with numeric and categorical features
     let x_values: Vec<f64> = (0..100).map(|i| i as f64 * 0.1).collect();
     let cat_values: Vec<&str> = (0..100)
@@ -287,10 +290,11 @@ fn test_ltt_with_categoricals() {
         model.inner().feature_extractor().is_some(),
         "FeatureExtractor must be stored for LTT mode"
     );
+    Ok(())
 }
 
 #[test]
-fn test_ltt_with_id_like_columns() {
+fn test_ltt_with_id_like_columns() -> Result<(), Box<dyn std::error::Error>> {
     // Generate data with ID-like columns
     let x_values: Vec<f64> = (0..100).map(|i| i as f64 * 0.1).collect();
     let id_values: Vec<String> = (0..100).map(|i| format!("ID_{:04}", i)).collect();
@@ -322,7 +326,7 @@ fn test_ltt_with_id_like_columns() {
         .with_linear_config(linear_config)
         .with_tree_config(tree_config)
         .with_num_rounds(50)
-        .with_learning_rate(0.1);
+        .with_learning_rate(0.1)?;
 
     let config = AutoConfig::new()
         .with_feature_engineering(treeboost::model::FeatureEngineeringMode::None)
@@ -345,10 +349,11 @@ fn test_ltt_with_id_like_columns() {
         rmse < 5.0,
         "RMSE should be low, ID columns should be auto-excluded"
     );
+    Ok(())
 }
 
 #[test]
-fn test_ltt_with_user_exclusions() {
+fn test_ltt_with_user_exclusions() -> Result<(), Box<dyn std::error::Error>> {
     // Generate data
     let x_values: Vec<f64> = (0..100).map(|i| i as f64 * 0.1).collect();
     let corr_values: Vec<f64> = x_values.iter().map(|x| x * 3.0).collect();
@@ -386,10 +391,11 @@ fn test_ltt_with_user_exclusions() {
         rmse < 2.0,
         "RMSE should be low with user-specified exclusions"
     );
+    Ok(())
 }
 
 #[test]
-fn test_ltt_feature_extractor_storage() {
+fn test_ltt_feature_extractor_storage() -> Result<(), Box<dyn std::error::Error>> {
     // Generate data with mixed column types
     let x_values: Vec<f64> = (0..50).map(|i| i as f64 * 0.1).collect();
     let cat_values: Vec<&str> = (0..50)
@@ -430,10 +436,11 @@ fn test_ltt_feature_extractor_storage() {
     println!("Exclude ID: {}", extractor.config().exclude_id);
 
     println!("FeatureExtractor storage successful");
+    Ok(())
 }
 
 #[test]
-fn test_ltt_with_pipeline_encoded_categoricals() {
+fn test_ltt_with_pipeline_encoded_categoricals() -> Result<(), Box<dyn std::error::Error>> {
     // This test simulates the real-world AutoBuilder flow:
     // 1. DataFrame with categoricals
     // 2. DataPipeline encodes them (target encoding)
@@ -511,7 +518,7 @@ fn test_ltt_with_pipeline_encoded_categoricals() {
         .with_linear_config(linear_config)
         .with_tree_config(tree_config)
         .with_num_rounds(100)
-        .with_learning_rate(0.1);
+        .with_learning_rate(0.1)?;
 
     let config = AutoConfig::new()
         .with_feature_engineering(treeboost::model::FeatureEngineeringMode::None)
@@ -557,6 +564,7 @@ fn test_ltt_with_pipeline_encoded_categoricals() {
     );
 
     println!("✓ LTT correctly handles pipeline-encoded categoricals");
+    Ok(())
 }
 // Test to verify early validation when all features are dropped
 use polars::prelude::*;

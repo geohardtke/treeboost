@@ -47,6 +47,7 @@ fn create_binary_classification_dataset(n: usize, seed: u64) -> BinnedDataset {
             feature_type: FeatureType::Numeric,
             num_bins: 255,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         })
         .collect();
 

@@ -39,24 +39,28 @@ fn test_packed_dataset_memory_savings() {
             feature_type: FeatureType::Categorical,
             num_bins: 16,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         },
         FeatureInfo {
             name: "binary_like".to_string(),
             feature_type: FeatureType::Categorical,
             num_bins: 8,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         },
         FeatureInfo {
             name: "high_precision".to_string(),
             feature_type: FeatureType::Numeric,
             num_bins: 255,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         },
         FeatureInfo {
             name: "quartile".to_string(),
             feature_type: FeatureType::Categorical,
             num_bins: 4,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         },
     ];
 
@@ -154,6 +158,7 @@ fn test_column_reordering_by_importance() {
             feature_type: FeatureType::Numeric,
             num_bins: 255,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         })
         .collect();
 
@@ -226,6 +231,7 @@ fn test_packed_dataset_prediction_equivalence() {
             feature_type: FeatureType::Numeric,
             num_bins: 16,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         })
         .collect();
 

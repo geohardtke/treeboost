@@ -26,7 +26,7 @@ use treeboost::{
 /// - PureTree: Should flatline at max training value (high RMSE)
 /// - LTT test RMSE < PureTree test RMSE * 0.5 (2x better)
 #[test]
-fn test_ltt_extrapolates_linear_trend() {
+fn test_ltt_extrapolates_linear_trend() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Test: LTT Extrapolation vs PureTree Flatline ===");
 
     // Generate training data: x ∈ [0, 100], y = 3.5 * x + noise
@@ -70,7 +70,7 @@ fn test_ltt_extrapolates_linear_trend() {
         .with_linear_config(linear_config.clone())
         .with_tree_config(tree_config.clone())
         .with_num_rounds(50)
-        .with_learning_rate(0.1);
+        .with_learning_rate(0.1)?;
 
     let ltt_config = AutoConfig::new()
         .with_feature_engineering(treeboost::model::FeatureEngineeringMode::None)
@@ -96,7 +96,7 @@ fn test_ltt_extrapolates_linear_trend() {
         .with_mode(BoostingMode::PureTree)
         .with_tree_config(tree_config)
         .with_num_rounds(50)
-        .with_learning_rate(0.1);
+        .with_learning_rate(0.1)?;
 
     let tree_config = AutoConfig::new()
         .with_feature_engineering(treeboost::model::FeatureEngineeringMode::None)
@@ -146,6 +146,7 @@ fn test_ltt_extrapolates_linear_trend() {
     );
 
     println!("✅ LTT successfully extrapolates linear trends!");
+    Ok(())
 }
 
 /// Test LTT with trend + seasonality (more realistic scenario)
@@ -159,7 +160,7 @@ fn test_ltt_extrapolates_linear_trend() {
 /// - LTT should still extrapolate better than PureTree
 /// - Gap may be smaller than pure linear case (seasonality is harder)
 #[test]
-fn test_ltt_extrapolates_with_seasonality() {
+fn test_ltt_extrapolates_with_seasonality() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Test: LTT Extrapolation with Seasonality ===");
 
     // Generate training data: y = 3.5 * x + 10 * sin(x / 10) + noise
@@ -206,7 +207,7 @@ fn test_ltt_extrapolates_with_seasonality() {
         .with_linear_config(linear_config.clone())
         .with_tree_config(tree_config.clone())
         .with_num_rounds(50)
-        .with_learning_rate(0.1);
+        .with_learning_rate(0.1)?;
 
     let ltt_config = AutoConfig::new()
         .with_feature_engineering(treeboost::model::FeatureEngineeringMode::None)
@@ -224,7 +225,7 @@ fn test_ltt_extrapolates_with_seasonality() {
         .with_mode(BoostingMode::PureTree)
         .with_tree_config(tree_config)
         .with_num_rounds(50)
-        .with_learning_rate(0.1);
+        .with_learning_rate(0.1)?;
 
     let tree_config = AutoConfig::new()
         .with_feature_engineering(treeboost::model::FeatureEngineeringMode::None)
@@ -251,6 +252,7 @@ fn test_ltt_extrapolates_with_seasonality() {
     );
 
     println!("✅ LTT successfully extrapolates trends with seasonality!");
+    Ok(())
 }
 
 /// Calculate Root Mean Squared Error

@@ -127,6 +127,7 @@ fn dataframe_to_binned_with_stats(
             feature_type: treeboost::dataset::FeatureType::Numeric,
             num_bins: 255,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         })
         .collect();
 
@@ -169,7 +170,7 @@ fn add_extreme_spikes(y: &mut [f64], ratio: f32, magnitude: f64, seed: u64) {
 /// **Expected:**
 /// - PseudoHuber should be significantly more robust (20%+ better)
 #[test]
-fn test_pseudo_huber_vs_mse_on_cauchy_noise() {
+fn test_pseudo_huber_vs_mse_on_cauchy_noise() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Test: PseudoHuber vs MSE on Cauchy Noise ===");
 
     // Generate training data with Cauchy noise
@@ -206,7 +207,7 @@ fn test_pseudo_huber_vs_mse_on_cauchy_noise() {
     let mut config = UniversalConfig::new()
         .with_mode(BoostingMode::PureTree)
         .with_num_rounds(200)
-        .with_learning_rate(0.3)
+        .with_learning_rate(0.3)?
         .with_seed(42);
     config.tree_config = config.tree_config.with_max_depth(6).unwrap();
 
@@ -259,6 +260,7 @@ fn test_pseudo_huber_vs_mse_on_cauchy_noise() {
     }
 
     println!("✅ PseudoHuber successfully handles heavy-tailed noise!");
+    Ok(())
 }
 
 /// Test PseudoHuber vs MSE on extreme outliers (measurement errors)
@@ -270,7 +272,7 @@ fn test_pseudo_huber_vs_mse_on_cauchy_noise() {
 /// **Expected:**
 /// - PseudoHuber should be MUCH better (30%+ improvement)
 #[test]
-fn test_pseudo_huber_vs_mse_on_extreme_outliers() {
+fn test_pseudo_huber_vs_mse_on_extreme_outliers() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Test: PseudoHuber vs MSE on Extreme Outliers ===");
 
     // Generate training data with Gaussian noise + extreme spikes
@@ -324,7 +326,7 @@ fn test_pseudo_huber_vs_mse_on_extreme_outliers() {
     let mut config = UniversalConfig::new()
         .with_mode(BoostingMode::PureTree)
         .with_num_rounds(200)
-        .with_learning_rate(0.3)
+        .with_learning_rate(0.3)?
         .with_seed(42);
     config.tree_config = config.tree_config.with_max_depth(6).unwrap();
 
@@ -388,6 +390,7 @@ fn test_pseudo_huber_vs_mse_on_extreme_outliers() {
     }
 
     println!("✅ PseudoHuber successfully handles extreme outliers!");
+    Ok(())
 }
 
 /// Test different delta values for PseudoHuber
@@ -399,7 +402,7 @@ fn test_pseudo_huber_vs_mse_on_extreme_outliers() {
 /// - Smaller delta (0.5) is more robust but may underfit
 /// - Larger delta (2.0, 5.0) approaches MSE
 #[test]
-fn test_pseudo_huber_delta_tuning() {
+fn test_pseudo_huber_delta_tuning() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Test: PseudoHuber Delta Tuning ===");
 
     // Generate data with moderate outliers
@@ -445,7 +448,7 @@ fn test_pseudo_huber_delta_tuning() {
         let config = UniversalConfig::new()
             .with_mode(BoostingMode::PureTree)
             .with_num_rounds(100)
-            .with_learning_rate(0.1)
+            .with_learning_rate(0.1)?
             .with_seed(42);
 
         let huber_loss = PseudoHuberLoss::new(delta);
@@ -490,6 +493,7 @@ fn test_pseudo_huber_delta_tuning() {
     );
 
     println!("✅ Delta tuning completed successfully!");
+    Ok(())
 }
 
 /// Calculate Root Mean Squared Error (f32 version)
