@@ -21,7 +21,7 @@ pub use builder::AutoBuilder;
 pub use config::{
     AutoConfig, AutoEnsembleConfig, AutoEnsembleMethod, BuildPhaseTimes, BuildResult, EnsembleMode,
     FeatureEngineeringMode, PreprocessingMode, TargetBoundConfig, TreeTunerConfig, TreeTunerPreset,
-    TreeTuningResult, TuningLevel,
+    TreeTuningResult, TuningLevel, Verbosity,
 };
 pub use pipeline::{
     BinNumericFeaturesState, BinNumericFeaturesStep, CategoryEncoding, CustomFeature,
@@ -38,6 +38,6 @@ pub use progress::{
     ConsoleProgress, ProgressCallback, ProgressUpdate, QuietProgress, TrainingPhase,
 };
 pub use universal::{
-    BoostingMode, IncrementalUpdateReport, ModeSelection, StackingStrategy, UniversalConfig,
-    UniversalModel, UniversalPreset,
+    BoostingMode, IncrementalUpdateReport, LinearSelectionMode, ModeSelection, StackingStrategy,
+    UniversalConfig, UniversalModel, UniversalPreset,
 };
