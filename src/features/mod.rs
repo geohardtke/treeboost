@@ -36,7 +36,7 @@ mod polynomial;
 mod ratio;
 mod selector;
 pub mod smart;
-mod stats;
+pub(crate) mod stats;
 pub mod timeseries;
 pub mod timeseries_grouped;
 

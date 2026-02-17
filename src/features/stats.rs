@@ -5,7 +5,7 @@
 /// Compute Pearson correlation between two arrays
 ///
 /// Returns 0.0 if either array has zero variance (constant values).
-pub(super) fn correlation(x: &[f32], y: &[f32]) -> f32 {
+pub(crate) fn correlation(x: &[f32], y: &[f32]) -> f32 {
     if x.len() != y.len() || x.is_empty() {
         return 0.0;
     }

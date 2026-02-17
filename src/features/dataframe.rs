@@ -844,17 +844,25 @@ pub fn apply_feature_plan(
 
         // Fill nulls created by lags with 0 (safe for tree models)
         // Nulls appear for rows without sufficient history (e.g., first rows of each group)
-        df = df
-            .lazy()
-            .with_columns([col("*").fill_null(lit(0))])
-            .with_columns([col("*").fill_nan(lit(0.0))])
-            .collect()
-            .map_err(|e| {
-                crate::TreeBoostError::Data(format!(
-                    "Failed to fill nulls after feature engineering: {}",
-                    e
-                ))
-            })?;
+        // Only fill nulls/NaN on numeric columns (string columns don't support fill_nan)
+        let numeric_fill: Vec<_> = df
+            .get_columns()
+            .iter()
+            .filter(|c| c.dtype().is_numeric())
+            .map(|c| col(c.name().clone()).fill_null(lit(0)).fill_nan(lit(0.0)))
+            .collect();
+        if !numeric_fill.is_empty() {
+            df = df
+                .lazy()
+                .with_columns(numeric_fill)
+                .collect()
+                .map_err(|e| {
+                    crate::TreeBoostError::Data(format!(
+                        "Failed to fill nulls after feature engineering: {}",
+                        e
+                    ))
+                })?;
+        }
 
         tracing::debug!(
             num_lags = ts_plan.lag_periods.len(),
