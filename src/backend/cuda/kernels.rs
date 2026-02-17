@@ -612,13 +612,13 @@ impl HistogramKernel {
                 .expect("Failed to launch zero_histograms kernel");
         }
 
-        // Grid: (num_features, num_nodes * tiles_per_node)
+        // Grid: (num_features, tiles_per_node, num_nodes) - split into Y and Z to stay under 65535
         let tiles_per_node = ((max_node_count as u32) + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
         let shared_mem_bytes = 256 * (4 + 4 + 4);
 
         let config = LaunchConfig {
             block_dim: (THREADS_PER_BLOCK, 1, 1),
-            grid_dim: (num_features as u32, (num_nodes as u32) * tiles_per_node, 1),
+            grid_dim: (num_features as u32, tiles_per_node, num_nodes as u32),
             shared_mem_bytes,
         };
 

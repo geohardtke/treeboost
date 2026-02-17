@@ -79,9 +79,11 @@ impl FullGpuTreeBuilder {
         max_leaves: usize,
         lambda: f32,
         min_samples_leaf: usize,
-        min_gain: f32,
+        _min_gain: f32, // Unused on GPU: min_gain filtering is handled by SplitFinder on the host side
         learning_rate: f32,
         split_finder: &crate::tree::SplitFinder,
+        colsample: f32,
+        seed: u64,
     ) -> Tree {
         let num_rows = row_indices.len();
         let num_features = dataset.num_features();
@@ -91,6 +93,13 @@ impl FullGpuTreeBuilder {
         if num_rows == 0 || num_features == 0 {
             return Tree::new(0.0, num_rows, 0.0, 0.0);
         }
+
+        // Generate column subsample mask (per tree)
+        let feature_mask = crate::tree::generate_feature_mask(
+            num_features,
+            colsample,
+            seed.wrapping_mul(31337).wrapping_add(num_rows as u64),
+        );
 
         // Upload data to GPU (only once per tree or cached across trees)
         self.upload_data(dataset, gradients, hessians, row_indices);
@@ -227,11 +236,12 @@ impl FullGpuTreeBuilder {
                 }
                 // Convert Vec<Histogram> to NodeHistograms for SplitFinder
                 let node_histograms = crate::histogram::NodeHistograms::from_vec(hists.clone());
-                if let Some(split) = split_finder.find_best_split(
+                if let Some(split) = split_finder.find_best_split_with_features(
                     &node_histograms,
                     node.sum_gradients,
                     node.sum_hessians,
                     node.row_count as u32,
+                    feature_mask.as_deref(),
                 ) {
                     valid_splits.push((i, split, node.node_idx));
                 }
@@ -390,6 +400,8 @@ impl FullGpuTreeBuilder {
         min_gain: f32,
         learning_rate: f32,
         split_finder: &crate::tree::SplitFinder,
+        colsample: f32,
+        seed: u64,
     ) -> Tree {
         use std::cmp::Ordering;
         use std::collections::BinaryHeap;
@@ -401,6 +413,13 @@ impl FullGpuTreeBuilder {
         if num_rows == 0 || num_features == 0 {
             return Tree::new(0.0, num_rows, 0.0, 0.0);
         }
+
+        // Generate column subsample mask (per tree)
+        let feature_mask = crate::tree::generate_feature_mask(
+            num_features,
+            colsample,
+            seed.wrapping_mul(31337).wrapping_add(num_rows as u64),
+        );
 
         // Upload data once
         self.upload_data(dataset, gradients, hessians, row_indices);
@@ -434,11 +453,12 @@ impl FullGpuTreeBuilder {
 
         // Find best split for root
         let node_histograms = crate::histogram::NodeHistograms::from_vec(root_histograms.clone());
-        let root_split = split_finder.find_best_split(
+        let root_split = split_finder.find_best_split_with_features(
             &node_histograms,
             total_gradient,
             total_hessian,
             num_rows as u32,
+            feature_mask.as_deref(),
         );
 
         // Priority queue entry
@@ -648,11 +668,12 @@ impl FullGpuTreeBuilder {
 
                     let node_histograms =
                         crate::histogram::NodeHistograms::from_vec(smaller_histograms.clone());
-                    if let Some(smaller_split) = split_finder.find_best_split(
+                    if let Some(smaller_split) = split_finder.find_best_split_with_features(
                         &node_histograms,
                         smaller_g,
                         smaller_h,
                         smaller_count as u32,
+                        feature_mask.as_deref(),
                     ) {
                         if smaller_split.gain > min_gain {
                             heap.push(SplitCandidate {
@@ -679,11 +700,12 @@ impl FullGpuTreeBuilder {
 
                         let node_histograms =
                             crate::histogram::NodeHistograms::from_vec(larger_histograms.clone());
-                        if let Some(larger_split) = split_finder.find_best_split(
+                        if let Some(larger_split) = split_finder.find_best_split_with_features(
                             &node_histograms,
                             larger_g,
                             larger_h,
                             larger_count as u32,
+                            feature_mask.as_deref(),
                         ) {
                             if larger_split.gain > min_gain {
                                 heap.push(SplitCandidate {

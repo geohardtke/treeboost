@@ -18,6 +18,7 @@ use crate::histogram::Histogram;
 use crate::tree::{Node, NodeType, SplitInfo, Tree};
 use crate::utils::approx_equal_relative;
 use cudarc::driver::CudaSlice;
+use rand::SeedableRng;
 use std::sync::Arc;
 
 /// Full CUDA tree builder using level-wise growth with GPU-resident data.
@@ -68,9 +69,11 @@ impl FullCudaTreeBuilder {
         max_leaves: usize,
         lambda: f32,
         min_samples_leaf: usize,
-        min_gain: f32,
+        _min_gain: f32, // Unused on GPU: min_gain filtering is handled by SplitFinder on the host side
         learning_rate: f32,
         split_finder: &crate::tree::SplitFinder,
+        colsample: f32,
+        seed: u64,
     ) -> Tree {
         let num_rows = row_indices.len();
         let num_features = dataset.num_features();
@@ -79,6 +82,13 @@ impl FullCudaTreeBuilder {
         if num_rows == 0 || num_features == 0 {
             return Tree::new(0.0, num_rows, 0.0, 0.0);
         }
+
+        // Generate column subsample mask (per tree)
+        let feature_mask = crate::tree::generate_feature_mask(
+            num_features,
+            colsample,
+            seed.wrapping_mul(31337).wrapping_add(num_rows as u64),
+        );
 
         // Cache bins and grad/hess on GPU (once per tree)
         let bins = dataset.as_row_major();
@@ -242,11 +252,12 @@ impl FullCudaTreeBuilder {
                 }
                 // Convert Vec<Histogram> to NodeHistograms for SplitFinder
                 let node_histograms = crate::histogram::NodeHistograms::from_vec(hists.clone());
-                if let Some(split) = split_finder.find_best_split(
+                if let Some(split) = split_finder.find_best_split_with_features(
                     &node_histograms,
                     node.sum_gradients,
                     node.sum_hessians,
                     node.count,
+                    feature_mask.as_deref(),
                 ) {
                     splits_and_nodes.push((split, i));
                 }

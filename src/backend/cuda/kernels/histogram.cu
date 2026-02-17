@@ -150,7 +150,7 @@ extern "C" __global__ void build_histogram_era(
 }
 
 // Batched histogram: build histograms for multiple nodes in one launch
-// Grid: (num_features, num_nodes * max_tiles_per_node)
+// Grid: (num_features, max_tiles_per_node, num_nodes)
 // Each block processes one tile of one node's rows for one feature
 extern "C" __global__ void build_histogram_batched(
     const unsigned char* __restrict__ bins,       // Row-major bins [total_rows * num_features]
@@ -167,12 +167,13 @@ extern "C" __global__ void build_histogram_batched(
     unsigned int max_tiles_per_node
 ) {
     // blockIdx.x = feature_idx
-    // blockIdx.y = node_idx * max_tiles_per_node + tile_idx
+    // blockIdx.y = tile_idx
+    // blockIdx.z = node_idx
     unsigned int feature_idx = blockIdx.x;
     if (feature_idx >= num_features) return;
 
-    unsigned int node_idx = blockIdx.y / max_tiles_per_node;
-    unsigned int tile_idx = blockIdx.y % max_tiles_per_node;
+    unsigned int tile_idx = blockIdx.y;
+    unsigned int node_idx = blockIdx.z;
     if (node_idx >= num_nodes) return;
 
     unsigned int node_start = node_starts[node_idx];

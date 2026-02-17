@@ -29,8 +29,6 @@ enum NodeHistogramStorage {
         per_era_totals: Vec<(f32, f32, u32)>,
     },
 }
-use rand::seq::SliceRandom;
-use rand::SeedableRng;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -632,20 +630,11 @@ impl TreeGrower {
             .collect();
 
         // Generate column subsample mask (per tree)
-        let feature_mask: Option<Vec<usize>> = if self.colsample < 1.0 {
-            let n_features = ((num_features as f32) * self.colsample).ceil() as usize;
-            let n_features = n_features.max(1); // At least one feature
-            let mut rng = rand::rngs::StdRng::seed_from_u64(
-                // Use row count as seed variation per tree
-                (num_rows as u64).wrapping_mul(31337),
-            );
-            let mut all_features: Vec<usize> = (0..num_features).collect();
-            all_features.shuffle(&mut rng);
-            all_features.truncate(n_features);
-            Some(all_features)
-        } else {
-            None
-        };
+        let feature_mask = super::generate_feature_mask(
+            num_features,
+            self.colsample,
+            (num_rows as u64).wrapping_mul(31337),
+        );
 
         // Compute initial sums for the subsampled rows only
         let total_gradient: f32 = row_indices.iter().map(|&i| gradients[i]).sum();
@@ -1029,17 +1018,11 @@ impl TreeGrower {
         let split_finder = self.create_split_finder();
 
         // Generate column subsample mask (per tree)
-        let feature_mask: Option<Vec<usize>> = if self.colsample < 1.0 {
-            let n_features = ((num_features as f32) * self.colsample).ceil() as usize;
-            let n_features = n_features.max(1);
-            let mut rng = rand::rngs::StdRng::seed_from_u64((num_rows as u64).wrapping_mul(31337));
-            let mut all_features: Vec<usize> = (0..num_features).collect();
-            all_features.shuffle(&mut rng);
-            all_features.truncate(n_features);
-            Some(all_features)
-        } else {
-            None
-        };
+        let feature_mask = super::generate_feature_mask(
+            num_features,
+            self.colsample,
+            (num_rows as u64).wrapping_mul(31337),
+        );
 
         // Compute initial sums for the subsampled rows only
         let total_gradient: f32 = row_indices.iter().map(|&i| gradients[i]).sum();
@@ -1382,17 +1365,11 @@ impl TreeGrower {
         let split_finder = self.create_split_finder();
 
         // Generate column subsample mask (per tree)
-        let feature_mask: Option<Vec<usize>> = if self.colsample < 1.0 {
-            let n_features = ((num_features as f32) * self.colsample).ceil() as usize;
-            let n_features = n_features.max(1);
-            let mut rng = rand::rngs::StdRng::seed_from_u64((num_rows as u64).wrapping_mul(31337));
-            let mut all_features: Vec<usize> = (0..num_features).collect();
-            all_features.shuffle(&mut rng);
-            all_features.truncate(n_features);
-            Some(all_features)
-        } else {
-            None
-        };
+        let feature_mask = super::generate_feature_mask(
+            num_features,
+            self.colsample,
+            (num_rows as u64).wrapping_mul(31337),
+        );
 
         // Initialize row partitioner
         let mut partitioner = RowPartitioner::new(row_indices.to_vec());
@@ -1815,6 +1792,7 @@ mod tests {
                 feature_type: FeatureType::Numeric,
                 num_bins: 255,
                 bin_boundaries: vec![],
+                impute_value: 0.0,
             })
             .collect();
 
