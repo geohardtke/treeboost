@@ -194,6 +194,7 @@ impl ShiftDetector {
                     feature_type: FeatureType::Numeric,
                     num_bins: 0,
                     bin_boundaries: vec![],
+                    impute_value: 0.0,
                 }
             })
             .collect();
@@ -436,6 +437,7 @@ mod tests {
             feature_type: FeatureType::Numeric,
             num_bins: 2,
             bin_boundaries: vec![0.0, 0.5, 1.0],
+            impute_value: 0.0,
         }];
 
         let detector = ShiftDetector {

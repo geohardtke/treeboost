@@ -103,12 +103,14 @@ mod tests {
                 feature_type: FeatureType::Numeric,
                 num_bins: 255,
                 bin_boundaries: vec![],
+                impute_value: 0.0,
             },
             FeatureInfo {
                 name: "f1".to_string(),
                 feature_type: FeatureType::Numeric,
                 num_bins: 255,
                 bin_boundaries: vec![],
+                impute_value: 0.0,
             },
         ];
 

@@ -370,6 +370,7 @@ mod tests {
                 feature_type: FeatureType::Numeric,
                 num_bins: 255,
                 bin_boundaries: (0..255).map(|b| b as f64).collect(),
+                impute_value: 0.0,
             })
             .collect();
 

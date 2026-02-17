@@ -379,14 +379,6 @@ impl<M: TunableModel> AutoTuner<M> {
     pub(super) fn history_len(&self) -> usize {
         self.history.len()
     }
-
-    pub(super) fn raw_data(&self) -> Option<&std::sync::Arc<DataFrame>> {
-        self.raw_data.as_ref()
-    }
-
-    pub(super) fn realistic_config(&self) -> Option<&RealisticModeConfig> {
-        self.realistic_config.as_ref()
-    }
 }
 
 // =============================================================================
