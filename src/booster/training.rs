@@ -74,6 +74,7 @@ impl GBDTModel {
                     feature_type: FeatureType::Numeric,
                     num_bins: (boundaries.len() + 1).min(255) as u8,
                     bin_boundaries: boundaries,
+                    impute_value: 0.0,
                 };
 
                 (binned, info)
@@ -605,7 +606,16 @@ impl GBDTModel {
         let val_targets: Vec<f32> = validation_indices.iter().map(|&i| targets[i]).collect();
         let mut val_predictions = vec![base_prediction; validation_indices.len()];
 
-        for _round in 0..config.num_rounds {
+        // Build SplitFinder from config for GPU backends
+        #[allow(unused_variables)]
+        let split_finder = crate::tree::SplitFinder::new()
+            .with_lambda(config.lambda)
+            .with_min_samples_leaf(config.min_samples_leaf)
+            .with_min_hessian_leaf(config.min_hessian_leaf)
+            .with_entropy_weight(config.entropy_weight)
+            .with_min_gain(config.min_gain);
+
+        for round in 0..config.num_rounds {
             // Grow tree - either fused, Full GPU, or separate gradient+histogram paths
             #[allow(unused_mut, unused_assignments)]
             let mut tree: Option<Tree> = None;
@@ -632,6 +642,8 @@ impl GBDTModel {
                         config.min_gain,
                         config.learning_rate,
                         &split_finder,
+                        config.colsample,
+                        config.seed.wrapping_add(round as u64),
                     ));
                 }
             }
@@ -657,6 +669,8 @@ impl GBDTModel {
                         config.min_gain,
                         config.learning_rate,
                         &split_finder,
+                        config.colsample,
+                        config.seed.wrapping_add(round as u64),
                     ));
                 }
             }

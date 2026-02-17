@@ -8,6 +8,7 @@ fn create_test_feature_info(name: &str, num_bins: u8) -> FeatureInfo {
         feature_type: FeatureType::Numeric,
         num_bins,
         bin_boundaries: vec![],
+        impute_value: 0.0,
     }
 }
 

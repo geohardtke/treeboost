@@ -459,6 +459,7 @@ fn create_multilabel_dataset(n: usize, num_outputs: usize, seed: u64) -> treeboo
             feature_type: FeatureType::Numeric,
             num_bins: 255,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         })
         .collect();
 

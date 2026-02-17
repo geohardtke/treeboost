@@ -115,6 +115,9 @@ pub struct FeatureInfo {
     /// Bin boundaries for numeric features (len = num_bins - 1)
     /// For categorical, this is empty (bins are category indices)
     pub bin_boundaries: Vec<f64>,
+    /// Imputation value for NaN (median from training data)
+    /// Used during inference to match training-time NaN handling
+    pub impute_value: f64,
 }
 
 // =============================================================================

@@ -114,6 +114,7 @@ impl QuantileBinner {
             feature_type: FeatureType::Numeric,
             num_bins,
             bin_boundaries: boundaries,
+            impute_value: 0.0,
         }
     }
 }

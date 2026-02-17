@@ -1190,6 +1190,7 @@ mod tests {
             feature_type: FeatureType::Numeric,
             num_bins,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         }
     }
 
@@ -1203,6 +1204,7 @@ mod tests {
             feature_type: FeatureType::Numeric,
             num_bins,
             bin_boundaries: boundaries,
+            impute_value: 0.0,
         }
     }
 

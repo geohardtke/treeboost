@@ -72,7 +72,7 @@ impl PipelineConfig {
 }
 
 /// Learned encoding state for a single categorical column
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
 pub struct CategoricalEncodingState {
     /// Column name
     pub name: String,
@@ -85,7 +85,7 @@ pub struct CategoricalEncodingState {
 }
 
 /// Complete pipeline state for inference
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
 pub struct PipelineState {
     /// Feature info for all columns (ordering matters)
     pub feature_info: Vec<FeatureInfo>,
@@ -351,7 +351,6 @@ impl DataPipeline {
         // exact preprocessed values (StandardScaled polynomials, target-encoded categoricals)
         // Extract ALL non-target columns (both originally numeric and encoded categoricals)
         let raw_features = {
-            let _num_rows = filtered_df.height();
             let mut features = Vec::new();
 
             for col_name in filtered_df.get_column_names() {
@@ -360,54 +359,17 @@ impl DataPipeline {
                 }
 
                 let col = filtered_df.column(col_name)?;
-
-                // Try to extract as f32/f64/i64, handling all numeric types after encoding
-                match col.dtype() {
-                    polars::prelude::DataType::Float32 => {
-                        if let Ok(ca) = col.f32() {
-                            for val in ca.iter() {
-                                features.push(val.unwrap_or(0.0));
-                            }
-                        }
-                    }
-                    polars::prelude::DataType::Float64 => {
-                        if let Ok(ca) = col.f64() {
-                            for val in ca.iter() {
-                                features.push(val.unwrap_or(0.0) as f32);
-                            }
-                        }
-                    }
-                    polars::prelude::DataType::Int64 => {
-                        if let Ok(ca) = col.i64() {
-                            for val in ca.iter() {
-                                features.push(val.unwrap_or(0) as f32);
-                            }
-                        }
-                    }
-                    polars::prelude::DataType::UInt64 => {
-                        if let Ok(ca) = col.u64() {
-                            for val in ca.iter() {
-                                features.push(val.unwrap_or(0) as f32);
-                            }
-                        }
-                    }
-                    polars::prelude::DataType::Int32 => {
-                        if let Ok(ca) = col.i32() {
-                            for val in ca.iter() {
-                                features.push(val.unwrap_or(0) as f32);
-                            }
-                        }
-                    }
-                    polars::prelude::DataType::UInt32 => {
-                        if let Ok(ca) = col.u32() {
-                            for val in ca.iter() {
-                                features.push(val.unwrap_or(0) as f32);
-                            }
-                        }
-                    }
-                    _ => {
-                        // Skip non-numeric columns (shouldn't happen after preprocessing)
-                        continue;
+                let as_f64 = col.cast(&polars::prelude::DataType::Float64).map_err(|e| {
+                    TreeBoostError::Data(format!(
+                        "Cannot cast column '{}' ({:?}) to f64 for raw features: {}",
+                        col_name,
+                        col.dtype(),
+                        e
+                    ))
+                })?;
+                if let Ok(ca) = as_f64.f64() {
+                    for val in ca.iter() {
+                        features.push(val.unwrap_or(0.0) as f32);
                     }
                 }
             }
@@ -532,59 +494,22 @@ impl DataPipeline {
         // This ensures LinearThenTree predictions use the same preprocessed values
         // Extract ALL columns (both originally numeric and encoded categoricals)
         let raw_features = {
-            let _num_rows = preprocessed_df.height();
             let mut features = Vec::new();
 
             for col_name in preprocessed_df.get_column_names() {
                 let col = preprocessed_df.column(col_name)?;
-
-                // Try to extract as f32/f64/i64, handling all numeric types after encoding
-                match col.dtype() {
-                    polars::prelude::DataType::Float32 => {
-                        if let Ok(ca) = col.f32() {
-                            for val in ca.iter() {
-                                features.push(val.unwrap_or(0.0));
-                            }
-                        }
-                    }
-                    polars::prelude::DataType::Float64 => {
-                        if let Ok(ca) = col.f64() {
-                            for val in ca.iter() {
-                                features.push(val.unwrap_or(0.0) as f32);
-                            }
-                        }
-                    }
-                    polars::prelude::DataType::Int64 => {
-                        if let Ok(ca) = col.i64() {
-                            for val in ca.iter() {
-                                features.push(val.unwrap_or(0) as f32);
-                            }
-                        }
-                    }
-                    polars::prelude::DataType::UInt64 => {
-                        if let Ok(ca) = col.u64() {
-                            for val in ca.iter() {
-                                features.push(val.unwrap_or(0) as f32);
-                            }
-                        }
-                    }
-                    polars::prelude::DataType::Int32 => {
-                        if let Ok(ca) = col.i32() {
-                            for val in ca.iter() {
-                                features.push(val.unwrap_or(0) as f32);
-                            }
-                        }
-                    }
-                    polars::prelude::DataType::UInt32 => {
-                        if let Ok(ca) = col.u32() {
-                            for val in ca.iter() {
-                                features.push(val.unwrap_or(0) as f32);
-                            }
-                        }
-                    }
-                    _ => {
-                        // Skip non-numeric columns (shouldn't happen after preprocessing)
-                        continue;
+                // Cast any numeric type to f64, then to f32
+                let as_f64 = col.cast(&polars::prelude::DataType::Float64).map_err(|e| {
+                    TreeBoostError::Data(format!(
+                        "Cannot cast column '{}' ({:?}) to f64 for raw features: {}",
+                        col_name,
+                        col.dtype(),
+                        e
+                    ))
+                })?;
+                if let Ok(ca) = as_f64.f64() {
+                    for val in ca.iter() {
+                        features.push(val.unwrap_or(0.0) as f32);
                     }
                 }
             }
@@ -642,6 +567,7 @@ impl DataPipeline {
             feature_type: FeatureType::Numeric,
             num_bins: (boundaries.len() + 1).min(255) as u8,
             bin_boundaries: boundaries,
+            impute_value,
         };
 
         Ok((binned, info))
@@ -688,11 +614,21 @@ impl DataPipeline {
         let category_mapping = CategoryMapping::from_filter(&filter);
 
         // Step 2: Ordered Target Encoding
+        // Call encode_column to build the encoder's internal statistics (side effect).
+        // The sequential return value is discarded — we re-encode below using final
+        // statistics so that bin boundaries match what inference will produce.
         let mut encoder = OrderedTargetEncoder::new(self.config.target_encoding_smoothing);
-        let encoded = encoder.encode_column(&filtered, targets);
+        let _ = encoder.encode_column(&filtered, targets);
 
         // Get encoding map for inference
         let encoding_map = encoder.get_encoding_map();
+
+        // Re-encode using FINAL statistics for binning
+        // This ensures bin boundaries match what inference will produce
+        let encoded: Vec<f64> = filtered
+            .iter()
+            .map(|cat| encoding_map.encode(cat))
+            .collect();
 
         // Step 3: Quantile binning of encoded values
         let boundaries = self.binner.compute_boundaries(&encoded);
@@ -706,6 +642,7 @@ impl DataPipeline {
             feature_type: FeatureType::Categorical,
             num_bins: (boundaries.len() + 1).min(255) as u8,
             bin_boundaries: boundaries.clone(),
+            impute_value: f64::NAN,
         };
 
         let encoding_state = CategoricalEncodingState {
@@ -787,7 +724,10 @@ impl DataPipeline {
 
         let binned: Vec<u8> = values
             .iter()
-            .map(|&v| QuantileBinner::bin_value(v, &info.bin_boundaries))
+            .map(|&v| {
+                let v = if v.is_nan() { info.impute_value } else { v };
+                QuantileBinner::bin_value(v, &info.bin_boundaries)
+            })
             .collect();
 
         Ok(binned)
@@ -825,7 +765,7 @@ impl DataPipeline {
     ///
     /// Handles both numeric and categorical era columns.
     /// Returns a vector where `era_indices[i]` is the era index for row `i`.
-    fn extract_era_indices(&self, series: &Series) -> Result<Vec<u16>> {
+    pub fn extract_era_indices(&self, series: &Series) -> Result<Vec<u16>> {
         use std::collections::HashMap;
 
         // Convert to string for generic handling

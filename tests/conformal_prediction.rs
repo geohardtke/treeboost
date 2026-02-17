@@ -144,6 +144,7 @@ fn dataframe_to_binned_with_stats(
             feature_type: treeboost::dataset::FeatureType::Numeric,
             num_bins: 255,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         })
         .collect();
 
@@ -164,7 +165,7 @@ fn dataframe_to_binned_with_stats(
 /// **Expected:**
 /// - Empirical coverage should be 85-95% (allowing 5% slack)
 #[test]
-fn test_conformal_coverage_90_percent() {
+fn test_conformal_coverage_90_percent() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Test: 90% Conformal Coverage ===");
 
     // Generate complex training data (will be split internally for calibration)
@@ -199,7 +200,7 @@ fn test_conformal_coverage_90_percent() {
     let mut config = UniversalConfig::new()
         .with_mode(BoostingMode::PureTree)
         .with_num_rounds(150)
-        .with_learning_rate(0.1)
+        .with_learning_rate(0.1)?
         .with_seed(42);
     config.tree_config = config.tree_config.with_max_depth(6).unwrap();
     config.calibration_ratio = 0.2; // Use 20% for calibration
@@ -260,6 +261,7 @@ fn test_conformal_coverage_90_percent() {
         "✅ 90% conformal coverage achieved: {:.2}%!",
         coverage * 100.0
     );
+    Ok(())
 }
 
 /// Test different confidence levels (80%, 90%, 95%)
@@ -268,7 +270,7 @@ fn test_conformal_coverage_90_percent() {
 /// - Higher confidence → wider intervals
 /// - All should achieve their target coverage ±10%
 #[test]
-fn test_conformal_multiple_confidence_levels() {
+fn test_conformal_multiple_confidence_levels() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Test: Multiple Confidence Levels ===");
 
     // Generate complex data
@@ -300,7 +302,7 @@ fn test_conformal_multiple_confidence_levels() {
         let mut config = UniversalConfig::new()
             .with_mode(BoostingMode::PureTree)
             .with_num_rounds(150)
-            .with_learning_rate(0.1)
+            .with_learning_rate(0.1)?
             .with_seed(42);
         config.tree_config = config.tree_config.with_max_depth(6).unwrap();
         config.calibration_ratio = 0.2;
@@ -356,6 +358,7 @@ fn test_conformal_multiple_confidence_levels() {
     }
 
     println!("\n✅ Multiple confidence levels tested successfully!");
+    Ok(())
 }
 
 /// Test that conformal intervals work with noisy data
@@ -368,7 +371,7 @@ fn test_conformal_multiple_confidence_levels() {
 /// - Intervals should be wider than for clean data
 /// - Coverage should still be correct (85-95%)
 #[test]
-fn test_conformal_with_noisy_data() {
+fn test_conformal_with_noisy_data() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Test: Conformal Prediction with Noisy Data ===");
 
     // Generate noisy training data (std=2.0, higher than default)
@@ -403,7 +406,7 @@ fn test_conformal_with_noisy_data() {
     let mut config = UniversalConfig::new()
         .with_mode(BoostingMode::PureTree)
         .with_num_rounds(150)
-        .with_learning_rate(0.1)
+        .with_learning_rate(0.1)?
         .with_seed(42);
     config.tree_config = config.tree_config.with_max_depth(6).unwrap();
     config.calibration_ratio = 0.2;
@@ -452,6 +455,7 @@ fn test_conformal_with_noisy_data() {
 
     println!("✅ Conformal prediction handles noisy data correctly!");
     println!("Coverage={:.2}%, Width={:.4}", coverage * 100.0, avg_width);
+    Ok(())
 }
 
 /// Test conformal prediction with distribution shift
@@ -464,7 +468,7 @@ fn test_conformal_with_noisy_data() {
 /// - Coverage may degrade slightly (conformal assumes exchangeability)
 /// - But intervals should still provide uncertainty estimates
 #[test]
-fn test_conformal_with_distribution_shift() {
+fn test_conformal_with_distribution_shift() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Test: Conformal with Distribution Shift ===");
 
     // Train on [0, 1000]
@@ -496,7 +500,7 @@ fn test_conformal_with_distribution_shift() {
     let mut config = UniversalConfig::new()
         .with_mode(BoostingMode::PureTree)
         .with_num_rounds(150)
-        .with_learning_rate(0.1)
+        .with_learning_rate(0.1)?
         .with_seed(42);
     config.tree_config = config.tree_config.with_max_depth(6).unwrap();
     config.calibration_ratio = 0.2;
@@ -547,6 +551,7 @@ fn test_conformal_with_distribution_shift() {
     );
 
     println!("✅ Conformal prediction with distribution shift completed!");
+    Ok(())
 }
 
 /// Calculate Root Mean Squared Error

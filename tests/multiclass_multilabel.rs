@@ -75,6 +75,7 @@ fn dataframe_to_binned_multiclass(df: &DataFrame, target_col: &str) -> Result<Bi
             feature_type: FeatureType::Numeric,
             num_bins: 255,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         });
     }
 
@@ -141,6 +142,7 @@ fn dataframe_to_binned_multilabel(df: &DataFrame, label_cols: &[String]) -> Resu
             feature_type: FeatureType::Numeric,
             num_bins: 255,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         });
     }
 
@@ -391,7 +393,8 @@ fn test_multiclass_predicted_class_equals_argmax() {
 // ============================================================================
 
 #[test]
-fn test_multilabel_independent_predictions() {
+fn test_multilabel_independent_predictions() -> std::result::Result<(), Box<dyn std::error::Error>>
+{
     println!("\n=== Test 4: Multi-label probabilities are independent ===\n");
 
     // Generate 3-label data with correlation between labels 0 and 1
@@ -410,7 +413,7 @@ fn test_multilabel_independent_predictions() {
     let config = UniversalConfig::default()
         .with_mode(BoostingMode::PureTree)
         .with_num_rounds(50)
-        .with_learning_rate(0.1);
+        .with_learning_rate(0.1)?;
 
     let loss = MultiLabelLogLoss::new();
     let model = UniversalModel::train_multilabel(&train_binned, config, &loss).unwrap();
@@ -474,10 +477,12 @@ fn test_multilabel_independent_predictions() {
     );
 
     println!("✅ Multi-label probabilities are independent (don't sum to 1)");
+    Ok(())
 }
 
 #[test]
-fn test_multilabel_can_predict_multiple_labels() {
+fn test_multilabel_can_predict_multiple_labels(
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Test 5: Model can predict multiple labels simultaneously ===\n");
 
     // Generate data with strong correlations
@@ -495,7 +500,7 @@ fn test_multilabel_can_predict_multiple_labels() {
     let config = UniversalConfig::default()
         .with_mode(BoostingMode::PureTree)
         .with_num_rounds(80)
-        .with_learning_rate(0.08);
+        .with_learning_rate(0.08)?;
 
     let loss = MultiLabelLogLoss::new();
     let model = UniversalModel::train_multilabel(&train_binned, config, &loss).unwrap();
@@ -532,10 +537,11 @@ fn test_multilabel_can_predict_multiple_labels() {
     );
 
     println!("✅ Model successfully predicts multiple labels simultaneously");
+    Ok(())
 }
 
 #[test]
-fn test_multilabel_focal_loss_vs_logloss() {
+fn test_multilabel_focal_loss_vs_logloss() -> std::result::Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Test 6: Focal Loss handles imbalanced labels better than LogLoss ===\n");
 
     // Generate data with label imbalance: label 2 is rare
@@ -641,7 +647,7 @@ fn test_multilabel_focal_loss_vs_logloss() {
     let config_logloss = UniversalConfig::default()
         .with_mode(BoostingMode::PureTree)
         .with_num_rounds(100)
-        .with_learning_rate(0.05);
+        .with_learning_rate(0.05)?;
 
     let loss_logloss = MultiLabelLogLoss::new();
     let model_logloss =
@@ -651,7 +657,7 @@ fn test_multilabel_focal_loss_vs_logloss() {
     let config_focal = UniversalConfig::default()
         .with_mode(BoostingMode::PureTree)
         .with_num_rounds(100)
-        .with_learning_rate(0.05);
+        .with_learning_rate(0.05)?;
 
     let loss_focal = MultiLabelFocalLoss::new(2.0);
     let model_focal =
@@ -715,6 +721,7 @@ fn test_multilabel_focal_loss_vs_logloss() {
     );
 
     println!("✅ Focal Loss tested on imbalanced multi-label data");
+    Ok(())
 }
 
 // ============================================================================

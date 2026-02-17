@@ -677,6 +677,7 @@ mod tests {
                 feature_type: FeatureType::Categorical,
                 num_bins: 2, // 0 or 1
                 bin_boundaries: vec![],
+                impute_value: 0.0,
             })
             .collect();
 
@@ -703,6 +704,7 @@ mod tests {
                 feature_type: FeatureType::Numeric,
                 num_bins: 16,
                 bin_boundaries: vec![],
+                impute_value: 0.0,
             })
             .collect();
 

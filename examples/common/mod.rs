@@ -70,6 +70,7 @@ pub fn extract_subset(dataset: &BinnedDataset, start_row: usize, end_row: usize)
                 feature_type: info.feature_type,
                 num_bins: info.num_bins,
                 bin_boundaries: info.bin_boundaries.clone(),
+                impute_value: info.impute_value,
             }
         })
         .collect();
@@ -89,6 +90,7 @@ pub fn create_feature_info(n_features: usize, prefix: &str) -> Vec<FeatureInfo> 
             feature_type: FeatureType::Numeric,
             num_bins: 255,
             bin_boundaries: vec![],
+            impute_value: 0.0,
         })
         .collect()
 }
