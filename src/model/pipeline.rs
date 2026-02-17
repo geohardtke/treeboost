@@ -163,6 +163,11 @@ impl Pipeline {
         self.steps.get(index)
     }
 
+    /// Get all steps as a slice
+    pub fn steps(&self) -> &[PipelineStepKind] {
+        &self.steps
+    }
+
     /// Get the final column order after all transformations
     pub fn column_order(&self) -> &[String] {
         &self.column_order
@@ -236,21 +241,42 @@ impl Pipeline {
             current_df = step.transform(current_df)?;
         }
 
-        // Verify column order matches training (skip if column_order not set)
-        let current_cols: Vec<String> = current_df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        // Reorder columns to match training order (skip if column_order not set)
+        if !self.column_order.is_empty() {
+            let current_cols: Vec<String> = current_df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
 
-        if !self.column_order.is_empty() && current_cols != self.column_order {
-            return Err(TreeBoostError::Pipeline(format!(
-                "Column order mismatch! Expected {} columns {:?}, got {} columns {:?}",
-                self.column_order.len(),
-                self.column_order,
-                current_cols.len(),
-                current_cols
-            )));
+            if current_cols != self.column_order {
+                // Select columns in training order, skipping any missing
+                let missing_cols: Vec<&str> = self
+                    .column_order
+                    .iter()
+                    .filter(|c| current_df.column(c.as_str()).is_err())
+                    .map(|c| c.as_str())
+                    .collect();
+                if !missing_cols.is_empty() {
+                    eprintln!(
+                        "Warning: {} columns from training are missing in inference data: {:?}",
+                        missing_cols.len(),
+                        missing_cols
+                    );
+                }
+                let ordered_cols: Vec<&str> = self
+                    .column_order
+                    .iter()
+                    .filter(|c| current_df.column(c.as_str()).is_ok())
+                    .map(|c| c.as_str())
+                    .collect();
+                current_df = current_df.select(ordered_cols).map_err(|e| {
+                    TreeBoostError::Pipeline(format!(
+                        "Failed to reorder columns to training order: {}",
+                        e
+                    ))
+                })?;
+            }
         }
 
         Ok(current_df)

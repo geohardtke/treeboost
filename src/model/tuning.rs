@@ -56,7 +56,7 @@ pub(super) fn tune_hyperparameters(
                     .with_linear_config(linear_config)
                     .with_tree_config(tree_config)
                     .with_num_rounds(50)
-                    .with_learning_rate(0.3);
+                    .with_learning_rate(0.3)?;
                 Ok((univ_config, None, None))
             } else {
                 let univ_config = UniversalConfig::default().with_mode(mode);
@@ -89,7 +89,7 @@ fn tune_tree_model(
     mode: BoostingMode,
     profile: &DataFrameProfile,
 ) -> Result<(UniversalConfig, Option<TreeTuningResult>)> {
-    if config.verbose {
+    if config.verbose.enabled() {
         println!("  [Tuning] Running AutoTuner for {:?} mode...", mode);
     }
 
@@ -198,7 +198,7 @@ fn tune_tree_model(
         }
     };
 
-    if config.verbose {
+    if config.verbose.enabled() {
         println!(
             "  [Tuning] Task type: {:?}, Optimization metric: {:?}",
             tuner_task_type, tuner_cfg.output.metric
@@ -259,8 +259,8 @@ fn tune_tree_model(
     let universal_config = UniversalConfig::default()
         .with_mode(mode)
         .with_num_rounds(best_gbdt_config.num_rounds)
-        .with_learning_rate(best_gbdt_config.learning_rate)
-        .with_subsample(best_gbdt_config.subsample)
+        .with_learning_rate(best_gbdt_config.learning_rate)?
+        .with_subsample(best_gbdt_config.subsample)?
         .with_tree_config(tree_config)
         .with_backend(best_gbdt_config.backend_type); // Preserve backend type from tuning!
 
@@ -280,7 +280,7 @@ fn tune_tree_model(
         }
     });
 
-    if config.verbose {
+    if config.verbose.enabled() {
         if let Some(best) = history.best() {
             // Show the optimization metric value with clear labeling
             match tuner_cfg.output.metric {
@@ -387,9 +387,9 @@ fn tune_ltt(
 
     let univ_config = UniversalConfig::default()
         .with_mode(BoostingMode::LinearThenTree)
-        .with_learning_rate(result.tree_params.learning_rate)
+        .with_learning_rate(result.tree_params.learning_rate)?
         .with_num_rounds(result.tree_params.num_rounds as usize)
-        .with_subsample(result.tree_params.subsample)
+        .with_subsample(result.tree_params.subsample)?
         .with_tree_config(tree_config)
         .with_linear_config(result.linear_params.to_config())
         .with_linear_feature_indices(linear_feature_indices); // Store for training and prediction
@@ -463,5 +463,6 @@ pub(super) fn create_config_for_mode(
         .with_mode(mode)
         .with_num_rounds(num_rounds)
         .with_learning_rate(learning_rate)
+        .expect("hardcoded learning_rate values are valid")
         .with_tree_config(tree_config)
 }

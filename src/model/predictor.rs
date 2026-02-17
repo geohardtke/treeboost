@@ -419,6 +419,7 @@ impl GatedPredictor {
                 feature_type: FeatureType::Numeric,
                 num_bins: 255,
                 bin_boundaries: boundaries,
+                impute_value: 0.0,
             });
         }
 
