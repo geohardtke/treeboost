@@ -114,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = UniversalConfig::new()
         .with_mode(BoostingMode::PureTree)
         .with_num_rounds(100)
-        .with_learning_rate(0.1)
+        .with_learning_rate(0.1)?
         .with_seed(42);
 
     let start = std::time::Instant::now();
@@ -147,7 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_mode(BoostingMode::LinearThenTree)
         .with_num_rounds(80) // Fewer tree rounds needed
         .with_linear_rounds(10) // 10 linear boosting iterations first
-        .with_learning_rate(0.1)
+        .with_learning_rate(0.1)?
         .with_seed(42);
 
     let start = std::time::Instant::now();
@@ -181,7 +181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = UniversalConfig::new()
         .with_mode(BoostingMode::RandomForest)
         .with_num_rounds(100) // Number of trees
-        .with_subsample(0.7) // Bootstrap sample ratio
+        .with_subsample(0.7)? // Bootstrap sample ratio
         .with_seed(42);
 
     let start = std::time::Instant::now();

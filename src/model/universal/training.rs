@@ -108,11 +108,116 @@ impl UniversalModel {
                 loss_fn,
                 None,
                 feature_extractor,
+                None,
             ),
             BoostingMode::RandomForest => {
                 Self::train_random_forest(dataset, config, loss_fn, None, feature_extractor)
             }
         }
+    }
+
+    /// Train with presplit validation data for early stopping.
+    ///
+    /// Uses the provided validation dataset for early stopping instead of
+    /// creating a random internal split. This is critical for time-series data
+    /// where random splits cause temporal leakage.
+    pub fn train_with_validation(
+        dataset: &BinnedDataset,
+        val_dataset: &BinnedDataset,
+        config: UniversalConfig,
+        loss_fn: &dyn LossFunction,
+    ) -> Result<Self> {
+        Self::validate_config(&config)?;
+        let feature_extractor = config.feature_extractor.clone();
+
+        match config.mode {
+            BoostingMode::PureTree => Self::train_pure_tree_with_validation(
+                dataset,
+                val_dataset,
+                config,
+                loss_fn,
+                None,
+                feature_extractor,
+            ),
+            BoostingMode::LinearThenTree => {
+                let feature_extractor = config.feature_extractor.clone();
+                let linear_indices_opt = config.linear_feature_indices.clone();
+                let raw_features_opt = dataset.raw_features().map(|r| r.to_vec());
+                Self::train_linear_then_tree(
+                    dataset,
+                    raw_features_opt.as_deref(),
+                    linear_indices_opt.as_deref(),
+                    config,
+                    loss_fn,
+                    None,
+                    feature_extractor,
+                    Some(val_dataset),
+                )
+            }
+            // For other modes (e.g. RandomForest), validation data is not supported yet
+            _ => {
+                eprintln!(
+                    "Warning: train_with_validation called with {:?} mode, \
+                     but validation data is only used for PureTree and LinearThenTree. \
+                     Falling back to standard training (validation data ignored).",
+                    config.mode
+                );
+                Self::train(dataset, config, loss_fn)
+            }
+        }
+    }
+
+    pub(super) fn train_pure_tree_with_validation(
+        dataset: &BinnedDataset,
+        val_dataset: &BinnedDataset,
+        config: UniversalConfig,
+        loss_fn: &dyn LossFunction,
+        analysis: Option<DatasetAnalysis>,
+        feature_extractor: Option<crate::dataset::feature_extractor::FeatureExtractor>,
+    ) -> Result<Self> {
+        let num_features = dataset.num_features();
+
+        let (gbdt_model, gbdt_ensemble, stacker_weights, stacker_intercept) =
+            if let Some(ref seeds) = config.ensemble_seeds {
+                Self::train_gbdt_ensemble(dataset, &config, loss_fn, seeds)?
+            } else {
+                let mut gbdt_config = Self::to_gbdt_config(&config, loss_fn)?;
+                // For presplit validation, set early_stopping_rounds directly
+                // (to_gbdt_config skips it when validation_ratio=0)
+                if config.early_stopping_rounds > 0 {
+                    gbdt_config.early_stopping_rounds = config.early_stopping_rounds;
+                } else {
+                    // Default to 50 if user didn't set it
+                    gbdt_config.early_stopping_rounds = 50;
+                }
+                let gbdt_model = GBDTModel::train_binned_with_validation(
+                    dataset,
+                    val_dataset,
+                    &[],
+                    gbdt_config,
+                )?;
+                (Some(gbdt_model), None, None, None)
+            };
+
+        Ok(Self {
+            config,
+            gbdt_model,
+            gbdt_ensemble,
+            stacker_weights,
+            stacker_intercept,
+            linear_booster: None,
+            linear_boosters: None,
+            gbdt_per_label: None,
+            trees: Vec::new(),
+            base_prediction: 0.0,
+            base_predictions_multi: None,
+            num_features,
+            analysis,
+            raw_features_for_linear: None,
+            linear_feature_indices: None,
+            num_linear_features: None,
+            feature_extractor,
+        })
     }
 
     /// Train LinearThenTree with raw features (recommended for best accuracy)
@@ -155,6 +260,7 @@ impl UniversalModel {
                 loss_fn,
                 None,
                 feature_extractor,
+                None,
             ),
             BoostingMode::RandomForest => {
                 Self::train_random_forest(dataset, config, loss_fn, None, feature_extractor)
@@ -180,6 +286,7 @@ impl UniversalModel {
         linear_feature_indices: &[usize],
         config: UniversalConfig,
         loss_fn: &dyn LossFunction,
+        validation_dataset: Option<&BinnedDataset>,
     ) -> Result<Self> {
         Self::validate_config(&config)?;
 
@@ -196,6 +303,7 @@ impl UniversalModel {
                 loss_fn,
                 None,
                 feature_extractor,
+                validation_dataset,
             ),
             BoostingMode::RandomForest => {
                 Self::train_random_forest(dataset, config, loss_fn, None, feature_extractor)
@@ -306,6 +414,7 @@ impl UniversalModel {
                 config,
                 loss_fn,
                 Some(analysis),
+                None,
                 None,
             ),
             BoostingMode::RandomForest => {
@@ -427,6 +536,7 @@ impl UniversalModel {
         loss_fn: &dyn LossFunction,
         analysis: Option<DatasetAnalysis>,
         feature_extractor: Option<crate::dataset::feature_extractor::FeatureExtractor>,
+        validation_dataset: Option<&BinnedDataset>,
     ) -> Result<Self> {
         let raw_targets = dataset.targets();
         let num_rows = dataset.num_rows();
@@ -557,21 +667,37 @@ impl UniversalModel {
             }
         }
 
-        // Filter dataset to only tree features (exclude features used by linear model)
-        // Linear model uses polynomial/interaction features → tree uses categorical/other features
-        let residual_dataset = if let Some(ref linear_idx) = linear_indices {
-            // Compute tree_indices = all features NOT in linear_indices
-            let all_indices: std::collections::HashSet<usize> = (0..num_features).collect();
-            let linear_set: std::collections::HashSet<usize> = linear_idx.iter().copied().collect();
-            let mut tree_indices: Vec<usize> =
-                all_indices.difference(&linear_set).copied().collect();
-            tree_indices.sort_unstable(); // Keep deterministic order
+        // Tree component uses ALL features to capture nonlinear patterns in the residuals.
+        // Linear captures linear signal, trees capture what's left — but trees need access
+        // to the same features to find nonlinear interactions the linear model missed.
 
-            // Filter to only tree features
-            residual_dataset.subset_features(&tree_indices)
+        // Compute residuals on validation set for early stopping
+        let val_residual_dataset = if let Some(val_data) = validation_dataset {
+            let val_num_rows = val_data.num_rows();
+            let val_targets = val_data.targets();
+
+            // Compute linear predictions on validation features
+            let val_raw_features = extract_selected_features(
+                &Self::extract_raw_features(val_data),
+                val_num_rows,
+                val_data.num_features(),
+                linear_indices.as_deref(),
+            );
+            let val_linear_preds =
+                linear_booster.predict_batch(&val_raw_features, num_linear_features);
+            let shrinkage = config.linear_config.shrinkage_factor;
+
+            let mut val_residual = val_data.clone();
+            {
+                let val_res_targets = val_residual.targets_mut();
+                for i in 0..val_num_rows {
+                    val_res_targets[i] =
+                        val_targets[i] - (base_prediction + shrinkage * val_linear_preds[i]);
+                }
+            }
+            Some(val_residual)
         } else {
-            // No linear_indices specified, use all features (backward compat)
-            residual_dataset
+            None
         };
 
         // Check if ensemble training is requested
@@ -581,8 +707,23 @@ impl UniversalModel {
                 Self::train_gbdt_ensemble(&residual_dataset, &config, loss_fn, seeds)?
             } else {
                 // Single GBDT training (standard path)
-                let gbdt_config = Self::to_gbdt_config(&config, loss_fn)?;
-                let gbdt_model = GBDTModel::train_binned(&residual_dataset, gbdt_config)?;
+                let mut gbdt_config = Self::to_gbdt_config(&config, loss_fn)?;
+                let gbdt_model = if let Some(ref val_res) = val_residual_dataset {
+                    // Set early stopping for presplit validation
+                    if config.early_stopping_rounds > 0 {
+                        gbdt_config.early_stopping_rounds = config.early_stopping_rounds;
+                    } else {
+                        gbdt_config.early_stopping_rounds = 50;
+                    }
+                    GBDTModel::train_binned_with_validation(
+                        &residual_dataset,
+                        val_res,
+                        &[],
+                        gbdt_config,
+                    )?
+                } else {
+                    GBDTModel::train_binned(&residual_dataset, gbdt_config)?
+                };
                 (Some(gbdt_model), None, None, None)
             };
 

@@ -8,6 +8,7 @@ use crate::defaults::{
 };
 use crate::learner::{LinearConfig, LinearPreset, TreeConfig, TreePreset};
 use crate::model::universal::mode::BoostingMode;
+use crate::{Result, TreeBoostError};
 use rkyv::{Archive, Deserialize, Serialize};
 
 // =============================================================================
@@ -76,6 +77,30 @@ impl Default for StackingStrategy {
 }
 
 // =============================================================================
+// LinearSelectionMode
+// =============================================================================
+
+/// How to select features for the linear component in LinearThenTree mode
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, serde::Serialize, serde::Deserialize)]
+pub enum LinearSelectionMode {
+    /// Select features by correlation with target (|r| >= threshold)
+    /// This captures real linear signal: trends, spatial gradients, price levels
+    Correlation {
+        /// Minimum absolute correlation to include a feature (default: 0.05)
+        threshold: f32,
+    },
+    /// Select features by naming convention (legacy behavior)
+    /// Matches: *_squared, *_sqrt, *_log, *_log1p, *_x_*, *_ratio_*
+    Pattern,
+}
+
+impl Default for LinearSelectionMode {
+    fn default() -> Self {
+        Self::Correlation { threshold: 0.05 }
+    }
+}
+
+// =============================================================================
 // UniversalConfig
 // =============================================================================
 
@@ -100,6 +125,9 @@ pub struct UniversalConfig {
     /// Row subsampling ratio (0.0-1.0)
     pub subsample: f32,
 
+    /// Column subsampling ratio per tree (0.0-1.0, 1.0 = use all features)
+    pub colsample: f32,
+
     /// Validation ratio for early stopping (0.0 to disable)
     pub validation_ratio: f32,
 
@@ -117,6 +145,14 @@ pub struct UniversalConfig {
 
     /// Number of linear boosting rounds before trees (LinearThenTree mode)
     pub linear_rounds: usize,
+
+    /// How to select features for the linear component (LinearThenTree mode)
+    ///
+    /// - `Correlation { threshold }`: Select features with |correlation| >= threshold (default)
+    /// - `Pattern`: Legacy naming convention matching (*_squared, *_x_*, etc.)
+    ///
+    /// Ignored if `linear_feature_indices` is set (explicit override takes priority).
+    pub linear_selection_mode: LinearSelectionMode,
 
     /// Feature indices for linear model in LinearThenTree mode
     ///
@@ -217,6 +253,18 @@ pub struct UniversalConfig {
     /// let preds = model.predict_df(&test_df)?;  // Pipeline auto-applied
     /// ```
     pub pipeline: Option<crate::model::Pipeline>,
+
+    /// DataPipeline state for inference (bin boundaries, encoding maps, column order)
+    ///
+    /// This is the authoritative state used by `predict_df()` to bin and encode
+    /// inference data identically to training. Stored alongside the Pipeline for
+    /// backwards compatibility, but `predict_df()` uses this for actual inference.
+    ///
+    /// Skipped by serde because rkyv handles serialization of the full model
+    /// (including pipeline state) via zero-copy. JSON round-tripping of config
+    /// alone does not need this field.
+    #[serde(skip)]
+    pub pipeline_state: Option<crate::dataset::PipelineState>,
 }
 
 impl Default for UniversalConfig {
@@ -228,12 +276,14 @@ impl Default for UniversalConfig {
             linear_config: LinearConfig::default(),
             learning_rate: tree_defaults::DEFAULT_LEARNING_RATE,
             subsample: gbdt_defaults::DEFAULT_SUBSAMPLE,
+            colsample: 1.0,
             validation_ratio: gbdt_defaults::DEFAULT_GBDT_VALIDATION_RATIO,
             early_stopping_rounds: gbdt_defaults::DEFAULT_EARLY_STOPPING_ROUNDS,
             calibration_ratio: gbdt_defaults::DEFAULT_CALIBRATION_RATIO,
             conformal_quantile: gbdt_defaults::DEFAULT_CONFORMAL_QUANTILE,
             seed: seeds_defaults::DEFAULT_SEED,
             linear_rounds: universal_defaults::DEFAULT_LINEAR_ROUNDS, // Single round with many CD iterations (fit once)
+            linear_selection_mode: LinearSelectionMode::default(),
             linear_feature_indices: None, // No feature filtering by default (backward compat)
             max_linear_memory_mb: universal_defaults::DEFAULT_MAX_LINEAR_MEMORY_MB, // No limit by default
             feature_extractor: None,
@@ -241,6 +291,7 @@ impl Default for UniversalConfig {
             stacking_strategy: StackingStrategy::default(),
             backend_type: crate::backend::BackendType::Auto,
             pipeline: None,
+            pipeline_state: None,
         }
     }
 }
@@ -317,19 +368,48 @@ impl UniversalConfig {
         self
     }
 
-    pub fn with_learning_rate(mut self, lr: f32) -> Self {
-        self.learning_rate = lr.clamp(0.0, 1.0);
-        self
+    pub fn with_learning_rate(mut self, lr: f32) -> Result<Self> {
+        if lr <= 0.0 || lr > 1.0 {
+            return Err(TreeBoostError::Config(format!(
+                "learning_rate must be in (0, 1], got {}",
+                lr
+            )));
+        }
+        self.learning_rate = lr;
+        Ok(self)
     }
 
-    pub fn with_subsample(mut self, ratio: f32) -> Self {
-        self.subsample = ratio.clamp(0.0, 1.0);
-        self
+    pub fn with_subsample(mut self, ratio: f32) -> Result<Self> {
+        if ratio <= 0.0 || ratio > 1.0 {
+            return Err(TreeBoostError::Config(format!(
+                "subsample must be in (0, 1], got {}",
+                ratio
+            )));
+        }
+        self.subsample = ratio;
+        Ok(self)
     }
 
-    pub fn with_validation_ratio(mut self, ratio: f32) -> Self {
-        self.validation_ratio = ratio.clamp(0.0, 0.5);
-        self
+    pub fn with_colsample(mut self, ratio: f32) -> Result<Self> {
+        if ratio <= 0.0 || ratio > 1.0 {
+            return Err(TreeBoostError::Config(format!(
+                "colsample must be in (0, 1], got {}",
+                ratio
+            )));
+        }
+        self.colsample = ratio;
+        Ok(self)
+    }
+
+    pub fn with_validation_ratio(mut self, ratio: f32) -> Result<Self> {
+        if ratio < 0.0 || ratio > 0.5 {
+            return Err(TreeBoostError::Config(format!(
+                "validation_ratio must be in [0, 0.5], got {}",
+                ratio
+            )));
+        }
+        self.validation_ratio = ratio;
+        Ok(self)
     }
 
     pub fn with_early_stopping_rounds(mut self, rounds: usize) -> Self {
@@ -338,10 +418,22 @@ impl UniversalConfig {
     }
 
     /// Enable conformal calibration for uncertainty estimates.
-    pub fn with_conformal_calibration(mut self, ratio: f32, quantile: f32) -> Self {
-        self.calibration_ratio = ratio.clamp(0.0, 0.5);
-        self.conformal_quantile = quantile.clamp(0.5, 0.99);
-        self
+    pub fn with_conformal_calibration(mut self, ratio: f32, quantile: f32) -> Result<Self> {
+        if ratio < 0.0 || ratio > 0.5 {
+            return Err(TreeBoostError::Config(format!(
+                "calibration_ratio must be in [0, 0.5], got {}",
+                ratio
+            )));
+        }
+        if quantile < 0.5 || quantile > 0.99 {
+            return Err(TreeBoostError::Config(format!(
+                "conformal_quantile must be in [0.5, 0.99], got {}",
+                quantile
+            )));
+        }
+        self.calibration_ratio = ratio;
+        self.conformal_quantile = quantile;
+        Ok(self)
     }
 
     pub fn with_seed(mut self, seed: u64) -> Self {
@@ -368,6 +460,12 @@ impl UniversalConfig {
     ///     .with_mode(BoostingMode::LinearThenTree)
     ///     .with_linear_feature_indices(vec![0, 1, 4, 5]); // Linear uses features 0,1,4,5; trees use 2,3,6,7,...
     /// ```
+    /// Set linear feature selection mode
+    pub fn with_linear_selection_mode(mut self, mode: LinearSelectionMode) -> Self {
+        self.linear_selection_mode = mode;
+        self
+    }
+
     pub fn with_linear_feature_indices(mut self, indices: Vec<usize>) -> Self {
         self.linear_feature_indices = Some(indices);
         self
