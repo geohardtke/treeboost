@@ -46,7 +46,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Data processing - columnar storage with lazy evaluation
-polars = { version = "0.51", features = [
+polars = { version = "0.53", features = [
   "parquet",
   "lazy",
   "dtype-full",

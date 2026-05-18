@@ -211,7 +211,7 @@ pub fn features_to_df(
         })
         .collect();
 
-    DataFrame::new(columns)
+    DataFrame::new_infer_height(columns)
         .map_err(|e| TreeBoostError::Data(format!("Failed to create DataFrame: {}", e)))
 }
 
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn test_df_to_features() {
-        let df = DataFrame::new(vec![
+        let df = DataFrame::new(3, vec![
             Series::new("a".into(), vec![1.0f64, 2.0, 3.0]).into(),
             Series::new("b".into(), vec![4.0f64, 5.0, 6.0]).into(),
         ])
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn test_df_to_target() {
-        let df = DataFrame::new(vec![
+        let df = DataFrame::new(2, vec![
             Series::new("feature".into(), vec![1.0f64, 2.0]).into(),
             Series::new("target".into(), vec![10.0f64, 20.0]).into(),
         ])
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_split_by_dtype() {
-        let df = DataFrame::new(vec![
+        let df = DataFrame::new(2, vec![
             Series::new("num1".into(), vec![1.0f64, 2.0]).into(),
             Series::new("num2".into(), vec![3i32, 4]).into(),
             Series::new("cat1".into(), vec!["a", "b"]).into(),
@@ -429,7 +429,7 @@ mod tests {
     #[test]
     fn test_roundtrip() {
         // DataFrame -> features -> DataFrame roundtrip
-        let original = DataFrame::new(vec![
+        let original = DataFrame::new(3, vec![
             Series::new("x".into(), vec![1.0f64, 2.0, 3.0]).into(),
             Series::new("y".into(), vec![4.0f64, 5.0, 6.0]).into(),
         ])

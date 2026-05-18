@@ -344,7 +344,7 @@ fn generate_synthetic_panel_data(num_rows: usize) -> Result<DataFrame> {
         .collect();
     all_columns.push(Column::new("y".into(), targets));
 
-    let df = DataFrame::new(all_columns)?;
+    let df = DataFrame::new(actual_rows, all_columns)?;
 
     Ok(df)
 }

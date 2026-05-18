@@ -348,7 +348,7 @@ impl GatedPredictor {
         let mut binned = Vec::with_capacity(num_rows * num_features);
         let mut feature_info = Vec::with_capacity(num_features);
 
-        for col in df.get_columns() {
+        for col in df.columns() {
             let col_name = col.name().to_string();
 
             // Extract column values as f32 with proper error handling

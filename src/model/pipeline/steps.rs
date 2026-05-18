@@ -457,7 +457,7 @@ impl PipelineStep for EngineerFeaturesStep {
                     .collect();
 
                 let new_series = Series::new(lut.output_name().as_str().into(), mapped);
-                df = df.with_column(new_series)?.clone();
+                df = df.with_column(new_series.into())?.clone();
             }
         }
 
@@ -481,7 +481,7 @@ impl PipelineStep for EngineerFeaturesStep {
                     .collect();
 
                 let new_series = Series::new(trig.output_name().as_str().into(), transformed);
-                df = df.with_column(new_series)?.clone();
+                df = df.with_column(new_series.into())?.clone();
             }
         }
 
@@ -495,7 +495,7 @@ impl PipelineStep for EngineerFeaturesStep {
         if !self.interaction_pairs.is_empty() {
             // Convert named pairs to index pairs
             let numeric_cols: Vec<String> = df
-                .get_columns()
+                .columns()
                 .iter()
                 .filter(|col| col.dtype().is_numeric())
                 .map(|col| col.name().to_string())
@@ -521,7 +521,7 @@ impl PipelineStep for EngineerFeaturesStep {
         if !self.ratio_pairs.is_empty() {
             // Convert named pairs to index pairs
             let numeric_cols: Vec<String> = df
-                .get_columns()
+                .columns()
                 .iter()
                 .filter(|col| col.dtype().is_numeric())
                 .map(|col| col.name().to_string())
@@ -1127,7 +1127,7 @@ impl PipelineStep for CustomFeaturesStep {
         for feature in &self.features {
             let values = feature.expr.evaluate(&df)?;
             let series = Series::new(feature.name.as_str().into(), values);
-            df = df.with_column(series)?.clone();
+            df = df.with_column(series.into())?.clone();
         }
         Ok(df)
     }
@@ -1293,7 +1293,7 @@ impl PipelineStep for EncodeCategoricalsStep {
 
         // Identify categorical columns
         let categorical_columns: Vec<String> = df
-            .get_columns()
+            .columns()
             .iter()
             .filter(|col| matches!(col.dtype(), DataType::String | DataType::Categorical(_, _)))
             .map(|col| col.name().to_string())
@@ -1343,7 +1343,7 @@ impl PipelineStep for EncodeCategoricalsStep {
 
             // Replace categorical column with encoded Float64 column
             let encoded_series = Series::new(col_name.as_str().into(), encoded);
-            df.replace(col_name.as_str(), encoded_series)?;
+            df.replace(col_name.as_str(), encoded_series.into())?;
         }
 
         Ok(df)
@@ -1370,7 +1370,7 @@ impl PipelineStep for EncodeCategoricalsStep {
 
                 // Replace with encoded Float64 column
                 let encoded_series = Series::new(col_name.as_str().into(), encoded);
-                df.replace(col_name.as_str(), encoded_series)?;
+                df.replace(col_name.as_str(), encoded_series.into())?;
             }
         }
 
@@ -1529,7 +1529,7 @@ impl PipelineStep for BinNumericFeaturesStep {
         // Actual binning to u8 happens later in DataPipeline
         let binner = QuantileBinner::new(self.num_bins);
 
-        for col in df.get_columns() {
+        for col in df.columns() {
             if col.dtype().is_numeric() {
                 let col_name = col.name().to_string();
                 let values = Self::series_to_f64(col.as_materialized_series())?;

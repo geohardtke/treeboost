@@ -28,7 +28,7 @@ impl DatasetLoader {
         target_column: &str,
         feature_columns: Option<&[&str]>,
     ) -> Result<BinnedDataset> {
-        let pl_path = PlPath::new(&path.as_ref().to_string_lossy());
+        let pl_path = PlRefPath::new(&*path.as_ref().to_string_lossy());
         let df = LazyFrame::scan_parquet(pl_path, Default::default())?.collect()?;
         self.from_dataframe(df, target_column, feature_columns)
     }
@@ -314,7 +314,7 @@ impl DatasetLoader {
         path: impl AsRef<Path>,
         feature_info: &[FeatureInfo],
     ) -> Result<BinnedDataset> {
-        let pl_path = PlPath::new(&path.as_ref().to_string_lossy());
+        let pl_path = PlRefPath::new(&*path.as_ref().to_string_lossy());
         let df = LazyFrame::scan_parquet(pl_path, Default::default())?.collect()?;
         self.from_dataframe_for_prediction(df, feature_info)
     }

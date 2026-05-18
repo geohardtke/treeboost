@@ -149,7 +149,7 @@ impl DataPipeline {
         target_column: &str,
         categorical_columns: Option<&[&str]>,
     ) -> Result<(BinnedDataset, PipelineState, DataFrame)> {
-        let pl_path = PlPath::new(&path.as_ref().to_string_lossy());
+        let pl_path = PlRefPath::new(&*path.as_ref().to_string_lossy());
         let df = LazyFrame::scan_parquet(pl_path, Default::default())?.collect()?;
         self.process_for_training(df, target_column, categorical_columns, None)
     }
@@ -342,7 +342,7 @@ impl DataPipeline {
         let target_col = df.column(target_column)?;
         new_columns.push(target_col.clone());
 
-        let filtered_df = DataFrame::new(new_columns).map_err(|e| {
+        let filtered_df = DataFrame::new_infer_height(new_columns).map_err(|e| {
             TreeBoostError::Data(format!("Failed to build filtered DataFrame: {}", e))
         })?;
 
@@ -401,7 +401,7 @@ impl DataPipeline {
         path: impl AsRef<Path>,
         state: &PipelineState,
     ) -> Result<BinnedDataset> {
-        let pl_path = PlPath::new(&path.as_ref().to_string_lossy());
+        let pl_path = PlRefPath::new(&*path.as_ref().to_string_lossy());
         let df = LazyFrame::scan_parquet(pl_path, Default::default())?.collect()?;
         let (_preprocessed_df, dataset) = self.process_for_inference(df, state)?;
         Ok(dataset)
@@ -475,7 +475,7 @@ impl DataPipeline {
             .into_iter()
             .map(|s| s.into_column())
             .collect();
-        let preprocessed_df = DataFrame::new(columns).map_err(|e| {
+        let preprocessed_df = DataFrame::new_infer_height(columns).map_err(|e| {
             TreeBoostError::Data(format!("Failed to create preprocessed DataFrame: {}", e))
         })?;
 

@@ -615,7 +615,7 @@ impl GBDTModel {
             .with_entropy_weight(config.entropy_weight)
             .with_min_gain(config.min_gain);
 
-        for round in 0..config.num_rounds {
+        for _round in 0..config.num_rounds {
             // Grow tree - either fused, Full GPU, or separate gradient+histogram paths
             #[allow(unused_mut, unused_assignments)]
             let mut tree: Option<Tree> = None;

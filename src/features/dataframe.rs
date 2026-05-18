@@ -211,10 +211,10 @@ pub fn apply_timeseries_features(
 
     // Create new DataFrame with all time-series features
     let columns: Vec<_> = all_series.into_iter().map(|s| s.into_column()).collect();
-    let ts_df = DataFrame::new(columns)?;
+    let ts_df = DataFrame::new_infer_height(columns)?;
 
     // Horizontal stack - much faster than repeated with_column()
-    let new_df = df.hstack(ts_df.get_columns())?;
+    let new_df = df.hstack(ts_df.columns())?;
 
     Ok(new_df)
 }
@@ -262,9 +262,9 @@ pub fn apply_polynomial_features(
         cols
     } else {
         // Auto-detect numeric columns
-        df.get_columns()
+        df.columns()
             .iter()
-            .filter(|col| is_numeric(col))
+            .filter(|col| is_numeric(*col))
             .map(|col| col.name().to_string())
             .collect()
     };
@@ -320,10 +320,10 @@ pub fn apply_polynomial_features(
 
     // Create new DataFrame with polynomial features
     let columns: Vec<_> = all_series.into_iter().map(|s| s.into_column()).collect();
-    let poly_df = DataFrame::new(columns)?;
+    let poly_df = DataFrame::new_infer_height(columns)?;
 
     // Horizontal stack - O(n) operation
-    let new_df = df.hstack(poly_df.get_columns())?;
+    let new_df = df.hstack(poly_df.columns())?;
 
     Ok(new_df)
 }
@@ -369,9 +369,9 @@ pub fn apply_ratio_features(
         cols
     } else {
         // Auto-detect numeric columns
-        df.get_columns()
+        df.columns()
             .iter()
-            .filter(|col| is_numeric(col))
+            .filter(|col| is_numeric(*col))
             .map(|col| col.name().to_string())
             .collect()
     };
@@ -427,10 +427,10 @@ pub fn apply_ratio_features(
 
     // Create new DataFrame with ratio features
     let columns: Vec<_> = all_series.into_iter().map(|s| s.into_column()).collect();
-    let ratio_df = DataFrame::new(columns)?;
+    let ratio_df = DataFrame::new_infer_height(columns)?;
 
     // Horizontal stack - O(n) operation
-    let new_df = df.hstack(ratio_df.get_columns())?;
+    let new_df = df.hstack(ratio_df.columns())?;
 
     Ok(new_df)
 }
@@ -477,9 +477,9 @@ pub fn apply_interaction_features(
         cols
     } else {
         // Auto-detect numeric columns
-        df.get_columns()
+        df.columns()
             .iter()
-            .filter(|col| is_numeric(col))
+            .filter(|col| is_numeric(*col))
             .map(|col| col.name().to_string())
             .collect()
     };
@@ -535,10 +535,10 @@ pub fn apply_interaction_features(
 
     // Create new DataFrame with interaction features
     let columns: Vec<_> = all_series.into_iter().map(|s| s.into_column()).collect();
-    let interaction_df = DataFrame::new(columns)?;
+    let interaction_df = DataFrame::new_infer_height(columns)?;
 
     // Horizontal stack - O(n) operation
-    let new_df = df.hstack(interaction_df.get_columns())?;
+    let new_df = df.hstack(interaction_df.columns())?;
 
     Ok(new_df)
 }
@@ -773,7 +773,7 @@ pub fn apply_feature_plan(
     if !plan.ratio_pairs.is_empty() {
         // Get numeric columns for name-to-index mapping
         let numeric_cols: Vec<String> = df
-            .get_columns()
+            .columns()
             .iter()
             .filter(|col| col.dtype().is_numeric())
             .map(|col| col.name().to_string())
@@ -804,7 +804,7 @@ pub fn apply_feature_plan(
     if !plan.interaction_pairs.is_empty() {
         // Get numeric columns for name-to-index mapping
         let numeric_cols: Vec<String> = df
-            .get_columns()
+            .columns()
             .iter()
             .filter(|col| col.dtype().is_numeric())
             .map(|col| col.name().to_string())
@@ -846,7 +846,7 @@ pub fn apply_feature_plan(
         // Nulls appear for rows without sufficient history (e.g., first rows of each group)
         // Only fill nulls/NaN on numeric columns (string columns don't support fill_nan)
         let numeric_fill: Vec<_> = df
-            .get_columns()
+            .columns()
             .iter()
             .filter(|c| c.dtype().is_numeric())
             .map(|c| col(c.name().clone()).fill_null(lit(0)).fill_nan(lit(0.0)))

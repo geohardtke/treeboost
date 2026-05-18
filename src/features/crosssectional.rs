@@ -77,13 +77,13 @@ pub fn apply_crosssectional_features_with_include(
             .collect()
     } else {
         // Otherwise, process all numeric columns (excluding group and exclusion list)
-        df.get_columns()
+        df.columns()
             .iter()
-            .filter(|s| {
-                let name = s.name().as_str();
-                s.dtype().is_numeric() && name != group_col && !exclude_cols.contains(&name)
+            .filter(|col| {
+                let name = col.name().as_str();
+                col.dtype().is_numeric() && name != group_col && !exclude_cols.contains(&name)
             })
-            .map(|s| s.name().to_string())
+            .map(|col| col.name().to_string())
             .collect()
     };
 
@@ -128,7 +128,7 @@ pub fn apply_crosssectional_features_with_include(
         let rank_col = compute_group_ranks(&result_with_stats, col_name, group_col)?;
 
         result = result_with_stats;
-        result.with_column(rank_col)?;
+        result.with_column(rank_col.into())?;
     }
 
     Ok(result)

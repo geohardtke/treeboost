@@ -418,7 +418,7 @@ pub fn generate_multilabel_data(
     // Add label columns
     for (label_id, label_vec) in label_vecs.into_iter().enumerate() {
         let label_series = Series::new(format!("label_{}", label_id).into(), label_vec);
-        let _ = df_builder.with_column(label_series).map_err(|e| {
+        let _ = df_builder.with_column(label_series.into()).map_err(|e| {
             treeboost::TreeBoostError::Config(format!("Failed to add label column: {}", e))
         })?;
     }

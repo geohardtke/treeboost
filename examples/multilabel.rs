@@ -54,7 +54,7 @@ fn create_multilabel_dataframe(n_samples: usize, seed: u64) -> DataFrame {
         .map(|(&a, &c)| if a + c > 5.5 { 1 } else { 0 })
         .collect();
 
-    DataFrame::new(vec![
+    DataFrame::new(n_samples, vec![
         Column::new("x1".into(), x1),
         Column::new("x2".into(), x2),
         Column::new("x3".into(), x3),

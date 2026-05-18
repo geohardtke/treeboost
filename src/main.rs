@@ -447,7 +447,7 @@ fn main() -> Result<()> {
             let actual_targets: Option<Vec<f32>> = if let Some(ref target_col) = target {
                 use polars::prelude::*;
                 let df = if data.extension().and_then(|s| s.to_str()) == Some("parquet") {
-                    let pl_path = PlPath::new(&data.to_string_lossy());
+                    let pl_path = PlRefPath::new(&*data.to_string_lossy());
                     LazyFrame::scan_parquet(pl_path, Default::default())?.collect()?
                 } else {
                     CsvReadOptions::default()
@@ -708,7 +708,7 @@ fn main() -> Result<()> {
             println!("Loading data from {:?}...", data);
             let df = if data.extension().and_then(|s| s.to_str()) == Some("parquet") {
                 use polars::prelude::*;
-                let pl_path = PlPath::new(&data.to_string_lossy());
+                let pl_path = PlRefPath::new(&*data.to_string_lossy());
                 LazyFrame::scan_parquet(pl_path, Default::default())?.collect()?
             } else {
                 use polars::prelude::*;

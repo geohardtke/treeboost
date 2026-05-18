@@ -689,7 +689,7 @@ mod tests {
     use polars::prelude::*;
 
     fn create_test_profile() -> DataFrameProfile {
-        let df = DataFrame::new(vec![
+        let df = DataFrame::new(5, vec![
             Series::new("numeric_normal".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
             Series::new("numeric_skewed".into(), vec![1.0f64, 1.0, 1.0, 10.0, 100.0]).into(),
             Series::new("categorical_low".into(), vec!["A", "B", "A", "B", "A"]).into(),

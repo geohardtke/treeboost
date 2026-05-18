@@ -37,7 +37,7 @@ fn create_multilabel_dataframe(n_rows: usize, n_labels: usize, seed: u64) -> Dat
         columns.push(Column::new(format!("label_{}", k).into(), label));
     }
 
-    DataFrame::new(columns).unwrap()
+    DataFrame::new(n_rows, columns).unwrap()
 }
 
 // =============================================================================
@@ -426,5 +426,5 @@ fn create_imbalanced_multilabel_dataframe(n_rows: usize, n_labels: usize, seed: 
         columns.push(Column::new(format!("label_{}", k).into(), label));
     }
 
-    DataFrame::new(columns).unwrap()
+    DataFrame::new(n_rows, columns).unwrap()
 }

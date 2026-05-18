@@ -126,9 +126,9 @@ fn apply_scaler_impl<S: Scaler + Clone>(
         cols
     } else {
         // Auto-detect numeric columns
-        df.get_columns()
+        df.columns()
             .iter()
-            .filter(|col| is_numeric(col))
+            .filter(|col| is_numeric(*col))
             .map(|col| col.name().to_string())
             .collect()
     };
@@ -182,7 +182,7 @@ fn apply_scaler_impl<S: Scaler + Clone>(
 
     // Replace columns in original DataFrame
     for series in new_columns {
-        df.replace(&series.name().to_string(), series)?;
+        df.replace(&series.name().to_string(), series.into())?;
     }
 
     Ok((df, scaler))
@@ -241,7 +241,7 @@ pub fn apply_frequency_encoder(
 
         // Replace column
         let new_series = Series::new(col_name.clone().into(), encoded);
-        df.replace(col_name, new_series)?;
+        df.replace(col_name, new_series.into())?;
     }
 
     Ok((df, encoder))
@@ -296,7 +296,7 @@ pub fn apply_label_encoder(
 
         // Replace column with u32
         let new_series = Series::new(col_name.clone().into(), encoded);
-        df.replace(col_name, new_series)?;
+        df.replace(col_name, new_series.into())?;
     }
 
     Ok((df, encoder))
@@ -422,9 +422,9 @@ pub fn apply_simple_imputer(
         cols
     } else {
         // Auto-detect numeric columns
-        df.get_columns()
+        df.columns()
             .iter()
-            .filter(|col| is_numeric(col))
+            .filter(|col| is_numeric(*col))
             .map(|col| col.name().to_string())
             .collect()
     };
@@ -477,7 +477,7 @@ pub fn apply_simple_imputer(
 
     // Replace columns
     for series in new_columns {
-        df.replace(&series.name().to_string(), series)?;
+        df.replace(&series.name().to_string(), series.into())?;
     }
 
     Ok((df, imputer))

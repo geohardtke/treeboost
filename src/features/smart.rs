@@ -1024,7 +1024,7 @@ mod tests {
     use polars::prelude::*;
 
     fn create_test_profile() -> DataFrameProfile {
-        let df = DataFrame::new(vec![
+        let df = DataFrame::new(5, vec![
             Series::new("feature1".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
             Series::new("feature2".into(), vec![2.0f64, 4.0, 6.0, 8.0, 10.0]).into(),
             Series::new("feature3".into(), vec![5.0f64, 4.0, 3.0, 2.0, 1.0]).into(),
@@ -1074,7 +1074,7 @@ mod tests {
     #[test]
     fn test_skip_negative_polynomial() {
         // Create profile with negative values
-        let df = DataFrame::new(vec![
+        let df = DataFrame::new(5, vec![
             Series::new(
                 "negative_feature".into(),
                 vec![-1.0f64, -2.0, 3.0, 4.0, 5.0],
@@ -1178,7 +1178,7 @@ mod tests {
         use crate::analysis::{PanelDataInfo, TimeGranularity};
 
         // Profile with only categorical (no numerics)
-        let df = DataFrame::new(vec![
+        let df = DataFrame::new(5, vec![
             Series::new("cat1".into(), vec!["a", "b", "c", "d", "e"]).into(),
             Series::new("target".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
         ])

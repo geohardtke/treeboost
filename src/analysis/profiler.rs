@@ -1254,7 +1254,7 @@ mod tests {
 
     #[test]
     fn test_dataframe_profile() {
-        let df = DataFrame::new(vec![
+        let df = DataFrame::new(5, vec![
             Series::new("feature1".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
             Series::new("feature2".into(), vec!["a", "b", "a", "b", "a"]).into(),
             Series::new("constant".into(), vec![1.0f64, 1.0, 1.0, 1.0, 1.0]).into(),
@@ -1328,7 +1328,7 @@ mod tests {
         .map(|d| d.num_days_from_ce())
         .collect();
 
-        let df = DataFrame::new(vec![
+        let df = DataFrame::new(10, vec![
             Series::new(
                 "stock_code".into(),
                 vec![
@@ -1376,7 +1376,7 @@ mod tests {
     #[test]
     fn test_no_panel_without_datetime() {
         // Data without datetime column - should not detect panel
-        let df = DataFrame::new(vec![
+        let df = DataFrame::new(5, vec![
             Series::new("category".into(), vec!["A", "A", "B", "B", "C"]).into(),
             Series::new("value".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
             Series::new("target".into(), vec![0.0f64, 1.0, 0.0, 1.0, 0.0]).into(),
@@ -1405,7 +1405,7 @@ mod tests {
             })
             .collect();
 
-        let df = DataFrame::new(vec![
+        let df = DataFrame::new(5, vec![
             Series::new("date".into(), dates)
                 .cast(&PolarsDataType::Date)
                 .unwrap()
