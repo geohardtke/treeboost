@@ -360,7 +360,7 @@ impl DatasetAnalysis {
 
         // --- Sample indices for efficiency ---
         let sample_indices: Option<Vec<usize>> = if num_rows > config.max_sample_rows {
-            use rand::Rng;
+            use rand::RngExt;
             use rand::SeedableRng;
 
             // OPTIMIZED: Reservoir sampling instead of shuffle
@@ -579,7 +579,7 @@ impl DatasetAnalysis {
 
         // --- Sample indices for efficiency ---
         let sample_indices: Option<Vec<usize>> = if num_rows > config.max_sample_rows {
-            use rand::Rng;
+            use rand::RngExt;
             use rand::SeedableRng;
 
             // OPTIMIZED: Direct random sampling instead of shuffle

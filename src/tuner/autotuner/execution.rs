@@ -274,7 +274,7 @@ pub(super) fn is_gpu_backend<M: TunableModel>(base_config: &M::Config) -> bool {
 /// to a random position within its bounds.
 pub(super) fn randomize_centers<M: TunableModel>(tuner: &mut crate::tuner::AutoTuner<M>) {
     use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
 
     // Use a seed derived from current iteration count for reproducibility
     let seed = tuner.seed().wrapping_add(tuner.history_len() as u64);

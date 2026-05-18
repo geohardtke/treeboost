@@ -567,8 +567,6 @@ fn test_ltt_with_pipeline_encoded_categoricals() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 // Test to verify early validation when all features are dropped
-use polars::prelude::*;
-
 #[test]
 fn test_early_failure_when_all_features_dropped() {
     // Create data where the only feature will be dropped as ID-like

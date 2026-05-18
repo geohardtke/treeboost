@@ -777,7 +777,7 @@ impl UniversalModel {
                 let mut rng = rand::rngs::StdRng::seed_from_u64(config.seed + seed_offset as u64);
                 let bootstrap_indices: Vec<usize> = (0..num_rows)
                     .map(|_| {
-                        use rand::Rng;
+                        use rand::RngExt;
                         rng.random_range(0..num_rows)
                     })
                     .collect();

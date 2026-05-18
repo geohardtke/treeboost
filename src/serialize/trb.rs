@@ -49,7 +49,6 @@
 //! ```
 
 use crate::{Result, TreeBoostError};
-use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -148,7 +147,7 @@ impl TrbWriter {
             .open(path.as_ref())?;
 
         // Acquire exclusive lock
-        file.try_lock_exclusive().map_err(|e| {
+        file.try_lock().map_err(|e| {
             TreeBoostError::Serialization(format!("Failed to acquire file lock: {}", e))
         })?;
 
@@ -481,7 +480,7 @@ pub fn open_for_append(path: impl AsRef<Path>) -> Result<TrbWriter> {
         .open(path.as_ref())?;
 
     // Acquire exclusive lock
-    file.try_lock_exclusive().map_err(|e| {
+    file.try_lock().map_err(|e| {
         TreeBoostError::Serialization(format!("Failed to acquire file lock: {}", e))
     })?;
 
