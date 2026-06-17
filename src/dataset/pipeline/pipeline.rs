@@ -214,7 +214,7 @@ impl DataPipeline {
             .into_iter()
             .filter(|name| {
                 let name_str = name.as_str();
-                name_str != target_column && !era_column.map_or(false, |era| era == name_str)
+                name_str != target_column && (era_column != Some(name_str))
             })
             .map(|s| s.to_string())
             .collect();
@@ -537,7 +537,7 @@ impl DataPipeline {
             let mut sorted = non_nan_values.clone();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let mid = sorted.len() / 2;
-            if sorted.len() % 2 == 0 {
+            if sorted.len().is_multiple_of(2) {
                 (sorted[mid - 1] + sorted[mid]) / 2.0
             } else {
                 sorted[mid]

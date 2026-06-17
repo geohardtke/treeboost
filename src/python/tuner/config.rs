@@ -23,7 +23,7 @@ use super::enums::{
 ///
 /// - Continuous: Float range with optional log scaling
 /// - Discrete: Integer range with step size
-#[pyclass(name = "ParamBounds")]
+#[pyclass(from_py_object, name = "ParamBounds")]
 #[derive(Clone)]
 pub struct PyParamBounds {
     pub(crate) inner: ParamBounds,
@@ -178,7 +178,7 @@ impl From<ParamBounds> for PyParamBounds {
 /// Python wrapper for ParameterSpace
 ///
 /// Collection of parameters to tune during hyperparameter search.
-#[pyclass(name = "ParameterSpace")]
+#[pyclass(from_py_object, name = "ParameterSpace")]
 #[derive(Clone)]
 pub struct PyParameterSpace {
     pub(crate) inner: ParameterSpace,
@@ -228,8 +228,7 @@ impl PyParameterSpace {
     /// Returns:
     ///     Self for method chaining
     fn with_param(&self, name: &str, bounds: &PyParamBounds, center: f32) -> PyResult<Self> {
-        let param = TunableParam::parse(name)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+        let param = TunableParam::parse(name).map_err(pyo3::exceptions::PyValueError::new_err)?;
         Ok(Self {
             inner: self
                 .inner
@@ -254,8 +253,7 @@ impl PyParameterSpace {
                 "min must be less than max",
             ));
         }
-        let param = TunableParam::parse(name)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+        let param = TunableParam::parse(name).map_err(pyo3::exceptions::PyValueError::new_err)?;
         Ok(Self {
             inner: self
                 .inner
@@ -285,8 +283,7 @@ impl PyParameterSpace {
                 "min must be less than max",
             ));
         }
-        let param = TunableParam::parse(name)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+        let param = TunableParam::parse(name).map_err(pyo3::exceptions::PyValueError::new_err)?;
         Ok(Self {
             inner: self.inner.clone().with_param(
                 param,
@@ -312,8 +309,7 @@ impl PyParameterSpace {
                 "min must be less than max",
             ));
         }
-        let param = TunableParam::parse(name)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+        let param = TunableParam::parse(name).map_err(pyo3::exceptions::PyValueError::new_err)?;
         Ok(Self {
             inner: self
                 .inner
@@ -351,8 +347,7 @@ impl PyParameterSpace {
                 "step must be positive",
             ));
         }
-        let param = TunableParam::parse(name)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+        let param = TunableParam::parse(name).map_err(pyo3::exceptions::PyValueError::new_err)?;
         Ok(Self {
             inner: self.inner.clone().with_param(
                 param,
@@ -372,8 +367,7 @@ impl PyParameterSpace {
     /// Returns:
     ///     Self for method chaining
     fn without_param(&self, name: &str) -> PyResult<Self> {
-        let param = TunableParam::parse(name)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+        let param = TunableParam::parse(name).map_err(pyo3::exceptions::PyValueError::new_err)?;
         Ok(Self {
             inner: self.inner.clone().without_param(param),
         })
@@ -423,7 +417,7 @@ impl From<ParameterSpace> for PyParameterSpace {
 /// Python wrapper for TunerConfig
 ///
 /// Main configuration for the hyperparameter tuner.
-#[pyclass(name = "TunerConfig")]
+#[pyclass(from_py_object, name = "TunerConfig")]
 #[derive(Clone)]
 pub struct PyTunerConfig {
     pub(crate) inner: TunerConfig,
@@ -611,7 +605,7 @@ impl PyTunerConfig {
     /// Args:
     ///     min_f1: Minimum required F1 score (e.g., 0.5 = 50%)
     fn with_min_f1_score(&self, min_f1: f32) -> PyResult<Self> {
-        if min_f1 < 0.0 || min_f1 > 1.0 {
+        if !(0.0..=1.0).contains(&min_f1) {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "min_f1 must be in [0, 1]",
             ));
@@ -802,7 +796,7 @@ impl PyTunerConfig {
     fn validate(&self) -> PyResult<()> {
         self.inner
             .validate()
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
+            .map_err(pyo3::exceptions::PyValueError::new_err)
     }
 
     /// Estimate total number of trials

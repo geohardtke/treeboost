@@ -105,7 +105,7 @@ fn parse_model_format(format: &str) -> PyResult<ModelFormat> {
 /// ]
 /// config = config.with_monotonic_constraints(constraints)
 /// ```
-#[pyclass(name = "MonotonicConstraint", eq)]
+#[pyclass(from_py_object, name = "MonotonicConstraint", eq)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PyMonotonicConstraint {
     inner: MonotonicConstraint,
@@ -156,6 +156,7 @@ impl PyMonotonicConstraint {
     }
 
     /// Convert to integer value (1 = increasing, -1 = decreasing, 0 = none)
+    #[allow(clippy::wrong_self_convention)] // reason: name fixed by Python API
     fn to_int(&self) -> i32 {
         match self.inner {
             MonotonicConstraint::Increasing => 1,
@@ -186,7 +187,7 @@ impl From<PyMonotonicConstraint> for MonotonicConstraint {
 }
 
 /// Python wrapper for GBDT training configuration
-#[pyclass(name = "GBDTConfig")]
+#[pyclass(from_py_object, name = "GBDTConfig")]
 #[derive(Clone)]
 pub struct PyGBDTConfig {
     inner: GBDTConfig,
@@ -808,7 +809,7 @@ impl PyGBDTConfig {
 
     /// Set number of histogram bins
     fn with_num_bins(&self, value: usize) -> PyResult<Self> {
-        if value < 2 || value > 255 {
+        if !(2..=255).contains(&value) {
             return Err(PyValueError::new_err("num_bins must be in [2, 255]"));
         }
         let mut new = self.clone();
@@ -818,7 +819,7 @@ impl PyGBDTConfig {
 
     /// Set calibration set ratio for conformal prediction (0.0 to disable)
     fn with_calibration_ratio(&self, value: f32) -> PyResult<Self> {
-        if value < 0.0 || value >= 1.0 {
+        if !(0.0..1.0).contains(&value) {
             return Err(PyValueError::new_err(
                 "calibration_ratio must be in [0.0, 1.0)",
             ));
@@ -849,7 +850,7 @@ impl PyGBDTConfig {
 
     /// Set validation ratio for early stopping (0.0 to disable)
     fn with_validation_ratio(&self, value: f32) -> PyResult<Self> {
-        if value < 0.0 || value >= 1.0 {
+        if !(0.0..1.0).contains(&value) {
             return Err(PyValueError::new_err(
                 "validation_ratio must be in [0.0, 1.0)",
             ));
@@ -1219,6 +1220,7 @@ impl PyGBDTModel {
     /// Returns:
     ///     Tuple of (predictions, lower_bounds, upper_bounds) as numpy arrays
     #[pyo3(signature = (features))]
+    #[allow(clippy::type_complexity)] // reason: complex return tuple kept inline
     fn predict_with_intervals<'py>(
         &self,
         py: Python<'py>,

@@ -1,17 +1,16 @@
-///! Profiling example for AutoML pipeline
-///!
-///! This example profiles the AutoML pipeline to identify bottlenecks,
-///! particularly in the Analysis phase (40% → 50%) after Dataset Preparation.
-///!
-///! Run with:
-///!   cargo run --release --example automl_profile -- [--sample]
+//! Profiling example for AutoML pipeline
+//!
+//! This example profiles the AutoML pipeline to identify bottlenecks,
+//! particularly in the Analysis phase (40% → 50%) after Dataset Preparation.
+//!
+//! Run with:
+//!   cargo run --release --example automl_profile -- [--sample]
 use polars::prelude::*;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use std::time::Instant;
-use treeboost::analysis::{AnalysisConfig, DatasetAnalysis, PanelDataInfo};
+use treeboost::analysis::{AnalysisConfig, DatasetAnalysis};
 use treeboost::dataset::{BinnedDataset, DatasetLoader};
-use treeboost::features::SmartFeatureEngine;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -41,7 +40,7 @@ fn run_profile(num_rows: usize) -> Result<()> {
     let phase0_start = Instant::now();
     println!("[  0%] Generating synthetic panel data...");
 
-    let mut train_df = generate_synthetic_panel_data(num_rows)?;
+    let train_df = generate_synthetic_panel_data(num_rows)?;
 
     println!(
         "[  5%] Data generated: {} rows × {} cols [{:.2?}]",
@@ -71,7 +70,7 @@ fn run_profile(num_rows: usize) -> Result<()> {
         .as_materialized_series()
         .i64()?
         .iter()
-        .filter_map(|v| v)
+        .flatten()
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
@@ -334,7 +333,9 @@ fn generate_synthetic_panel_data(num_rows: usize) -> Result<DataFrame> {
 
     // Add features
     for f_idx in 0..num_features {
-        let values: Vec<f64> = (0..actual_rows).map(|_| rng.random::<f64>() * 100.0).collect();
+        let values: Vec<f64> = (0..actual_rows)
+            .map(|_| rng.random::<f64>() * 100.0)
+            .collect();
         all_columns.push(Column::new(format!("f_{}", f_idx).into(), values));
     }
 

@@ -1163,7 +1163,7 @@ mod tests {
         file.read_exact(&mut total_size_bytes).unwrap();
         let mut header_size_bytes = [0u8; 8];
         file.read_exact(&mut header_size_bytes).unwrap();
-        let header_size = u64::from_le_bytes(header_size_bytes) as u64;
+        let header_size = u64::from_le_bytes(header_size_bytes);
 
         // Blob starts at: base_end + 8 (total_size) + 8 (header_size) + header_size
         let blob_start = base_end + 8 + 8 + header_size;

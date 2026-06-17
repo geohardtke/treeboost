@@ -556,7 +556,7 @@ impl EnsemblePredictor {
             EnsembleStrategy::Median => {
                 let combined: Vec<f64> = (0..n_samples)
                     .map(|i| {
-                        let mut values = vec![formula_preds[i], model_preds[i]];
+                        let mut values = [formula_preds[i], model_preds[i]];
                         values
                             .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                         (values[0] + values[1]) / 2.0 // Median of 2 = average

@@ -508,7 +508,7 @@ fn main() {
     print_header("RELATIVE PERFORMANCE SUMMARY");
 
     println!("\nAccuracy ranking (by R²):");
-    let mut rankings = vec![
+    let mut rankings = [
         ("TreeBoost", tb_r2),
         ("gbdt-rs", gbdt_r2),
         ("forust", for_r2),
@@ -519,23 +519,23 @@ fn main() {
     }
 
     println!("\nTraining time ranking:");
-    let mut train_times = vec![
+    let mut train_times = [
         ("TreeBoost", treeboost_train_time),
         ("gbdt-rs", gbdt_train_time),
         ("forust", forust_train_time),
     ];
-    train_times.sort_by(|a, b| a.1.cmp(&b.1));
+    train_times.sort_by_key(|a| a.1);
     for (i, (name, time)) in train_times.iter().enumerate() {
         println!("  {}. {} ({:?})", i + 1, name, time);
     }
 
     println!("\nPrediction time ranking:");
-    let mut pred_times = vec![
+    let mut pred_times = [
         ("TreeBoost", treeboost_pred_time),
         ("gbdt-rs", gbdt_pred_time),
         ("forust", forust_pred_time),
     ];
-    pred_times.sort_by(|a, b| a.1.cmp(&b.1));
+    pred_times.sort_by_key(|a| a.1);
     for (i, (name, time)) in pred_times.iter().enumerate() {
         println!("  {}. {} ({:?})", i + 1, name, time);
     }

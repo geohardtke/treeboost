@@ -552,12 +552,12 @@ impl PipelineStep for EngineerFeaturesStep {
     }
 
     fn serialize_state(&self) -> Result<serde_json::Value> {
-        Ok(serde_json::to_value(self).map_err(|e| {
+        serde_json::to_value(self).map_err(|e| {
             TreeBoostError::Serialization(format!(
                 "Failed to serialize EngineerFeaturesStep: {}",
                 e
             ))
-        })?)
+        })
     }
 
     fn deserialize_state(&mut self, state: serde_json::Value) -> Result<()> {
@@ -925,6 +925,7 @@ impl FeatureOp {
     }
 
     /// Add two expressions
+    #[allow(clippy::should_implement_trait)] // reason: intentional inherent API, not the std trait
     pub fn add(mut self, other: Self) -> Self {
         let other_root = self.expr.merge(other.expr);
         let new_root = self.expr.push(FlatOp::Add(self.expr.root, other_root));
@@ -933,6 +934,7 @@ impl FeatureOp {
     }
 
     /// Subtract: self - other
+    #[allow(clippy::should_implement_trait)] // reason: intentional inherent API, not the std trait
     pub fn sub(mut self, other: Self) -> Self {
         let other_root = self.expr.merge(other.expr);
         let new_root = self.expr.push(FlatOp::Sub(self.expr.root, other_root));
@@ -941,6 +943,7 @@ impl FeatureOp {
     }
 
     /// Multiply two expressions
+    #[allow(clippy::should_implement_trait)] // reason: intentional inherent API, not the std trait
     pub fn mul(mut self, other: Self) -> Self {
         let other_root = self.expr.merge(other.expr);
         let new_root = self.expr.push(FlatOp::Mul(self.expr.root, other_root));
@@ -949,6 +952,7 @@ impl FeatureOp {
     }
 
     /// Divide: self / other
+    #[allow(clippy::should_implement_trait)] // reason: intentional inherent API, not the std trait
     pub fn div(mut self, other: Self) -> Self {
         let other_root = self.expr.merge(other.expr);
         let new_root = self.expr.push(FlatOp::Div(self.expr.root, other_root));
@@ -1137,9 +1141,9 @@ impl PipelineStep for CustomFeaturesStep {
     }
 
     fn serialize_state(&self) -> Result<serde_json::Value> {
-        Ok(serde_json::to_value(self).map_err(|e| {
+        serde_json::to_value(self).map_err(|e| {
             TreeBoostError::Serialization(format!("Failed to serialize CustomFeaturesStep: {}", e))
-        })?)
+        })
     }
 
     fn deserialize_state(&mut self, state: serde_json::Value) -> Result<()> {
@@ -1215,12 +1219,12 @@ impl PipelineStep for EngineerTimeSeriesFeaturesStep {
     }
 
     fn serialize_state(&self) -> Result<serde_json::Value> {
-        Ok(serde_json::to_value(self).map_err(|e| {
+        serde_json::to_value(self).map_err(|e| {
             TreeBoostError::Serialization(format!(
                 "Failed to serialize EngineerTimeSeriesFeaturesStep: {}",
                 e
             ))
-        })?)
+        })
     }
 
     fn deserialize_state(&mut self, state: serde_json::Value) -> Result<()> {
@@ -1257,6 +1261,12 @@ pub struct CategoryEncoding {
 #[derive(Clone)]
 pub struct EncodeCategoricalsStep {
     pub encodings: HashMap<String, CategoryEncoding>,
+}
+
+impl Default for EncodeCategoricalsStep {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EncodeCategoricalsStep {
@@ -1467,9 +1477,9 @@ impl PipelineStep for TransformTargetStep {
     }
 
     fn serialize_state(&self) -> Result<serde_json::Value> {
-        Ok(serde_json::to_value(&self.transform).map_err(|e| {
+        serde_json::to_value(&self.transform).map_err(|e| {
             TreeBoostError::Serialization(format!("Failed to serialize TransformTargetStep: {}", e))
-        })?)
+        })
     }
 
     fn deserialize_state(&mut self, state: serde_json::Value) -> Result<()> {
@@ -1631,12 +1641,12 @@ impl PipelineStep for ExtractLinearFeaturesStep {
     }
 
     fn serialize_state(&self) -> Result<serde_json::Value> {
-        Ok(serde_json::to_value(self).map_err(|e| {
+        serde_json::to_value(self).map_err(|e| {
             TreeBoostError::Serialization(format!(
                 "Failed to serialize ExtractLinearFeaturesStep: {}",
                 e
             ))
-        })?)
+        })
     }
 
     fn deserialize_state(&mut self, state: serde_json::Value) -> Result<()> {

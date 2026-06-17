@@ -147,11 +147,10 @@ pub fn apply_timeseries_features(
     }
 
     // Interleave to row-major format
-    #[allow(clippy::needless_range_loop)]
     let mut feature_data: Vec<f32> = Vec::with_capacity(num_rows * num_features);
     for row_idx in 0..num_rows {
-        for col_idx in 0..num_features {
-            feature_data.push(columns[col_idx][row_idx]);
+        for col in &columns {
+            feature_data.push(col[row_idx]);
         }
     }
 
@@ -264,7 +263,7 @@ pub fn apply_polynomial_features(
         // Auto-detect numeric columns
         df.columns()
             .iter()
-            .filter(|col| is_numeric(*col))
+            .filter(|col| is_numeric(col))
             .map(|col| col.name().to_string())
             .collect()
     };
@@ -289,11 +288,10 @@ pub fn apply_polynomial_features(
     }
 
     // Interleave to row-major format
-    #[allow(clippy::needless_range_loop)]
     let mut feature_data: Vec<f32> = Vec::with_capacity(num_rows * num_features);
     for row_idx in 0..num_rows {
-        for col_idx in 0..num_features {
-            feature_data.push(columns[col_idx][row_idx]);
+        for col in &columns {
+            feature_data.push(col[row_idx]);
         }
     }
 
@@ -371,7 +369,7 @@ pub fn apply_ratio_features(
         // Auto-detect numeric columns
         df.columns()
             .iter()
-            .filter(|col| is_numeric(*col))
+            .filter(|col| is_numeric(col))
             .map(|col| col.name().to_string())
             .collect()
     };
@@ -396,11 +394,10 @@ pub fn apply_ratio_features(
     }
 
     // Interleave to row-major format
-    #[allow(clippy::needless_range_loop)]
     let mut feature_data: Vec<f32> = Vec::with_capacity(num_rows * num_features);
     for row_idx in 0..num_rows {
-        for col_idx in 0..num_features {
-            feature_data.push(columns[col_idx][row_idx]);
+        for col in &columns {
+            feature_data.push(col[row_idx]);
         }
     }
 
@@ -479,7 +476,7 @@ pub fn apply_interaction_features(
         // Auto-detect numeric columns
         df.columns()
             .iter()
-            .filter(|col| is_numeric(*col))
+            .filter(|col| is_numeric(col))
             .map(|col| col.name().to_string())
             .collect()
     };
@@ -504,11 +501,10 @@ pub fn apply_interaction_features(
     }
 
     // Interleave to row-major format
-    #[allow(clippy::needless_range_loop)]
     let mut feature_data: Vec<f32> = Vec::with_capacity(num_rows * num_features);
     for row_idx in 0..num_rows {
-        for col_idx in 0..num_features {
-            feature_data.push(columns[col_idx][row_idx]);
+        for col in &columns {
+            feature_data.push(col[row_idx]);
         }
     }
 
@@ -541,123 +537,6 @@ pub fn apply_interaction_features(
     let new_df = df.hstack(interaction_df.columns())?;
 
     Ok(new_df)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_all_features() {
-        let raw = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let result = extract_selected_features(&raw, 2, 3, None);
-        assert_eq!(result, raw);
-    }
-
-    #[test]
-    fn test_extract_selected_features() {
-        // 2 rows, 3 features per row
-        let raw = vec![
-            1.0, 2.0, 3.0, // row 0
-            4.0, 5.0, 6.0, // row 1
-        ];
-
-        // Select features 0 and 2
-        let indices = vec![0, 2];
-        let result = extract_selected_features(&raw, 2, 3, Some(&indices));
-
-        assert_eq!(
-            result,
-            vec![
-                1.0, 3.0, // row 0: features 0, 2
-                4.0, 6.0, // row 1: features 0, 2
-            ]
-        );
-    }
-
-    #[test]
-    fn test_extract_single_feature() {
-        let raw = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let indices = vec![1];
-        let result = extract_selected_features(&raw, 2, 3, Some(&indices));
-        assert_eq!(result, vec![2.0, 5.0]); // Feature 1 from each row
-    }
-
-    #[test]
-    fn test_extract_reordered_features() {
-        let raw = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let indices = vec![2, 0]; // Reverse order
-        let result = extract_selected_features(&raw, 2, 3, Some(&indices));
-        assert_eq!(result, vec![3.0, 1.0, 6.0, 4.0]);
-    }
-
-    #[test]
-    fn test_apply_polynomial_features() {
-        let df = df! {
-            "x" => &[1.0f32, 2.0, 4.0],
-            "y" => &[10.0f32, 20.0, 30.0],
-        }
-        .unwrap();
-
-        let gen = PolynomialGenerator::new(); // Default: x², sqrt
-        let result =
-            apply_polynomial_features(df.clone(), &gen, Some(vec!["x".to_string()])).unwrap();
-
-        // Should have original 2 columns + 2 new polynomial features for 'x'
-        assert_eq!(result.width(), 4);
-        assert_eq!(result.height(), 3);
-        let col_names: Vec<String> = result
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert!(col_names.contains(&"x_sq".to_string()));
-        assert!(col_names.contains(&"x_sqrt".to_string()));
-    }
-
-    #[test]
-    fn test_apply_ratio_features() {
-        let df = df! {
-            "a" => &[10.0f32, 20.0, 30.0],
-            "b" => &[2.0f32, 4.0, 5.0],
-        }
-        .unwrap();
-
-        let gen = RatioGenerator::from_pairs(vec![(0, 1)]); // a / b
-        let result = apply_ratio_features(df.clone(), &gen, None).unwrap();
-
-        // Should have original 2 columns + 1 ratio column
-        assert_eq!(result.width(), 3);
-        assert_eq!(result.height(), 3);
-        let col_names: Vec<String> = result
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert!(col_names.contains(&"a_div_b".to_string()));
-    }
-
-    #[test]
-    fn test_apply_interaction_features() {
-        let df = df! {
-            "a" => &[1.0f32, 2.0, 3.0],
-            "b" => &[4.0f32, 5.0, 6.0],
-        }
-        .unwrap();
-
-        let gen = InteractionGenerator::from_pairs(vec![(0, 1)]); // a * b by default
-        let result = apply_interaction_features(df.clone(), &gen, None).unwrap();
-
-        // Should have original 2 columns + 1 interaction column
-        assert_eq!(result.width(), 3);
-        assert_eq!(result.height(), 3);
-        let col_names: Vec<String> = result
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert!(col_names.contains(&"a_mul_b".to_string()));
-    }
 }
 
 /// Apply cross-sectional ranking features to panel data
@@ -873,4 +752,121 @@ pub fn apply_feature_plan(
     }
 
     Ok(df)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_all_features() {
+        let raw = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let result = extract_selected_features(&raw, 2, 3, None);
+        assert_eq!(result, raw);
+    }
+
+    #[test]
+    fn test_extract_selected_features() {
+        // 2 rows, 3 features per row
+        let raw = vec![
+            1.0, 2.0, 3.0, // row 0
+            4.0, 5.0, 6.0, // row 1
+        ];
+
+        // Select features 0 and 2
+        let indices = vec![0, 2];
+        let result = extract_selected_features(&raw, 2, 3, Some(&indices));
+
+        assert_eq!(
+            result,
+            vec![
+                1.0, 3.0, // row 0: features 0, 2
+                4.0, 6.0, // row 1: features 0, 2
+            ]
+        );
+    }
+
+    #[test]
+    fn test_extract_single_feature() {
+        let raw = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let indices = vec![1];
+        let result = extract_selected_features(&raw, 2, 3, Some(&indices));
+        assert_eq!(result, vec![2.0, 5.0]); // Feature 1 from each row
+    }
+
+    #[test]
+    fn test_extract_reordered_features() {
+        let raw = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let indices = vec![2, 0]; // Reverse order
+        let result = extract_selected_features(&raw, 2, 3, Some(&indices));
+        assert_eq!(result, vec![3.0, 1.0, 6.0, 4.0]);
+    }
+
+    #[test]
+    fn test_apply_polynomial_features() {
+        let df = df! {
+            "x" => &[1.0f32, 2.0, 4.0],
+            "y" => &[10.0f32, 20.0, 30.0],
+        }
+        .unwrap();
+
+        let gen = PolynomialGenerator::new(); // Default: x², sqrt
+        let result =
+            apply_polynomial_features(df.clone(), &gen, Some(vec!["x".to_string()])).unwrap();
+
+        // Should have original 2 columns + 2 new polynomial features for 'x'
+        assert_eq!(result.width(), 4);
+        assert_eq!(result.height(), 3);
+        let col_names: Vec<String> = result
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(col_names.contains(&"x_sq".to_string()));
+        assert!(col_names.contains(&"x_sqrt".to_string()));
+    }
+
+    #[test]
+    fn test_apply_ratio_features() {
+        let df = df! {
+            "a" => &[10.0f32, 20.0, 30.0],
+            "b" => &[2.0f32, 4.0, 5.0],
+        }
+        .unwrap();
+
+        let gen = RatioGenerator::from_pairs(vec![(0, 1)]); // a / b
+        let result = apply_ratio_features(df.clone(), &gen, None).unwrap();
+
+        // Should have original 2 columns + 1 ratio column
+        assert_eq!(result.width(), 3);
+        assert_eq!(result.height(), 3);
+        let col_names: Vec<String> = result
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(col_names.contains(&"a_div_b".to_string()));
+    }
+
+    #[test]
+    fn test_apply_interaction_features() {
+        let df = df! {
+            "a" => &[1.0f32, 2.0, 3.0],
+            "b" => &[4.0f32, 5.0, 6.0],
+        }
+        .unwrap();
+
+        let gen = InteractionGenerator::from_pairs(vec![(0, 1)]); // a * b by default
+        let result = apply_interaction_features(df.clone(), &gen, None).unwrap();
+
+        // Should have original 2 columns + 1 interaction column
+        assert_eq!(result.width(), 3);
+        assert_eq!(result.height(), 3);
+        let col_names: Vec<String> = result
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(col_names.contains(&"a_mul_b".to_string()));
+    }
 }

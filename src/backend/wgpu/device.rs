@@ -210,7 +210,7 @@ impl GpuDevice {
     /// Reads only the first `output.len()` elements from the staging buffer.
     /// Useful when the actual data size is smaller than the buffer capacity.
     pub fn read_buffer_partial<T: bytemuck::Pod>(&self, staging: &Buffer, output: &mut [T]) {
-        let byte_size = (output.len() * std::mem::size_of::<T>()) as u64;
+        let byte_size = std::mem::size_of_val(output) as u64;
         let slice = staging.slice(..byte_size);
         slice.map_async(wgpu::MapMode::Read, |_| {});
         let _ = self.device.poll(wgpu::PollType::Wait {
@@ -274,7 +274,7 @@ impl GpuDevice {
 
     /// Get maximum storage buffer binding size.
     pub fn max_storage_buffer_size(&self) -> u64 {
-        self.limits.max_storage_buffer_binding_size as u64
+        self.limits.max_storage_buffer_binding_size
     }
 }
 

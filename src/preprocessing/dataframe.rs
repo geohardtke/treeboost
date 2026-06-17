@@ -128,7 +128,7 @@ fn apply_scaler_impl<S: Scaler + Clone>(
         // Auto-detect numeric columns
         df.columns()
             .iter()
-            .filter(|col| is_numeric(*col))
+            .filter(|col| is_numeric(col))
             .map(|col| col.name().to_string())
             .collect()
     };
@@ -157,8 +157,8 @@ fn apply_scaler_impl<S: Scaler + Clone>(
     // Interleave to row-major format
     let mut feature_data: Vec<f32> = Vec::with_capacity(num_rows * num_features);
     for row_idx in 0..num_rows {
-        for col_idx in 0..num_features {
-            feature_data.push(columns[col_idx][row_idx]);
+        for col in &columns {
+            feature_data.push(col[row_idx]);
         }
     }
 
@@ -222,7 +222,7 @@ pub fn apply_frequency_encoder(
     columns: Vec<String>,
     fitted_encoder: Option<FrequencyEncoder>,
 ) -> Result<(DataFrame, FrequencyEncoder)> {
-    let mut encoder = fitted_encoder.unwrap_or_else(FrequencyEncoder::new);
+    let mut encoder = fitted_encoder.unwrap_or_default();
 
     for col_name in &columns {
         let col = df.column(col_name)?;
@@ -277,7 +277,7 @@ pub fn apply_label_encoder(
     columns: Vec<String>,
     fitted_encoder: Option<LabelEncoder>,
 ) -> Result<(DataFrame, LabelEncoder)> {
-    let mut encoder = fitted_encoder.unwrap_or_else(LabelEncoder::new);
+    let mut encoder = fitted_encoder.unwrap_or_default();
 
     for col_name in &columns {
         let col = df.column(col_name)?;
@@ -333,7 +333,7 @@ pub fn apply_onehot_encoder(
     columns: Vec<String>,
     fitted_encoder: Option<OneHotEncoder>,
 ) -> Result<(DataFrame, OneHotEncoder)> {
-    let mut encoder = fitted_encoder.unwrap_or_else(OneHotEncoder::new);
+    let mut encoder = fitted_encoder.unwrap_or_default();
 
     for col_name in &columns {
         let col = df.column(col_name)?;
@@ -424,7 +424,7 @@ pub fn apply_simple_imputer(
         // Auto-detect numeric columns
         df.columns()
             .iter()
-            .filter(|col| is_numeric(*col))
+            .filter(|col| is_numeric(col))
             .map(|col| col.name().to_string())
             .collect()
     };
@@ -452,8 +452,8 @@ pub fn apply_simple_imputer(
     // Interleave to row-major format
     let mut feature_data: Vec<f32> = Vec::with_capacity(num_rows * num_features);
     for row_idx in 0..num_rows {
-        for col_idx in 0..num_features {
-            feature_data.push(columns[col_idx][row_idx]);
+        for col in &columns {
+            feature_data.push(col[row_idx]);
         }
     }
 

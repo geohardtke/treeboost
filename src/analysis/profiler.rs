@@ -507,13 +507,13 @@ impl ColumnProfile {
             return false;
         };
 
-        let mut row_idx = 0;
         let mut expected_val = None;
         let mut is_sequential = true;
         let mut sample_count = 0;
         let max_samples = 1000;
 
-        for opt_val in ca.iter() {
+        for (row_idx, opt_val) in ca.iter().enumerate() {
+            let row_idx = row_idx as i64;
             if sample_count >= max_samples {
                 break;
             }
@@ -546,7 +546,6 @@ impl ColumnProfile {
 
                 sample_count += 1;
             }
-            row_idx += 1;
         }
 
         is_sequential && sample_count > 10
@@ -1254,12 +1253,15 @@ mod tests {
 
     #[test]
     fn test_dataframe_profile() {
-        let df = DataFrame::new(5, vec![
-            Series::new("feature1".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
-            Series::new("feature2".into(), vec!["a", "b", "a", "b", "a"]).into(),
-            Series::new("constant".into(), vec![1.0f64, 1.0, 1.0, 1.0, 1.0]).into(),
-            Series::new("target".into(), vec![0.0f64, 1.0, 0.0, 1.0, 0.0]).into(),
-        ])
+        let df = DataFrame::new(
+            5,
+            vec![
+                Series::new("feature1".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
+                Series::new("feature2".into(), vec!["a", "b", "a", "b", "a"]).into(),
+                Series::new("constant".into(), vec![1.0f64, 1.0, 1.0, 1.0, 1.0]).into(),
+                Series::new("target".into(), vec![0.0f64, 1.0, 0.0, 1.0, 0.0]).into(),
+            ],
+        )
         .unwrap();
 
         let profile = DataFrameProfile::analyze(&df, "target").unwrap();
@@ -1312,7 +1314,7 @@ mod tests {
         use chrono::{Datelike, NaiveDate};
 
         // Create panel-like data: 2 stocks × 5 days = 10 rows
-        let dates: Vec<i32> = vec![
+        let dates: Vec<i32> = [
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
@@ -1328,34 +1330,38 @@ mod tests {
         .map(|d| d.num_days_from_ce())
         .collect();
 
-        let df = DataFrame::new(10, vec![
-            Series::new(
-                "stock_code".into(),
-                vec![
-                    "AAPL", "AAPL", "AAPL", "AAPL", "AAPL", "GOOGL", "GOOGL", "GOOGL", "GOOGL",
-                    "GOOGL",
-                ],
-            )
-            .into(),
-            Series::new("date".into(), dates)
-                .cast(&PolarsDataType::Date)
-                .unwrap()
+        let df = DataFrame::new(
+            10,
+            vec![
+                Series::new(
+                    "stock_code".into(),
+                    vec![
+                        "AAPL", "AAPL", "AAPL", "AAPL", "AAPL", "GOOGL", "GOOGL", "GOOGL", "GOOGL",
+                        "GOOGL",
+                    ],
+                )
                 .into(),
-            Series::new(
-                "price".into(),
-                vec![
-                    150.0f64, 151.0, 152.0, 151.5, 153.0, 2800.0, 2810.0, 2805.0, 2820.0, 2830.0,
-                ],
-            )
-            .into(),
-            Series::new(
-                "target".into(),
-                vec![
-                    0.01f64, 0.02, -0.01, 0.01, 0.02, 0.01, -0.01, 0.02, 0.01, 0.01,
-                ],
-            )
-            .into(),
-        ])
+                Series::new("date".into(), dates)
+                    .cast(&PolarsDataType::Date)
+                    .unwrap()
+                    .into(),
+                Series::new(
+                    "price".into(),
+                    vec![
+                        150.0f64, 151.0, 152.0, 151.5, 153.0, 2800.0, 2810.0, 2805.0, 2820.0,
+                        2830.0,
+                    ],
+                )
+                .into(),
+                Series::new(
+                    "target".into(),
+                    vec![
+                        0.01f64, 0.02, -0.01, 0.01, 0.02, 0.01, -0.01, 0.02, 0.01, 0.01,
+                    ],
+                )
+                .into(),
+            ],
+        )
         .unwrap();
 
         let profile = DataFrameProfile::analyze(&df, "target").unwrap();
@@ -1376,11 +1382,14 @@ mod tests {
     #[test]
     fn test_no_panel_without_datetime() {
         // Data without datetime column - should not detect panel
-        let df = DataFrame::new(5, vec![
-            Series::new("category".into(), vec!["A", "A", "B", "B", "C"]).into(),
-            Series::new("value".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
-            Series::new("target".into(), vec![0.0f64, 1.0, 0.0, 1.0, 0.0]).into(),
-        ])
+        let df = DataFrame::new(
+            5,
+            vec![
+                Series::new("category".into(), vec!["A", "A", "B", "B", "C"]).into(),
+                Series::new("value".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
+                Series::new("target".into(), vec![0.0f64, 1.0, 0.0, 1.0, 0.0]).into(),
+            ],
+        )
         .unwrap();
 
         let profile = DataFrameProfile::analyze(&df, "target").unwrap();
@@ -1405,14 +1414,17 @@ mod tests {
             })
             .collect();
 
-        let df = DataFrame::new(5, vec![
-            Series::new("date".into(), dates)
-                .cast(&PolarsDataType::Date)
-                .unwrap()
-                .into(),
-            Series::new("value".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
-            Series::new("target".into(), vec![0.0f64, 1.0, 0.0, 1.0, 0.0]).into(),
-        ])
+        let df = DataFrame::new(
+            5,
+            vec![
+                Series::new("date".into(), dates)
+                    .cast(&PolarsDataType::Date)
+                    .unwrap()
+                    .into(),
+                Series::new("value".into(), vec![1.0f64, 2.0, 3.0, 4.0, 5.0]).into(),
+                Series::new("target".into(), vec![0.0f64, 1.0, 0.0, 1.0, 0.0]).into(),
+            ],
+        )
         .unwrap();
 
         let profile = DataFrameProfile::analyze(&df, "target").unwrap();

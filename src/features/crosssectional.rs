@@ -112,11 +112,11 @@ pub fn apply_crosssectional_features_with_include(
         let zscore_expr = when(std_expr.clone().gt(lit(0.0)))
             .then((col(col_name) - mean_expr.clone()) / std_expr)
             .otherwise(lit(0.0))
-            .alias(&format!("{}_zscore", col_name));
+            .alias(format!("{}_zscore", col_name));
 
         // Median difference: x - median
         let median_diff_expr =
-            (col(col_name) - median_expr).alias(&format!("{}_vs_median", col_name));
+            (col(col_name) - median_expr).alias(format!("{}_vs_median", col_name));
 
         // Apply window functions
         let result_with_stats = lazy
@@ -172,9 +172,9 @@ fn compute_group_ranks(df: &DataFrame, feature_col: &str, group_col: &str) -> Po
                         / (col("__group_size__").cast(DataType::Float64) - lit(1.0)),
                 )
                 .otherwise(lit(0.5)) // Single-element groups get 0.5
-                .alias(&format!("{}_rank", feature_col)),
+                .alias(format!("{}_rank", feature_col)),
         ])
-        .select([col(&format!("{}_rank", feature_col))])
+        .select([col(format!("{}_rank", feature_col))])
         .collect()?;
 
     Ok(result

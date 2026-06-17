@@ -27,9 +27,10 @@ pub fn load_model_bincode(path: impl AsRef<Path>) -> Result<GBDTModel> {
     let mut reader = BufReader::new(file);
     let config = bincode::config::standard();
 
-    let model: GBDTModel = bincode::serde::decode_from_std_read(&mut reader, config).map_err(|e| {
-        TreeBoostError::Serialization(format!("Failed to deserialize bincode: {}", e))
-    })?;
+    let model: GBDTModel =
+        bincode::serde::decode_from_std_read(&mut reader, config).map_err(|e| {
+            TreeBoostError::Serialization(format!("Failed to deserialize bincode: {}", e))
+        })?;
 
     Ok(model)
 }

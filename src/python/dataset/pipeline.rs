@@ -26,7 +26,7 @@ use super::types::{PyBinnedDataset, PyFeatureInfo};
 ///     .with_smoothing(10.0)
 /// )
 /// ```
-#[pyclass(name = "PipelineConfig")]
+#[pyclass(from_py_object, name = "PipelineConfig")]
 #[derive(Clone)]
 pub struct PyPipelineConfig {
     pub(crate) inner: PipelineConfig,
@@ -154,7 +154,7 @@ impl PyPipelineConfig {
 ///
 /// Learned state from training that is needed for inference.
 /// Can be serialized and loaded for production deployment.
-#[pyclass(name = "PipelineState")]
+#[pyclass(from_py_object, name = "PipelineState")]
 #[derive(Clone)]
 pub struct PyPipelineState {
     pub(crate) inner: PipelineState,

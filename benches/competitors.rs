@@ -5,8 +5,9 @@
 //! - gbdt-rs (Baidu's pure-Rust GBDT)
 //! - forust (modern histogram-based GBDT)
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::prelude::*;
+use std::hint::black_box;
 use std::time::Duration;
 
 // TreeBoost imports

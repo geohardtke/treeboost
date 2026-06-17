@@ -15,7 +15,7 @@ use super::enums::PyOptimizationMetric;
 /// Python wrapper for TrialResult
 ///
 /// Contains the results of a single hyperparameter trial.
-#[pyclass(name = "TrialResult")]
+#[pyclass(from_py_object, name = "TrialResult")]
 #[derive(Clone)]
 pub struct PyTrialResult {
     inner: TrialResult,
@@ -116,7 +116,7 @@ impl From<&TrialResult> for PyTrialResult {
 /// Python wrapper for SearchHistory
 ///
 /// Tracks all trial results and maintains the best trial.
-#[pyclass(name = "SearchHistory")]
+#[pyclass(from_py_object, name = "SearchHistory")]
 #[derive(Clone)]
 pub struct PySearchHistory {
     pub(crate) inner: SearchHistory,

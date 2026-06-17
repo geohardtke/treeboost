@@ -3,8 +3,9 @@
 //! Measures training and inference performance across dataset sizes.
 //! Fast execution (~3-5 minutes total) with consistent synthetic data.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::prelude::*;
+use std::hint::black_box;
 use std::time::Duration;
 
 use treeboost::backend::BackendType;
