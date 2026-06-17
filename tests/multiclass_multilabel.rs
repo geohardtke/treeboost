@@ -52,7 +52,7 @@ fn dataframe_to_binned_multiclass(df: &DataFrame, target_col: &str) -> Result<Bi
             .unwrap()
             .f64()
             .unwrap()
-            .into_iter()
+            .iter()
             .map(|v| v.unwrap_or(0.0))
             .collect();
 
@@ -86,7 +86,7 @@ fn dataframe_to_binned_multiclass(df: &DataFrame, target_col: &str) -> Result<Bi
         .unwrap()
         .i32()
         .unwrap()
-        .into_iter()
+        .iter()
         .map(|v| v.unwrap_or(0) as f32)
         .collect();
 
@@ -119,7 +119,7 @@ fn dataframe_to_binned_multilabel(df: &DataFrame, label_cols: &[String]) -> Resu
             .unwrap()
             .f64()
             .unwrap()
-            .into_iter()
+            .iter()
             .map(|v| v.unwrap_or(0.0))
             .collect();
 

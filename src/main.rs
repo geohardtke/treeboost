@@ -459,7 +459,7 @@ fn main() -> Result<()> {
                 let targets: Vec<f32> = series
                     .cast(&DataType::Float32)?
                     .f32()?
-                    .into_iter()
+                    .iter()
                     .map(|opt| opt.unwrap_or(f32::NAN))
                     .collect();
                 Some(targets)

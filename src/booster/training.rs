@@ -643,7 +643,7 @@ impl GBDTModel {
                         config.learning_rate,
                         &split_finder,
                         config.colsample,
-                        config.seed.wrapping_add(round as u64),
+                        config.seed.wrapping_add(_round as u64),
                     ));
                 }
             }
@@ -670,7 +670,7 @@ impl GBDTModel {
                         config.learning_rate,
                         &split_finder,
                         config.colsample,
-                        config.seed.wrapping_add(round as u64),
+                        config.seed.wrapping_add(_round as u64),
                     ));
                 }
             }

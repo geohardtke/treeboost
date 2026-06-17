@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use pyo3::prelude::*;
 
 use crate::tuner::{
-    ModelFormat, ParamBounds, ParameterSpace, SpacePreset, TunerConfig, TunerPreset,
+    ModelFormat, ParamBounds, ParameterSpace, SpacePreset, TunableParam, TunerConfig, TunerPreset,
 };
 
 use super::enums::{
@@ -162,6 +162,9 @@ impl PyParamBounds {
                     format!("ParamBounds.discrete_step({}, {}, {})", min, max, step)
                 }
             }
+            ParamBounds::Categorical { values } => {
+                format!("ParamBounds.categorical([{}])", values.join(", "))
+            }
         }
     }
 }
@@ -224,13 +227,15 @@ impl PyParameterSpace {
     ///
     /// Returns:
     ///     Self for method chaining
-    fn with_param(&self, name: &str, bounds: &PyParamBounds, center: f32) -> Self {
-        Self {
+    fn with_param(&self, name: &str, bounds: &PyParamBounds, center: f32) -> PyResult<Self> {
+        let param = TunableParam::parse(name)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+        Ok(Self {
             inner: self
                 .inner
                 .clone()
-                .with_param(name, bounds.inner.clone(), center),
-        }
+                .with_param(param, bounds.inner.clone(), center),
+        })
     }
 
     /// Add a continuous parameter
@@ -249,11 +254,13 @@ impl PyParameterSpace {
                 "min must be less than max",
             ));
         }
+        let param = TunableParam::parse(name)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
         Ok(Self {
             inner: self
                 .inner
                 .clone()
-                .with_param(name, ParamBounds::continuous(min, max), center),
+                .with_param(param, ParamBounds::continuous(min, max), center),
         })
     }
 
@@ -278,9 +285,11 @@ impl PyParameterSpace {
                 "min must be less than max",
             ));
         }
+        let param = TunableParam::parse(name)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
         Ok(Self {
             inner: self.inner.clone().with_param(
-                name,
+                param,
                 ParamBounds::log_continuous(min, max),
                 center,
             ),
@@ -303,11 +312,13 @@ impl PyParameterSpace {
                 "min must be less than max",
             ));
         }
+        let param = TunableParam::parse(name)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
         Ok(Self {
             inner: self
                 .inner
                 .clone()
-                .with_param(name, ParamBounds::discrete(min, max), center),
+                .with_param(param, ParamBounds::discrete(min, max), center),
         })
     }
 
@@ -340,9 +351,11 @@ impl PyParameterSpace {
                 "step must be positive",
             ));
         }
+        let param = TunableParam::parse(name)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
         Ok(Self {
             inner: self.inner.clone().with_param(
-                name,
+                param,
                 ParamBounds::discrete_step(min, max, step),
                 center,
             ),
@@ -358,10 +371,12 @@ impl PyParameterSpace {
     ///
     /// Returns:
     ///     Self for method chaining
-    fn without_param(&self, name: &str) -> Self {
-        Self {
-            inner: self.inner.clone().without_param(name),
-        }
+    fn without_param(&self, name: &str) -> PyResult<Self> {
+        let param = TunableParam::parse(name)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+        Ok(Self {
+            inner: self.inner.clone().without_param(param),
+        })
     }
 
     /// Number of parameters in the search space
@@ -377,19 +392,20 @@ impl PyParameterSpace {
 
     /// Get parameter names
     fn param_names(&self) -> Vec<String> {
-        self.inner.param_names()
+        self.inner
+            .param_names()
+            .into_iter()
+            .map(String::from)
+            .collect()
     }
 
     /// Get current centers as a dictionary
     fn centers(&self) -> HashMap<String, f32> {
-        self.inner.centers()
-    }
-
-    /// Validate the parameter space
-    fn validate(&self) -> PyResult<()> {
         self.inner
-            .validate()
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
+            .centers()
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect()
     }
 
     fn __repr__(&self) -> String {

@@ -103,7 +103,7 @@ pub fn apply_timeseries_features(
 
     let group_ids: Vec<u32> = code_series
         .str()?
-        .into_iter()
+        .iter()
         .map(|v| {
             let code = v.unwrap_or("");
             *code_to_id.entry(code.to_string()).or_insert_with(|| {
@@ -120,7 +120,7 @@ pub fn apply_timeseries_features(
         .as_materialized_series()
         .cast(&DataType::Float64)?
         .f64()?
-        .into_iter()
+        .iter()
         .map(|v| v.unwrap_or(0.0))
         .collect();
 
@@ -140,7 +140,7 @@ pub fn apply_timeseries_features(
             .as_materialized_series()
             .cast(&DataType::Float32)?
             .f32()?
-            .into_iter()
+            .iter()
             .map(|v| v.unwrap_or(0.0))
             .collect::<Vec<f32>>();
         columns.push(col);
@@ -282,7 +282,7 @@ pub fn apply_polynomial_features(
             .as_materialized_series()
             .cast(&DataType::Float32)?
             .f32()?
-            .into_iter()
+            .iter()
             .map(|v| v.unwrap_or(0.0))
             .collect::<Vec<f32>>();
         columns.push(col);
@@ -389,7 +389,7 @@ pub fn apply_ratio_features(
             .as_materialized_series()
             .cast(&DataType::Float32)?
             .f32()?
-            .into_iter()
+            .iter()
             .map(|v| v.unwrap_or(0.0))
             .collect::<Vec<f32>>();
         columns.push(col);
@@ -497,7 +497,7 @@ pub fn apply_interaction_features(
             .as_materialized_series()
             .cast(&DataType::Float32)?
             .f32()?
-            .into_iter()
+            .iter()
             .map(|v| v.unwrap_or(0.0))
             .collect::<Vec<f32>>();
         columns.push(col);

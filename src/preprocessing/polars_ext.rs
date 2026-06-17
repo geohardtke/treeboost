@@ -49,7 +49,7 @@ pub fn column_to_f32(column: &Column) -> Result<Vec<f32>, TreeBoostError> {
         .map_err(|e| TreeBoostError::Data(format!("Cannot get f64 ChunkedArray: {}", e)))?;
 
     Ok(ca
-        .into_iter()
+        .iter()
         .map(|opt| opt.map(|v| v as f32).unwrap_or(f32::NAN))
         .collect())
 }
@@ -76,7 +76,7 @@ pub fn column_to_strings(column: &Column) -> Result<Vec<String>, TreeBoostError>
         .map_err(|e| TreeBoostError::Data(format!("Cannot get str ChunkedArray: {}", e)))?;
 
     Ok(ca
-        .into_iter()
+        .iter()
         .map(|opt| opt.unwrap_or("").to_string())
         .collect())
 }

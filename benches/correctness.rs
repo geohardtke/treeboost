@@ -31,12 +31,12 @@ fn generate_regression_data(
     for _ in 0..num_rows {
         let mut row_sum = 0.0;
         for f in 0..num_features {
-            let val: f64 = rng.gen_range(0.0..10.0);
+            let val: f64 = rng.random_range(0.0..10.0);
             features.push(val);
             // Target is weighted sum of features with some noise
             row_sum += val * (f as f64 + 1.0) * 0.1;
         }
-        let noise: f64 = rng.gen_range(-0.5..0.5);
+        let noise: f64 = rng.random_range(-0.5..0.5);
         targets.push(row_sum + noise);
     }
 
@@ -82,6 +82,7 @@ fn to_treeboost_dataset(
             feature_type: FeatureType::Numeric,
             num_bins: (boundaries.len() + 1).min(255) as u8,
             bin_boundaries: boundaries,
+            impute_value: 0.0,
         });
     }
 

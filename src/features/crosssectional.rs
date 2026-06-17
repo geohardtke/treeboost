@@ -104,9 +104,9 @@ pub fn apply_crosssectional_features_with_include(
         let lazy = result.clone().lazy();
 
         // Compute group-wise statistics using window functions (FAST!)
-        let mean_expr = col(col_name).mean().over([col(group_col)]);
-        let std_expr = col(col_name).std(1).over([col(group_col)]);
-        let median_expr = col(col_name).median().over([col(group_col)]);
+        let mean_expr = col(col_name).mean().over([col(group_col)])?;
+        let std_expr = col(col_name).std(1).over([col(group_col)])?;
+        let median_expr = col(col_name).median().over([col(group_col)])?;
 
         // Z-score: (x - mean) / std
         let zscore_expr = when(std_expr.clone().gt(lit(0.0)))
@@ -155,12 +155,12 @@ fn compute_group_ranks(df: &DataFrame, feature_col: &str, group_col: &str) -> Po
                     },
                     None,
                 )
-                .over([col(group_col)])
+                .over([col(group_col)])?
                 .alias("__temp_rank__"),
             // Step 2: Get group size
             col(feature_col)
                 .count()
-                .over([col(group_col)])
+                .over([col(group_col)])?
                 .alias("__group_size__"),
         ])
         .with_columns([
@@ -210,7 +210,7 @@ mod tests {
             .unwrap()
             .f64()
             .unwrap()
-            .into_iter()
+            .iter()
             .take(3)
             .collect::<Vec<_>>();
 

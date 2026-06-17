@@ -156,7 +156,8 @@ impl PyKFoldSplit {
         }
 
         Ok(Self {
-            inner: split_kfold(n_samples, k, seed),
+            inner: split_kfold(n_samples, k, seed)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?,
         })
     }
 

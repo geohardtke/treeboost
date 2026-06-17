@@ -422,7 +422,7 @@ impl ColumnProfile {
         let values: Vec<f64> = column
             .cast(&PolarsDataType::Float64)
             .ok()
-            .and_then(|c| c.f64().ok().map(|ca| ca.into_iter().flatten().collect()))
+            .and_then(|c| c.f64().ok().map(|ca| ca.iter().flatten().collect()))
             .unwrap_or_default();
 
         if values.len() < 3 {
@@ -513,7 +513,7 @@ impl ColumnProfile {
         let mut sample_count = 0;
         let max_samples = 1000;
 
-        for opt_val in ca.into_iter() {
+        for opt_val in ca.iter() {
             if sample_count >= max_samples {
                 break;
             }
@@ -698,7 +698,7 @@ impl DataFrameProfile {
             .map_err(|e| TreeBoostError::Data(format!("Cannot convert target to numeric: {}", e)))?
             .f64()
             .map_err(|e| TreeBoostError::Data(format!("Target column error: {}", e)))?
-            .into_iter()
+            .iter()
             .map(|opt| opt.map(|v| v as f32).unwrap_or(f32::NAN))
             .collect();
 
@@ -1025,7 +1025,7 @@ impl DataFrameProfile {
                     .and_then(|c| {
                         c.i32()
                             .ok()
-                            .map(|ca| ca.into_iter().flatten().map(|v| v as f64).collect())
+                            .map(|ca| ca.iter().flatten().map(|v| v as f64).collect())
                     })
                     .unwrap_or_default()
             }
@@ -1036,7 +1036,7 @@ impl DataFrameProfile {
                     .ok()
                     .and_then(|c| {
                         c.i64().ok().map(|ca| {
-                            ca.into_iter()
+                            ca.iter()
                                 .flatten()
                                 .map(|v| v as f64 / (1_000_000.0 * 86400.0)) // microseconds to days
                                 .collect()

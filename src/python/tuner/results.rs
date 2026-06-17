@@ -229,6 +229,7 @@ fn get_metric_value(trial: &TrialResult, metric: OptimizationMetric) -> f32 {
         OptimizationMetric::ValidationLoss => trial.val_loss,
         OptimizationMetric::F1Score => trial.f1_score.unwrap_or(0.0),
         OptimizationMetric::RocAuc => trial.roc_auc.unwrap_or(0.0) as f32,
+        OptimizationMetric::RankIc => trial.rank_ic.unwrap_or(0.0) as f32,
     }
 }
 

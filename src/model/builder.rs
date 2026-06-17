@@ -1060,7 +1060,7 @@ impl AutoBuilder {
                     let target_f32: Vec<f32> = target_series
                         .cast(&polars::datatypes::DataType::Float32)?
                         .f32()?
-                        .into_iter()
+                        .iter()
                         .map(|v| v.unwrap_or(0.0))
                         .collect();
 

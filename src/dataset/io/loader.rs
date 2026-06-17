@@ -200,7 +200,7 @@ impl DatasetLoader {
         let mut next_idx = 0u16;
 
         let indices: Vec<u16> = str_ca
-            .into_iter()
+            .iter()
             .map(|opt| {
                 opt.map_or(0, |s| {
                     *era_map.entry(s.to_string()).or_insert_with(|| {
@@ -255,7 +255,7 @@ impl DatasetLoader {
             .map_err(|e| TreeBoostError::Data(format!("Failed to cast to f64: {}", e)))?
             .f64()
             .map_err(|e| TreeBoostError::Data(format!("Failed to get f64 chunked: {}", e)))?
-            .into_iter()
+            .iter()
             .map(|opt| Ok(opt.unwrap_or(f64::NAN)))
             .collect()
     }
@@ -267,7 +267,7 @@ impl DatasetLoader {
             .map_err(|e| TreeBoostError::Data(format!("Failed to cast to f32: {}", e)))?
             .f32()
             .map_err(|e| TreeBoostError::Data(format!("Failed to get f32 chunked: {}", e)))?
-            .into_iter()
+            .iter()
             .map(|opt| Ok(opt.unwrap_or(f32::NAN)))
             .collect()
     }
@@ -291,7 +291,7 @@ impl DatasetLoader {
         let mut next_idx = 0u32;
 
         let values: Vec<f64> = str_ca
-            .into_iter()
+            .iter()
             .map(|opt| match opt {
                 Some(s) => {
                     let idx = *mapping.entry(s.to_string()).or_insert_with(|| {

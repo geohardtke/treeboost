@@ -83,7 +83,7 @@ impl PyDatasetLoader {
             .map(|v| v.iter().map(|s| s.as_str()).collect());
 
         let result =
-            py.allow_threads(|| self.inner.load_csv(path, target, feature_refs.as_deref()));
+            py.detach(|| self.inner.load_csv(path, target, feature_refs.as_deref()));
 
         match result {
             Ok(dataset) => Ok(PyBinnedDataset::from(dataset)),
@@ -115,7 +115,7 @@ impl PyDatasetLoader {
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
 
-        let result = py.allow_threads(|| {
+        let result = py.detach(|| {
             self.inner
                 .load_parquet(path, target, feature_refs.as_deref())
         });
@@ -233,7 +233,7 @@ impl PyDatasetLoader {
     ) -> PyResult<PyBinnedDataset> {
         let info_vec: Vec<FeatureInfo> = feature_info.into_iter().map(|fi| fi.into()).collect();
 
-        let result = py.allow_threads(|| self.inner.load_csv_for_prediction(path, &info_vec));
+        let result = py.detach(|| self.inner.load_csv_for_prediction(path, &info_vec));
 
         match result {
             Ok(dataset) => Ok(PyBinnedDataset::from(dataset)),
@@ -262,7 +262,7 @@ impl PyDatasetLoader {
     ) -> PyResult<PyBinnedDataset> {
         let info_vec: Vec<FeatureInfo> = feature_info.into_iter().map(|fi| fi.into()).collect();
 
-        let result = py.allow_threads(|| self.inner.load_parquet_for_prediction(path, &info_vec));
+        let result = py.detach(|| self.inner.load_parquet_for_prediction(path, &info_vec));
 
         match result {
             Ok(dataset) => Ok(PyBinnedDataset::from(dataset)),

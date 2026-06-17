@@ -34,12 +34,12 @@ fn generate_regression_data(
     for _ in 0..num_rows {
         let mut row_sum = 0.0;
         for f in 0..num_features {
-            let val: f64 = rng.gen_range(0.0..10.0);
+            let val: f64 = rng.random_range(0.0..10.0);
             features.push(val);
             // Target is weighted sum of features with some noise
             row_sum += val * (f as f64 + 1.0) * 0.1;
         }
-        let noise: f64 = rng.gen_range(-1.0..1.0);
+        let noise: f64 = rng.random_range(-1.0..1.0);
         targets.push(row_sum + noise);
     }
 

@@ -148,7 +148,7 @@ fn apply_scaler_impl<S: Scaler + Clone>(
             .as_materialized_series()
             .cast(&DataType::Float32)?
             .f32()?
-            .into_iter()
+            .iter()
             .map(|v| v.unwrap_or(0.0))
             .collect::<Vec<f32>>();
         columns.push(col);
@@ -229,7 +229,7 @@ pub fn apply_frequency_encoder(
         let str_series = col.as_materialized_series().str()?;
 
         // Collect categories
-        let categories: Vec<&str> = str_series.into_iter().map(|v| v.unwrap_or("")).collect();
+        let categories: Vec<&str> = str_series.iter().map(|v| v.unwrap_or("")).collect();
 
         // Fit if not fitted
         if !encoder.is_fitted() {
@@ -284,7 +284,7 @@ pub fn apply_label_encoder(
         let str_series = col.as_materialized_series().str()?;
 
         // Collect categories
-        let categories: Vec<&str> = str_series.into_iter().map(|v| v.unwrap_or("")).collect();
+        let categories: Vec<&str> = str_series.iter().map(|v| v.unwrap_or("")).collect();
 
         // Fit if not fitted
         if !encoder.is_fitted() {
@@ -340,7 +340,7 @@ pub fn apply_onehot_encoder(
         let str_series = col.as_materialized_series().str()?;
 
         // Collect categories
-        let categories: Vec<&str> = str_series.into_iter().map(|v| v.unwrap_or("")).collect();
+        let categories: Vec<&str> = str_series.iter().map(|v| v.unwrap_or("")).collect();
 
         // Fit if not fitted
         if !encoder.is_fitted() {
@@ -443,7 +443,7 @@ pub fn apply_simple_imputer(
             .as_materialized_series()
             .cast(&DataType::Float32)?
             .f32()?
-            .into_iter()
+            .iter()
             .map(|v| v.unwrap_or(f32::NAN))
             .collect::<Vec<f32>>();
         columns.push(col);

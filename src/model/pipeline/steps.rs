@@ -452,7 +452,7 @@ impl PipelineStep for EngineerFeaturesStep {
                 let str_chunked = str_series.str()?;
 
                 let mapped: Vec<f64> = str_chunked
-                    .into_iter()
+                    .iter()
                     .map(|opt| lut.get(opt.unwrap_or("")))
                     .collect();
 
@@ -469,7 +469,7 @@ impl PipelineStep for EngineerFeaturesStep {
                 let two_pi = 2.0 * std::f64::consts::PI;
 
                 let transformed: Vec<f64> = values
-                    .into_iter()
+                    .iter()
                     .map(|opt| {
                         let x = opt.unwrap_or(0.0);
                         let angle = two_pi * x / trig.period;
@@ -695,7 +695,7 @@ impl FeatureExpr {
                     let series = df.column(name)?;
                     let casted = series.cast(&DataType::Float64)?;
                     let values = casted.f64()?;
-                    values.into_iter().map(|v| v.unwrap_or(0.0)).collect()
+                    values.iter().map(|v| v.unwrap_or(0.0)).collect()
                 }
                 FlatOp::Const(v) => vec![*v; n],
                 FlatOp::Add(l, r) => {
@@ -730,7 +730,7 @@ impl FeatureExpr {
                     let str_series = series.cast(&DataType::String)?;
                     let str_chunked = str_series.str()?;
                     str_chunked
-                        .into_iter()
+                        .iter()
                         .map(|opt| {
                             let cat = opt.unwrap_or("");
                             mapping
@@ -747,7 +747,7 @@ impl FeatureExpr {
                     let values = casted.f64()?;
                     let two_pi = 2.0 * std::f64::consts::PI;
                     values
-                        .into_iter()
+                        .iter()
                         .map(|v| (two_pi * v.unwrap_or(0.0) / period).sin())
                         .collect()
                 }
@@ -757,7 +757,7 @@ impl FeatureExpr {
                     let values = casted.f64()?;
                     let two_pi = 2.0 * std::f64::consts::PI;
                     values
-                        .into_iter()
+                        .iter()
                         .map(|v| (two_pi * v.unwrap_or(0.0) / period).cos())
                         .collect()
                 }
@@ -766,7 +766,7 @@ impl FeatureExpr {
                     let casted = series.cast(&DataType::Float64)?;
                     let values = casted.f64()?;
                     values
-                        .into_iter()
+                        .iter()
                         .map(|v| (1.0 + v.unwrap_or(0.0)).ln())
                         .collect()
                 }
@@ -775,7 +775,7 @@ impl FeatureExpr {
                     let casted = series.cast(&DataType::Float64)?;
                     let values = casted.f64()?;
                     values
-                        .into_iter()
+                        .iter()
                         .map(|v| {
                             let x = v.unwrap_or(0.0);
                             x * x
@@ -787,7 +787,7 @@ impl FeatureExpr {
                     let casted = series.cast(&DataType::Float64)?;
                     let values = casted.f64()?;
                     values
-                        .into_iter()
+                        .iter()
                         .map(|v| v.unwrap_or(0.0).max(0.0).sqrt())
                         .collect()
                 }
@@ -796,7 +796,7 @@ impl FeatureExpr {
                     let casted = series.cast(&DataType::Float64)?;
                     let values = casted.f64()?;
                     values
-                        .into_iter()
+                        .iter()
                         .map(|v| v.unwrap_or(0.0).powf(*power))
                         .collect()
                 }
@@ -1272,7 +1272,7 @@ impl EncodeCategoricalsStep {
         let str_series = series.cast(&DataType::String)?;
         let str_chunked = str_series.str()?;
         Ok(str_chunked
-            .into_iter()
+            .iter()
             .map(|opt| opt.unwrap_or("").to_string())
             .collect())
     }
@@ -1512,7 +1512,7 @@ impl BinNumericFeaturesStep {
         series
             .cast(&DataType::Float64)?
             .f64()?
-            .into_iter()
+            .iter()
             .map(|opt| Ok(opt.unwrap_or(f64::NAN)))
             .collect()
     }

@@ -190,7 +190,7 @@ impl ColumnType {
         match series.dtype() {
             DataType::Int32 => {
                 if let Ok(ca) = series.i32() {
-                    let vals: Vec<Option<i32>> = ca.into_iter().collect();
+                    let vals: Vec<Option<i32>> = ca.iter().collect();
                     for i in 1..vals.len() {
                         if let (Some(a), Some(b)) = (vals[i - 1], vals[i]) {
                             if b <= a {
@@ -205,7 +205,7 @@ impl ColumnType {
             }
             DataType::Int64 => {
                 if let Ok(ca) = series.i64() {
-                    let vals: Vec<Option<i64>> = ca.into_iter().collect();
+                    let vals: Vec<Option<i64>> = ca.iter().collect();
                     for i in 1..vals.len() {
                         if let (Some(a), Some(b)) = (vals[i - 1], vals[i]) {
                             if b <= a {
@@ -220,7 +220,7 @@ impl ColumnType {
             }
             DataType::UInt32 => {
                 if let Ok(ca) = series.u32() {
-                    let vals: Vec<Option<u32>> = ca.into_iter().collect();
+                    let vals: Vec<Option<u32>> = ca.iter().collect();
                     for i in 1..vals.len() {
                         if let (Some(a), Some(b)) = (vals[i - 1], vals[i]) {
                             if b <= a {

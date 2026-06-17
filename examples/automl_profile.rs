@@ -7,7 +7,7 @@
 ///!   cargo run --release --example automl_profile -- [--sample]
 use polars::prelude::*;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::time::Instant;
 use treeboost::analysis::{AnalysisConfig, DatasetAnalysis, PanelDataInfo};
 use treeboost::dataset::{BinnedDataset, DatasetLoader};
@@ -70,7 +70,7 @@ fn run_profile(num_rows: usize) -> Result<()> {
     let unique_dates: Vec<i64> = dates_col
         .as_materialized_series()
         .i64()?
-        .into_iter()
+        .iter()
         .filter_map(|v| v)
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
@@ -191,7 +191,7 @@ fn profile_analysis_internals(dataset: &BinnedDataset, config: &AnalysisConfig) 
         indices.push(i);
     }
     for i in max_sample_rows..num_rows {
-        let j = rng.gen_range(0..=i);
+        let j = rng.random_range(0..=i);
         if j < max_sample_rows {
             indices[j] = i;
         }
@@ -334,13 +334,13 @@ fn generate_synthetic_panel_data(num_rows: usize) -> Result<DataFrame> {
 
     // Add features
     for f_idx in 0..num_features {
-        let values: Vec<f64> = (0..actual_rows).map(|_| rng.gen::<f64>() * 100.0).collect();
+        let values: Vec<f64> = (0..actual_rows).map(|_| rng.random::<f64>() * 100.0).collect();
         all_columns.push(Column::new(format!("f_{}", f_idx).into(), values));
     }
 
     // Generate and add target
     let targets: Vec<f32> = (0..actual_rows)
-        .map(|_| rng.gen::<f32>() * 2.0 - 1.0) // Returns in [-1, 1]
+        .map(|_| rng.random::<f32>() * 2.0 - 1.0) // Returns in [-1, 1]
         .collect();
     all_columns.push(Column::new("y".into(), targets));
 

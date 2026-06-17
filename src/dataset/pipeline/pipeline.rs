@@ -740,7 +740,7 @@ impl DataPipeline {
             .map_err(|e| TreeBoostError::Data(format!("Failed to cast to f64: {}", e)))?
             .f64()
             .map_err(|e| TreeBoostError::Data(format!("Failed to get f64 chunked: {}", e)))?
-            .into_iter()
+            .iter()
             .map(|opt| Ok(opt.unwrap_or(f64::NAN)))
             .collect()
     }
@@ -756,7 +756,7 @@ impl DataPipeline {
             .map_err(|e| TreeBoostError::Data(format!("Failed to get str chunked: {}", e)))?;
 
         Ok(str_chunked
-            .into_iter()
+            .iter()
             .map(|opt| opt.unwrap_or("").to_string())
             .collect())
     }
@@ -785,7 +785,7 @@ impl DataPipeline {
         let mut next_idx = 0u16;
 
         let indices: Vec<u16> = str_ca
-            .into_iter()
+            .iter()
             .map(|opt| {
                 opt.map_or(0, |s| {
                     *era_map.entry(s.to_string()).or_insert_with(|| {

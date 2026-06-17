@@ -121,6 +121,16 @@ impl PyOptimizationMetric {
         }
     }
 
+    /// Use Rank IC (higher is better)
+    ///
+    /// Spearman rank correlation between predictions and targets. Regression only.
+    #[staticmethod]
+    fn rank_ic() -> Self {
+        Self {
+            inner: OptimizationMetric::RankIc,
+        }
+    }
+
     /// Check if higher values are better for this metric
     #[getter]
     fn higher_is_better(&self) -> bool {
@@ -138,6 +148,7 @@ impl PyOptimizationMetric {
             OptimizationMetric::ValidationLoss => "OptimizationMetric.val_loss()",
             OptimizationMetric::F1Score => "OptimizationMetric.f1_score()",
             OptimizationMetric::RocAuc => "OptimizationMetric.roc_auc()",
+            OptimizationMetric::RankIc => "OptimizationMetric.rank_ic()",
         }
     }
 }

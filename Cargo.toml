@@ -46,11 +46,12 @@ path = "src/main.rs"
 
 [dependencies]
 # Data processing - columnar storage with lazy evaluation
-polars = { version = "0.53", features = [
+polars = { version = "0.54", features = [
   "parquet",
   "lazy",
   "dtype-full",
   "rank",
+  "strings",
 ] }
 
 # Parallelism - work-stealing scheduler
